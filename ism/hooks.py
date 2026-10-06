@@ -43,7 +43,7 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {"Quotation": "public/js/quotation.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -138,13 +138,16 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-after_migrate = ["ism.setup.sync_workspace"]
+after_migrate = ["ism.setup.after_migrate"]
 
 doc_events = {
 	"DocType": {
 		"after_insert": "ism.setup.sync_doctype_to_workspace",
 		"on_trash": "ism.setup.sync_doctype_to_workspace",
-	}
+	},
+	"Quotation": {
+		"validate": "ism.api.quotation.validate_quotation",
+	},
 }
 
 

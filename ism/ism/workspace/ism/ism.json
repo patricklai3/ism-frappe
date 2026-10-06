@@ -143,12 +143,42 @@
    "hidden": 0,
    "is_query_report": 0,
    "label": "ISM DocTypes",
-   "link_count": 0,
+   "link_count": 3,
    "onboard": 0,
    "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Repair Vehicle",
+   "link_count": 0,
+   "link_to": "Repair Vehicle",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Inspection Template",
+   "link_count": 0,
+   "link_to": "Inspection Template",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Vehicle Check-in",
+   "link_count": 0,
+   "link_to": "Vehicle Check-in",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
   }
  ],
- "modified": "2026-10-05 23:08:14.623712",
+ "modified": "2026-10-06 14:40:55.531695",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM",

@@ -1,0 +1,108 @@
+# Copyright (c) 2026, patricklai3 and contributors
+# For license information, please see license.txt
+
+import frappe
+from frappe.model.document import Document
+from frappe.model.mapper import get_mapped_doc
+
+
+class VehicleCheckin(Document):
+	def validate(self):
+		self.validate_mileage()
+		self.handle_status_transition()
+
+	def on_update(self):
+		self.link_vehicle_to_customer()
+
+	def validate_mileage(self):
+		if self.intake_mileage is not None and self.intake_mileage < 0:
+			frappe.throw(frappe._("Intake mileage cannot be negative."))
+
+	def handle_status_transition(self):
+		if self.status == "Checked Out" and not self.checkout_date:
+			self.checkout_date = frappe.utils.now_datetime()
+		elif self.status == "Checked In":
+			self.checkout_date = None
+
+	def link_vehicle_to_customer(self):
+		"""Link check-in customer to vehicle if not already associated."""
+		if self.vehicle and self.customer and frappe.db.exists("Repair Vehicle", self.vehicle):
+			vehicle_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
+			existing_customers = {row.customer for row in (vehicle_doc.customers or [])}
+			if vehicle_doc.customer:
+				existing_customers.add(vehicle_doc.customer)
+
+			if self.customer not in existing_customers:
+				vehicle_doc.add_customer(self.customer)
+
+
+@frappe.whitelist()
+def get_vehicle_customers(vehicle: str):
+	"""Return list of all customers linked to this vehicle."""
+	if not vehicle or not frappe.db.exists("Repair Vehicle", vehicle):
+		return []
+
+	vehicle_doc = frappe.get_doc("Repair Vehicle", vehicle)
+	customers = []
+	seen = set()
+	if vehicle_doc.customer:
+		customers.append({
+			"customer": vehicle_doc.customer,
+			"customer_name": frappe.db.get_value("Customer", vehicle_doc.customer, "customer_name"),
+			"is_primary": 1,
+		})
+		seen.add(vehicle_doc.customer)
+
+	for row in (vehicle_doc.customers or []):
+		if row.customer not in seen:
+			customers.append({
+				"customer": row.customer,
+				"customer_name": row.customer_name or frappe.db.get_value("Customer", row.customer, "customer_name"),
+				"is_primary": row.is_primary,
+				"relationship": row.relationship,
+			})
+			seen.add(row.customer)
+
+	return customers
+
+
+@frappe.whitelist()
+def check_out_vehicle(check_in_name: str):
+	"""Mark vehicle check-in as checked out."""
+	doc = frappe.get_doc("Vehicle Check-in", check_in_name)
+	doc.status = "Checked Out"
+	doc.checkout_date = frappe.utils.now_datetime()
+	doc.save()
+	return doc
+
+
+@frappe.whitelist()
+def make_quotation(source_name: str, target_doc=None):
+	"""Create a draft Quotation from a Vehicle Check-in document."""
+	def set_missing_values(source, target):
+		target.quotation_to = "Customer"
+		target.party_name = source.customer
+		target.custom_vehicle = source.vehicle
+		target.custom_vehicle_check_in = source.name
+		target.custom_odometer_in = source.intake_mileage
+		target.custom_customer_concern = source.customer_concern
+
+	doc = get_mapped_doc(
+		"Vehicle Check-in",
+		source_name,
+		{
+			"Vehicle Check-in": {
+				"doctype": "Quotation",
+				"field_map": {
+					"customer": "party_name",
+					"vehicle": "custom_vehicle",
+					"name": "custom_vehicle_check_in",
+					"intake_mileage": "custom_odometer_in",
+					"customer_concern": "custom_customer_concern",
+				},
+			}
+		},
+		target_doc,
+		set_missing_values,
+	)
+	return doc
