@@ -138,13 +138,15 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+after_migrate = ["ism.setup.sync_workspace"]
+
+doc_events = {
+	"DocType": {
+		"after_insert": "ism.setup.sync_doctype_to_workspace",
+		"on_trash": "ism.setup.sync_doctype_to_workspace",
+	}
+}
+
 
 # Scheduled Tasks
 # ---------------
