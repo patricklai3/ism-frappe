@@ -1,7 +1,7 @@
 {
  "app": "ism",
  "charts": [],
- "content": "[{\"id\":\"hdr_sales\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Automotive Repair Workflow</b></span>\",\"col\":12}},{\"id\":\"card_stage1\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 1: Intake & Estimate\",\"col\":4}},{\"id\":\"card_handoff1\",\"type\":\"card\",\"data\":{\"card_name\":\"Handoff 1: Estimate Authorization\",\"col\":4}},{\"id\":\"card_stage2\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 2: Repair Order Execution\",\"col\":4}},{\"id\":\"card_handoff2\",\"type\":\"card\",\"data\":{\"card_name\":\"Handoff 2: Work Completion & Billing Audit\",\"col\":4}},{\"id\":\"card_stage3\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 3: Invoicing & Vehicle Release\",\"col\":4}},{\"id\":\"card_postservice\",\"type\":\"card\",\"data\":{\"card_name\":\"Post-Service: Retention & Reminders\",\"col\":4}}]",
+ "content": "[{\"id\":\"hdr_shortcuts\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Your Shortcuts</b></span>\",\"col\":12}},{\"id\":\"sc_checkin\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Vehicle Check-in\",\"col\":4}},{\"id\":\"sc_repair_veh\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Repair Vehicle\",\"col\":4}},{\"id\":\"sc_quotation\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Quotation\",\"col\":4}},{\"id\":\"sc_sales_order\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Sales Order\",\"col\":4}},{\"id\":\"sc_sales_invoice\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Sales Invoice\",\"col\":4}},{\"id\":\"sc_payment_entry\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Payment Entry\",\"col\":4}},{\"id\":\"spc_stages\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"hdr_stages\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Repair Workflow Stages</b></span>\",\"col\":12}},{\"id\":\"card_stage1\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 1: Intake & Estimate\",\"col\":4}},{\"id\":\"card_stage2\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 2: Repair Order Execution\",\"col\":4}},{\"id\":\"card_stage3\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 3: Invoicing & Vehicle Release\",\"col\":4}}]",
  "creation": "2026-10-07 07:15:29.701707",
  "custom_blocks": [],
  "docstatus": 0,
@@ -80,15 +80,6 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Handoff 1: Estimate Authorization",
-   "link_count": 0,
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Card Break"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
    "label": "Stage 2: Repair Order Execution",
    "link_count": 2,
    "link_type": "DocType",
@@ -116,15 +107,6 @@
    "link_type": "DocType",
    "onboard": 1,
    "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Handoff 2: Work Completion & Billing Audit",
-   "link_count": 0,
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Card Break"
   },
   {
    "hidden": 0,
@@ -178,7 +160,7 @@
    "type": "Card Break"
   }
  ],
- "modified": "2026-10-07 07:16:09.912231",
+ "modified": "2026-10-07 07:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM",

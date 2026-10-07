@@ -95,17 +95,6 @@
    "icon": "",
    "indent": 0,
    "keep_closed": 0,
-   "label": "Handoff 1: Estimate Authorization",
-   "link_type": "DocType",
-   "show_arrow": 0,
-   "type": "Section Break"
-  },
-  {
-   "child": 0,
-   "collapsible": 1,
-   "icon": "",
-   "indent": 0,
-   "keep_closed": 0,
    "label": "Stage 2: Repair Order Execution",
    "link_type": "DocType",
    "show_arrow": 0,
@@ -134,17 +123,6 @@
    "link_type": "DocType",
    "show_arrow": 0,
    "type": "Link"
-  },
-  {
-   "child": 0,
-   "collapsible": 1,
-   "icon": "",
-   "indent": 0,
-   "keep_closed": 0,
-   "label": "Handoff 2: Work Completion & Billing Audit",
-   "link_type": "DocType",
-   "show_arrow": 0,
-   "type": "Section Break"
   },
   {
    "child": 0,
@@ -205,7 +183,7 @@
    "type": "Section Break"
   }
  ],
- "modified": "2026-10-07 07:16:10.174733",
+ "modified": "2026-10-07 07:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM",
