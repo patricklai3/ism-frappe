@@ -209,6 +209,7 @@ def get_public_quote_approval(token: str) -> dict:
 			"signature_image": j.signature_image,
 			"is_supplement": cint(j.is_supplement),
 			"items": linked_items,
+			"line_items": linked_items,
 		})
 
 	settings = frappe.get_single("ISM Settings")

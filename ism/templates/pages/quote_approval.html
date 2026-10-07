@@ -201,7 +201,8 @@ canvas#sig-canvas {
 							</div>
 						</div>
 						<div class="job-body">
-							{% if job.items %}
+							{% set job_items = job.line_items or job['items'] %}
+							{% if job_items %}
 							<table class="table table-sm table-borderless mb-3">
 								<thead>
 									<tr class="text-muted small">
@@ -212,7 +213,7 @@ canvas#sig-canvas {
 									</tr>
 								</thead>
 								<tbody>
-									{% for it in job.items %}
+									{% for it in job_items %}
 									<tr>
 										<td>{{ it.item_name or it.item_code }}</td>
 										<td class="text-center">{{ it.qty }}</td>
