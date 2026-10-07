@@ -4,7 +4,8 @@ param (
 
 $ErrorActionPreference = "Stop"
 
-$WindowsSource = "/mnt/d/ism/"
+$RootDir = (Get-Item "$PSScriptRoot\..").FullName.Replace('\', '/')
+$WindowsSource = (wsl wslpath -u $RootDir).Trim() + "/"
 $WslDestination = "/home/real2/projects/.project/frappe_docker/development/frappe-bench/apps/ism/"
 
 $Excludes = @(

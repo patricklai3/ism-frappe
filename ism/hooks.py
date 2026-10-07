@@ -43,7 +43,10 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-doctype_js = {"Quotation": "public/js/quotation.js"}
+doctype_js = {
+	"Quotation": "public/js/quotation.js",
+	"Sales Order": "public/js/sales_order.js",
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -146,7 +149,15 @@ doc_events = {
 		"on_trash": "ism.setup.sync_doctype_to_workspace",
 	},
 	"Quotation": {
+		"before_validate": "ism.api.quotation.before_validate_quotation",
 		"validate": "ism.api.quotation.validate_quotation",
+	},
+	"Sales Order": {
+		"validate": "ism.api.sales_order.validate_sales_order",
+	},
+	"Sales Invoice": {
+		"validate": "ism.api.sales_invoice.validate_sales_invoice",
+		"before_submit": "ism.api.sales_invoice.validate_sales_invoice_authorization",
 	},
 }
 
@@ -187,10 +198,10 @@ doc_events = {
 
 # Overriding Methods
 # ------------------------------
-#
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "ism.event.get_events"
-# }
+
+override_whitelisted_methods = {
+	"erpnext.selling.doctype.quotation.quotation.make_sales_order": "ism.api.quotation.make_sales_order"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

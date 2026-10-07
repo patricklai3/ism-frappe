@@ -29,7 +29,9 @@
   "production_sequence",
   "cb_hw",
   "autopilot_hardware",
-  "manufactured_month"
+  "manufactured_month",
+  "sb_deferred_services",
+  "deferred_services"
  ],
  "fields": [
   {
@@ -173,6 +175,17 @@
    "fieldname": "manufactured_month",
    "fieldtype": "Data",
    "label": "Manufactured Month"
+  },
+  {
+   "fieldname": "sb_deferred_services",
+   "fieldtype": "Section Break",
+   "label": "Deferred Services & Recommendations"
+  },
+  {
+   "fieldname": "deferred_services",
+   "fieldtype": "Table",
+   "label": "Deferred Services",
+   "options": "Vehicle Deferred Service"
   }
  ],
  "grid_page_length": 50,

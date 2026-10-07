@@ -1,0 +1,437 @@
+{% extends "templates/web.html" %}
+
+{% block header %}
+<style>
+.quote-card {
+	background: #fff;
+	border-radius: 8px;
+	box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+	margin-bottom: 20px;
+	overflow: hidden;
+	border: 1px solid #e2e8f0;
+}
+.quote-header {
+	background: #1a202c;
+	color: #fff;
+	padding: 20px;
+}
+.job-card {
+	border: 1px solid #cbd5e0;
+	border-radius: 6px;
+	margin-bottom: 16px;
+	background: #fff;
+	transition: border-color 0.2s;
+}
+.job-card.is-approved {
+	border-left: 6px solid #38a169;
+}
+.job-card.is-declined {
+	border-left: 6px solid #e53e3e;
+	opacity: 0.75;
+}
+.job-header {
+	padding: 12px 16px;
+	background: #f7fafc;
+	border-bottom: 1px solid #edf2f7;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+.job-body {
+	padding: 16px;
+}
+.btn-toggle-approve.active {
+	background-color: #38a169 !important;
+	border-color: #38a169 !important;
+	color: #fff !important;
+}
+.btn-toggle-decline.active {
+	background-color: #e53e3e !important;
+	border-color: #e53e3e !important;
+	color: #fff !important;
+}
+.sig-canvas-container {
+	border: 2px dashed #cbd5e0;
+	border-radius: 6px;
+	background: #fff;
+	position: relative;
+	touch-action: none;
+}
+canvas#sig-canvas {
+	width: 100%;
+	height: 160px;
+	display: block;
+}
+.badge-category {
+	font-size: 0.75rem;
+	padding: 3px 8px;
+	border-radius: 12px;
+	background: #edf2f7;
+	color: #4a5568;
+}
+</style>
+{% endblock %}
+
+{% block page_content %}
+<div class="container py-4" style="max-width: 800px;">
+	{% if not approval_data.valid %}
+		<div class="alert alert-danger text-center p-4">
+			<h4><i class="fa fa-exclamation-triangle"></i> {{ _("Authorization Link Unavailable") }}</h4>
+			<p class="mb-0">{{ approval_data.error or _("This estimate link is invalid or has expired.") }}</p>
+		</div>
+	{% elif approval_data.already_submitted %}
+		<!-- Submitted Confirmation View -->
+		<div class="quote-card">
+			<div class="quote-header text-center">
+				<h3 class="text-white mb-1">{{ _("Estimate Authorization Confirmed") }}</h3>
+				<p class="text-muted mb-0">{{ approval_data.company.company_name or "" }}</p>
+			</div>
+			<div class="p-4">
+				<div class="alert alert-success text-center">
+					<i class="fa fa-check-circle fa-2x mb-2"></i>
+					<h4>{{ _("Authorization Successfully Recorded") }}</h4>
+					<p class="mb-0">{{ _("Your repair choices have been confirmed and transmitted to the service department.") }}</p>
+				</div>
+
+				<div class="row mb-3">
+					<div class="col-sm-6">
+						<h6>{{ _("Vehicle") }}</h6>
+						<p class="mb-1"><b>{{ approval_data.vehicle.model_year or "" }} {{ approval_data.vehicle.model or "" }}</b></p>
+						<p class="text-muted small">{{ _("Plate") }}: {{ approval_data.vehicle.license_plate or _("N/A") }} | {{ _("VIN") }}: {{ approval_data.vehicle.vin or _("N/A") }}</p>
+					</div>
+					<div class="col-sm-6 text-sm-right">
+						<h6>{{ _("Estimate Reference") }}</h6>
+						<p class="mb-1"><b>{{ approval_data.quotation.name }}</b></p>
+						<p class="text-muted small">{{ approval_data.quotation.transaction_date }}</p>
+					</div>
+				</div>
+
+				<h5>{{ _("Authorized Operations") }}</h5>
+				<table class="table table-bordered">
+					<thead>
+						<tr>
+							<th>{{ _("Operation") }}</th>
+							<th>{{ _("Decision") }}</th>
+							<th class="text-right">{{ _("Authorized Amount") }}</th>
+						</tr>
+					</thead>
+					<tbody>
+						{% for job in approval_data.jobs %}
+						<tr>
+							<td>
+								<b>{{ job.job_title }}</b>
+								{% if job.is_supplement %}<span class="badge badge-info ml-1">{{ _("Supplement") }}</span>{% endif %}
+							</td>
+							<td>
+								{% if job.status == 'Approved' %}
+									<span class="badge badge-success">{{ _("Approved") }}</span>
+								{% else %}
+									<span class="badge badge-secondary">{{ _("Declined") }}</span>
+								{% endif %}
+							</td>
+							<td class="text-right">
+								{% if job.status == 'Approved' %}
+									${{ "{:,.2f}".format(job.authorized_amount or job.estimated_total) }}
+								{% else %}
+									<span class="text-muted">{{ _("Deferred") }}</span>
+								{% endif %}
+							</td>
+						</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+
+				{% if approval_data.jobs and approval_data.jobs[0].signature_image %}
+				<div class="mt-4 border-top pt-3">
+					<h6>{{ _("Signature on File") }}:</h6>
+					<img src="{{ approval_data.jobs[0].signature_image }}" alt="Signature" style="max-height: 80px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px;">
+					<p class="small text-muted mt-1">{{ _("Authorized by") }}: {{ approval_data.jobs[0].authorized_by }} ({{ approval_data.jobs[0].authorized_at }})</p>
+				</div>
+				{% endif %}
+			</div>
+		</div>
+	{% else %}
+		<!-- Active Authorization Form -->
+		<div class="quote-card">
+			<div class="quote-header">
+				<div class="d-flex justify-content-between align-items-center">
+					<div>
+						<h3 class="text-white mb-1">{{ approval_data.company.company_name or _("Automotive Repair Estimate") }}</h3>
+						<p class="text-light small mb-0">{{ _("Estimate") }} #{{ approval_data.quotation.name }} &bull; {{ approval_data.quotation.transaction_date }}</p>
+					</div>
+					{% if approval_data.quotation.is_supplement %}
+					<span class="badge badge-warning p-2">{{ _("Secondary Repair Supplement") }}</span>
+					{% endif %}
+				</div>
+			</div>
+
+			<div class="p-4 bg-light border-bottom">
+				<div class="row">
+					<div class="col-md-6 mb-2">
+						<span class="text-muted small">{{ _("VEHICLE") }}</span>
+						<h5 class="mb-0">{{ approval_data.vehicle.model_year or "" }} {{ approval_data.vehicle.model or _("Vehicle") }}</h5>
+						<span class="small text-muted">{{ _("Plate") }}: {{ approval_data.vehicle.license_plate or _("N/A") }} &bull; {{ _("VIN") }}: {{ approval_data.vehicle.vin or _("N/A") }}</span>
+					</div>
+					<div class="col-md-6 mb-2 text-md-right">
+						<span class="text-muted small">{{ _("CUSTOMER") }}</span>
+						<h5 class="mb-0">{{ approval_data.quotation.customer_name }}</h5>
+						{% if approval_data.quotation.odometer_in %}
+						<span class="small text-muted">{{ _("Intake Mileage") }}: {{ approval_data.quotation.odometer_in }}</span>
+						{% endif %}
+					</div>
+				</div>
+			</div>
+
+			<div class="p-4">
+				<p class="lead mb-4">{{ _("Please review each recommended repair operation below. Select Approve or Decline for each item.") }}</p>
+
+				<form id="approval-form">
+					{% for job in approval_data.jobs %}
+					<div class="job-card is-approved" id="job-card-{{ loop.index }}" data-job-id="{{ job.name }}" data-amount="{{ job.estimated_total }}">
+						<div class="job-header">
+							<div>
+								<span class="badge-category mr-2">{{ job.job_category }}</span>
+								<b class="h6 mb-0">{{ job.job_title }}</b>
+								{% if job.is_supplement %}
+								<span class="badge badge-info ml-1">{{ _("Supplement") }}</span>
+								{% endif %}
+							</div>
+							<div class="text-right">
+								<span class="h5 mb-0 text-dark font-weight-bold">${{ "{:,.2f}".format(job.estimated_total) }}</span>
+							</div>
+						</div>
+						<div class="job-body">
+							{% if job.items %}
+							<table class="table table-sm table-borderless mb-3">
+								<thead>
+									<tr class="text-muted small">
+										<th>{{ _("Item / Operation") }}</th>
+										<th class="text-center">{{ _("Qty") }}</th>
+										<th class="text-right">{{ _("Rate") }}</th>
+										<th class="text-right">{{ _("Total") }}</th>
+									</tr>
+								</thead>
+								<tbody>
+									{% for it in job.items %}
+									<tr>
+										<td>{{ it.item_name or it.item_code }}</td>
+										<td class="text-center">{{ it.qty }}</td>
+										<td class="text-right">${{ "{:,.2f}".format(it.rate) }}</td>
+										<td class="text-right">${{ "{:,.2f}".format(it.amount) }}</td>
+									</tr>
+									{% endfor %}
+								</tbody>
+							</table>
+							{% endif %}
+
+							<div class="d-flex justify-content-end align-items-center mt-2 pt-2 border-top">
+								<span class="mr-3 small text-muted font-weight-bold">{{ _("Your Decision:") }}</span>
+								<div class="btn-group btn-group-toggle" data-toggle="buttons">
+									<label class="btn btn-sm btn-outline-success btn-toggle-approve active" onclick="setJobDecision('{{ loop.index }}', 'Approved')">
+										<input type="radio" name="decision_{{ job.name }}" value="Approved" checked> <i class="fa fa-check"></i> {{ _("Approve") }}
+									</label>
+									<label class="btn btn-sm btn-outline-danger btn-toggle-decline" onclick="setJobDecision('{{ loop.index }}', 'Declined')">
+										<input type="radio" name="decision_{{ job.name }}" value="Declined"> <i class="fa fa-times"></i> {{ _("Decline") }}
+									</label>
+								</div>
+							</div>
+						</div>
+					</div>
+					{% endfor %}
+
+					<!-- Summary Box -->
+					<div class="card bg-light border-0 mb-4 p-3">
+						<div class="d-flex justify-content-between align-items-center">
+							<h5 class="mb-0">{{ _("Total Authorized Amount:") }}</h5>
+							<h3 class="mb-0 text-success font-weight-bold" id="total-authorized-display">$0.00</h3>
+						</div>
+						<small class="text-muted text-right mt-1">{{ _("Plus applicable sales taxes and shop fees upon final invoicing.") }}</small>
+					</div>
+
+					<!-- Customer Signature Section -->
+					<div class="card p-3 mb-4">
+						<h5>{{ _("Authorization & Signature") }}</h5>
+						<div class="form-group">
+							<label for="signer-name">{{ _("Authorized Customer Full Name") }} <span class="text-danger">*</span></label>
+							<input type="text" class="form-control" id="signer-name" value="{{ (approval_data.quotation.customer_name or '') | escape }}" required>
+						</div>
+
+						<div class="form-group mb-2">
+							<label>{{ _("Draw Your Signature with Finger or Stylus") }} <span class="text-danger">*</span></label>
+							<div class="sig-canvas-container">
+								<canvas id="sig-canvas" width="700" height="160"></canvas>
+							</div>
+							<button type="button" class="btn btn-sm btn-link text-muted pl-0" id="clear-signature">
+								<i class="fa fa-eraser"></i> {{ _("Clear Signature") }}
+							</button>
+						</div>
+
+						<div class="custom-control custom-checkbox mt-2">
+							<input type="checkbox" class="custom-control-input" id="terms-agree" required>
+							<label class="custom-control-label small text-muted" for="terms-agree">
+								{{ approval_data.disclaimer_text }}
+							</label>
+						</div>
+					</div>
+
+					<button type="submit" class="btn btn-primary btn-lg btn-block font-weight-bold py-3" id="submit-auth-btn">
+						<i class="fa fa-check"></i> {{ _("Submit Authorization") }}
+					</button>
+				</form>
+			</div>
+		</div>
+
+		<script>
+		const jobDecisions = {};
+		const token = {{ token | tojson }};
+
+		function initTotals() {
+			document.querySelectorAll('.job-card').forEach(card => {
+				const jobId = card.dataset.jobId;
+				jobDecisions[jobId] = 'Approved';
+			});
+			updateAuthorizedTotal();
+		}
+
+		function setJobDecision(index, decision) {
+			const card = document.getElementById('job-card-' + index);
+			const jobId = card.dataset.jobId;
+			jobDecisions[jobId] = decision;
+
+			if (decision === 'Approved') {
+				card.classList.remove('is-declined');
+				card.classList.add('is-approved');
+			} else {
+				card.classList.remove('is-approved');
+				card.classList.add('is-declined');
+			}
+			updateAuthorizedTotal();
+		}
+
+		function updateAuthorizedTotal() {
+			let total = 0.0;
+			document.querySelectorAll('.job-card').forEach(card => {
+				const jobId = card.dataset.jobId;
+				if (jobDecisions[jobId] === 'Approved') {
+					total += parseFloat(card.dataset.amount || 0);
+				}
+			});
+			document.getElementById('total-authorized-display').innerText = '$' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+		}
+
+		// Canvas Signature Logic
+		document.addEventListener('DOMContentLoaded', () => {
+			initTotals();
+
+			const canvas = document.getElementById('sig-canvas');
+			if (!canvas) return;
+			const ctx = canvas.getContext('2d');
+			let isDrawing = false;
+			let hasDrawn = false;
+
+			function getCanvasPos(e) {
+				const rect = canvas.getBoundingClientRect();
+				const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+				const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+				return {
+					x: (clientX - rect.left) * (canvas.width / rect.width),
+					y: (clientY - rect.top) * (canvas.height / rect.height)
+				};
+			}
+
+			function startDrawing(e) {
+				isDrawing = true;
+				hasDrawn = true;
+				const pos = getCanvasPos(e);
+				ctx.beginPath();
+				ctx.moveTo(pos.x, pos.y);
+				if (e.type.startsWith('touch')) e.preventDefault();
+			}
+
+			function draw(e) {
+				if (!isDrawing) return;
+				const pos = getCanvasPos(e);
+				ctx.lineWidth = 2.5;
+				ctx.lineCap = 'round';
+				ctx.strokeStyle = '#1a202c';
+				ctx.lineTo(pos.x, pos.y);
+				ctx.stroke();
+				if (e.type.startsWith('touch')) e.preventDefault();
+			}
+
+			function stopDrawing() { isDrawing = false; }
+
+			canvas.addEventListener('mousedown', startDrawing);
+			canvas.addEventListener('mousemove', draw);
+			window.addEventListener('mouseup', stopDrawing);
+
+			canvas.addEventListener('touchstart', startDrawing, { passive: false });
+			canvas.addEventListener('touchmove', draw, { passive: false });
+			window.addEventListener('touchend', stopDrawing);
+
+			document.getElementById('clear-signature').addEventListener('click', () => {
+				ctx.clearRect(0, 0, canvas.width, canvas.height);
+				hasDrawn = false;
+			});
+
+			// Form submission
+			document.getElementById('approval-form').addEventListener('submit', function(e) {
+				e.preventDefault();
+
+				const termsChecked = document.getElementById('terms-agree').checked;
+				if (!termsChecked) {
+					alert("{{ _('Please accept the authorization disclaimer before submitting.') }}");
+					return;
+				}
+
+				const signerName = document.getElementById('signer-name').value.trim();
+				if (!signerName) {
+					alert("{{ _('Please provide your full name.') }}");
+					return;
+				}
+
+				// Check if any job is approved
+				const decisionsList = Object.keys(jobDecisions).map(id => ({ job_id: id, status: jobDecisions[id] }));
+				const hasApproved = decisionsList.some(d => d.status === 'Approved');
+
+				let sigData = null;
+				if (hasApproved) {
+					if (!hasDrawn) {
+						alert("{{ _('Please sign with your finger or mouse in the signature pad to authorize approved repairs.') }}");
+						return;
+					}
+					sigData = canvas.toDataURL('image/png');
+				}
+
+				const submitBtn = document.getElementById('submit-auth-btn');
+				submitBtn.disabled = true;
+				submitBtn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> {{ _("Recording Authorization...") }}';
+
+				frappe.call({
+					method: 'ism.api.approval.submit_public_quote_approval',
+					args: {
+						token: token,
+						approvals: decisionsList,
+						signature_data: sigData,
+						signer_name: signerName
+					},
+					callback: function(r) {
+						if (r && r.message && r.message.success) {
+							window.location.reload();
+						} else {
+							submitBtn.disabled = false;
+							submitBtn.innerHTML = '<i class="fa fa-check"></i> {{ _("Submit Authorization") }}';
+							alert(r.message?.error || "{{ _('Failed to record authorization. Please try again.') }}");
+						}
+					},
+					error: function() {
+						submitBtn.disabled = false;
+						submitBtn.innerHTML = '<i class="fa fa-check"></i> {{ _("Submit Authorization") }}';
+					}
+				});
+			});
+		});
+		</script>
+	{% endif %}
+</div>
+{% endblock %}
