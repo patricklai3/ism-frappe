@@ -186,18 +186,13 @@ def validate_quotation(doc, method=None):
 					).format(doc.custom_vehicle_check_in, status or "Unknown")
 				)
 
-		# Gate 1: All jobs must be resolved (Approved or Declined)
+		# Transition any Draft approval status to Pending Approval upon submission
 		if doc.get("custom_jobs"):
-			for job in doc.get("custom_jobs"):
-				if job.status in ("Draft", "Pending Approval"):
-					frappe.throw(
-						_(
-							"Cannot submit Quotation: All repair jobs must be resolved (Approved or Declined) before submitting. "
-							"Job '{0}' is still {1}."
-						).format(job.job_title, job.status)
-					)
-
-			sync_declined_jobs_to_vehicle(doc)
+			if doc.custom_approval_status == "Draft":
+				doc.custom_approval_status = "Pending Approval"
+			for job in doc.custom_jobs:
+				if job.status == "Draft":
+					job.status = "Pending Approval"
 
 
 @frappe.whitelist()

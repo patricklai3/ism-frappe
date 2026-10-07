@@ -51,6 +51,7 @@
    "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther"
   },
   {
+   "allow_on_submit": 1,
    "columns": 2,
    "default": "Draft",
    "fieldname": "status",
@@ -74,12 +75,14 @@
    "fieldtype": "Column Break"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "approval_channel",
    "fieldtype": "Select",
    "label": "Approval Channel",
    "options": "In-Person Signature\nRemote Web Link\nVerbal Phone Authorization"
   },
   {
+   "allow_on_submit": 1,
    "default": "0",
    "fieldname": "authorized_amount",
    "fieldtype": "Currency",
@@ -87,16 +90,19 @@
    "read_only": 1
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "authorized_by",
    "fieldtype": "Data",
    "label": "Authorized By"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "authorized_at",
    "fieldtype": "Datetime",
    "label": "Authorized At"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "advisor",
    "fieldtype": "Link",
    "label": "Advisor",
@@ -108,28 +114,33 @@
    "label": "Audit & Evidence"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "signature_image",
    "fieldtype": "Attach Image",
    "label": "Signature"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "verbal_notes",
    "fieldtype": "Small Text",
    "label": "Verbal Notes"
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "audit_hash",
    "fieldtype": "Data",
    "label": "Audit Hash",
    "read_only": 1
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "ip_address",
    "fieldtype": "Data",
    "label": "IP Address",
    "read_only": 1
   },
   {
+   "allow_on_submit": 1,
    "fieldname": "user_agent",
    "fieldtype": "Small Text",
    "label": "User Agent",

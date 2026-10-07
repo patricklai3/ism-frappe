@@ -44,6 +44,7 @@ AUTOMOTIVE_CUSTOM_FIELDS = {
 			"label": "Repair Jobs",
 			"fieldtype": "Table",
 			"options": "Quotation Job",
+			"allow_on_submit": 1,
 			"insert_after": "custom_sb_jobs",
 		},
 		{
@@ -57,6 +58,7 @@ AUTOMOTIVE_CUSTOM_FIELDS = {
 			"fieldtype": "Select",
 			"options": "Draft\nPending Approval\nCustomer Approved\nPartially Approved\nDeclined",
 			"default": "Draft",
+			"allow_on_submit": 1,
 			"insert_after": "custom_cb_approval",
 		},
 		{
@@ -64,6 +66,7 @@ AUTOMOTIVE_CUSTOM_FIELDS = {
 			"label": "Approval Token Expiry",
 			"fieldtype": "Datetime",
 			"read_only": 1,
+			"allow_on_submit": 1,
 			"insert_after": "custom_approval_status",
 		},
 		{
@@ -92,6 +95,7 @@ AUTOMOTIVE_CUSTOM_FIELDS = {
 			"hidden": 1,
 			"read_only": 1,
 			"search_index": 1,
+			"allow_on_submit": 1,
 			"insert_after": "custom_supplement_for",
 		},
 	],
