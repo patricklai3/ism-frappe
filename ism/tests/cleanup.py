@@ -13,7 +13,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	# 1. Clean Sales Invoices linked to test records
 	test_invoices = frappe.get_all(
 		"Sales Invoice",
-		filters=[["customer", "like", "%Test%"]],
+		filters=[["customer", "like", "_Test%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"Sales Invoice",
@@ -33,7 +33,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	# 2. Clean Sales Orders linked to test records
 	test_sos = frappe.get_all(
 		"Sales Order",
-		filters=[["customer", "like", "%Test%"]],
+		filters=[["customer", "like", "_Test%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"Sales Order",
@@ -53,7 +53,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	# 3. Clean Quotations linked to test records
 	test_qtns = frappe.get_all(
 		"Quotation",
-		filters=[["party_name", "like", "%Test%"]],
+		filters=[["party_name", "like", "_Test%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"Quotation",
@@ -73,7 +73,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	# 4. Clean test Vehicle Check-ins
 	test_vcis = frappe.get_all(
 		"Vehicle Check-in",
-		filters=[["customer", "like", "%Test%"]],
+		filters=[["customer", "like", "_Test%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"Vehicle Check-in",
@@ -91,7 +91,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	test_vins = ["5YJ3E1EBXNF123456", "1HGCR2F83HA123456"]
 	vins_by_cust = frappe.get_all(
 		"Repair Vehicle",
-		filters=[["customer", "like", "%Test%"]],
+		filters=[["customer", "like", "_Test%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"Repair Vehicle",
@@ -107,7 +107,7 @@ def cleanup_all_test_data(verbose: bool = True):
 				log(f"Failed deleting test Repair Vehicle {vin}: {e}")
 
 	# 6. Clean test Customers
-	test_customer_patterns = ["_TEST%", "_Test%", "%Customer%", "_Husband%", "_Wife%", "_Spouse%"]
+	test_customer_patterns = ["_TEST%", "_Test%", "_Husband%", "_Wife%", "_Spouse%"]
 	for pat in test_customer_patterns:
 		custs = frappe.get_all("Customer", filters=[["name", "like", pat]], pluck="name")
 		for cust in custs:
@@ -117,10 +117,21 @@ def cleanup_all_test_data(verbose: bool = True):
 			si_count = frappe.db.count("Sales Invoice", {"customer": cust})
 			if so_count == 0 and si_count == 0:
 				try:
+					frappe.db.delete("Repair Vehicle Customer", {"customer": cust})
 					frappe.delete_doc("Customer", cust, force=True, ignore_permissions=True)
 					log(f"Deleted test Customer: {cust}")
 				except Exception as e:
 					log(f"Failed deleting test Customer {cust}: {e}")
+
+	# Clean any remaining orphaned Repair Vehicle Customer child rows
+	try:
+		frappe.db.sql("""
+			DELETE rvc FROM `tabRepair Vehicle Customer` rvc
+			LEFT JOIN `tabCustomer` c ON rvc.customer = c.name
+			WHERE c.name IS NULL
+		""")
+	except Exception:
+		pass
 
 	# 7. Clean test Service Packages
 	test_packages = frappe.get_all(
@@ -130,10 +141,6 @@ def cleanup_all_test_data(verbose: bool = True):
 	) + frappe.get_all(
 		"Service Package",
 		filters=[["name", "like", "_Test%"]],
-		pluck="name",
-	) + frappe.get_all(
-		"Service Package",
-		filters=[["name", "like", "%Test%"]],
 		pluck="name",
 	)
 	for pkg in set(test_packages):

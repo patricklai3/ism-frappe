@@ -422,3 +422,58 @@ class TestQuotationApproval(ISMTestCase):
 		so = make_sales_order(q.name)
 		self.assertEqual(len(so.custom_jobs), 2)
 
+	def test_authorization_with_multi_customer_vehicle_and_orphan_links(self):
+		"""Verify authorization succeeds on vehicles linked to multiple customers, even with dangling links."""
+		cust2 = self.create_test_customer(f"{TEST_PREFIX}Secondary_Cust")
+		self.vehicle.reload()
+		self.vehicle.add_customer(cust2.name, is_primary=False)
+		self.assertEqual(len(self.vehicle.customers), 2)
+
+		# Intentionally delete cust2 from Customer doctype to create an orphaned child table row
+		frappe.db.delete("Customer", {"name": cust2.name})
+
+		q = self.create_quote_with_jobs(submit=True)
+		job1 = q.custom_jobs[0]
+		job2 = q.custom_jobs[1]
+
+		# 1. In-person signature should succeed cleanly without LinkValidationError
+		res = capture_in_person_signature(
+			quotation_name=q.name,
+			approvals=[
+				{"name": job1.name, "status": "Approved"},
+				{"name": job2.name, "status": "Declined"},
+			],
+			signature_data="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+			signer_name="Primary Owner",
+		)
+		self.assertTrue(res.get("success"))
+		q.reload()
+		self.assertEqual(q.custom_approval_status, "Partially Approved")
+		self.assertEqual(q.custom_jobs[0].status, "Approved")
+		self.assertEqual(q.custom_jobs[1].status, "Declined")
+
+		# 2. Verbal authorization should also succeed without error
+		q2 = self.create_quote_with_jobs(submit=True)
+		j1 = q2.custom_jobs[0]
+		j2 = q2.custom_jobs[1]
+		res_verbal = log_verbal_authorization(
+			quotation_name=q2.name,
+			approvals=[
+				{"name": j1.name, "status": "Approved"},
+				{"name": j2.name, "status": "Approved"},
+			],
+			contact_person="Primary Owner",
+			phone_number="555-123-4567",
+			notes="Customer authorized all repair work over the phone.",
+		)
+		self.assertTrue(res_verbal.get("success"))
+		q2.reload()
+		self.assertEqual(q2.custom_approval_status, "Customer Approved")
+
+		# 3. Vehicle deferred services was safely updated and vehicle is self-healed
+		self.vehicle.reload()
+		self.vehicle.save(ignore_permissions=True)
+		customer_names = [c.customer for c in self.vehicle.customers]
+		self.assertNotIn(cust2.name, customer_names)
+		self.assertIn(self.customer.name, customer_names)
+

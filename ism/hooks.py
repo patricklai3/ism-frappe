@@ -148,6 +148,9 @@ doc_events = {
 		"after_insert": "ism.setup.sync_doctype_to_workspace",
 		"on_trash": "ism.setup.sync_doctype_to_workspace",
 	},
+	"Customer": {
+		"on_trash": "ism.ism.doctype.repair_vehicle.repair_vehicle.on_customer_trash",
+	},
 	"Quotation": {
 		"before_validate": "ism.api.quotation.before_validate_quotation",
 		"validate": "ism.api.quotation.validate_quotation",
