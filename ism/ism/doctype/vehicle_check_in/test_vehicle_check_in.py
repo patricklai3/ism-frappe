@@ -55,6 +55,16 @@ class TestVehicleCheckin(ISMTestCase):
 		self.assertEqual(quotation.custom_vehicle_check_in, check_in.name)
 		self.assertEqual(quotation.custom_odometer_in, 31200)
 		self.assertEqual(quotation.custom_customer_concern, "Annual maintenance inspection")
+		self.assertEqual(quotation.status, "Draft")
+
+		# Ensure mapped draft quotation saves without select validation error
+		quotation.append("items", {
+			"item_code": self.get_or_create_test_item(),
+			"qty": 1,
+			"rate": 100,
+		})
+		quotation.insert(ignore_permissions=True)
+		self.track(quotation)
 
 	def test_check_out_vehicle(self):
 		check_in = self.create_test_check_in(

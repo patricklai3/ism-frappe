@@ -132,6 +132,7 @@ def make_quotation(source_name: str, target_doc=None):
 		target.custom_vehicle_check_in = source.name
 		target.custom_odometer_in = source.intake_mileage
 		target.custom_customer_concern = source.customer_concern
+		target.status = "Draft"
 
 	doc = get_mapped_doc(
 		"Vehicle Check-in",
@@ -146,6 +147,7 @@ def make_quotation(source_name: str, target_doc=None):
 					"intake_mileage": "custom_odometer_in",
 					"customer_concern": "custom_customer_concern",
 				},
+				"field_no_map": ["status", "naming_series"],
 			}
 		},
 		target_doc,
