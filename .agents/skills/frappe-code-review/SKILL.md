@@ -246,6 +246,10 @@ perceive ~100ms).
 - **Tests must be deterministic and independent.** No `random` (flaky); no
   reliance on state left by other tests (order-dependence); use `freeze_time`
   for time-dependent logic.
+- **Clean up test data in teardown.** Do not rely solely on database rollback.
+  ERPNext hooks, naming series, or workflows often commit mid-test. Tests must
+  track created documents and delete them in `tearDown()`. Cancel submitted
+  documents before deletion. Use a dedicated test prefix for test record names.
 
 ## 8. Error messages, logging & observability
 

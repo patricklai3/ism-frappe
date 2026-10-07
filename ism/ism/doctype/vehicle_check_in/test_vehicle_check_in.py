@@ -1,49 +1,33 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-import unittest
 import frappe
 from ism.ism.doctype.vehicle_check_in.vehicle_check_in import (
 	check_out_vehicle,
 	get_vehicle_customers,
 	make_quotation,
 )
+from ism.tests.base import ISMTestCase, TEST_PREFIX
 
 
-class TestVehicleCheckin(unittest.TestCase):
+class TestVehicleCheckin(ISMTestCase):
 	def setUp(self):
+		super().setUp()
 		self.vin = "5YJ3E1EBXNF123456"
-		if not frappe.db.exists("Customer", "_Test Checkin Customer"):
-			self.customer = frappe.get_doc({
-				"doctype": "Customer",
-				"customer_name": "_Test Checkin Customer",
-				"customer_type": "Individual",
-			}).insert(ignore_permissions=True)
-		else:
-			self.customer = frappe.get_doc("Customer", "_Test Checkin Customer")
-
-		if not frappe.db.exists("Repair Vehicle", self.vin):
-			self.vehicle = frappe.get_doc({
-				"doctype": "Repair Vehicle",
-				"vin": self.vin,
-				"customer": self.customer.name,
-				"license_plate": "TEST-INTAKE",
-			}).insert(ignore_permissions=True)
-		else:
-			self.vehicle = frappe.get_doc("Repair Vehicle", self.vin)
-
-	def tearDown(self):
-		frappe.db.rollback()
+		self.customer = self.create_test_customer(f"{TEST_PREFIX}Checkin_Cust")
+		self.vehicle = self.create_test_vehicle(
+			vin=self.vin,
+			customer=self.customer.name,
+			license_plate="TEST-INTAKE",
+		)
 
 	def test_vehicle_check_in_creation_and_defaults(self):
-		check_in = frappe.get_doc({
-			"doctype": "Vehicle Check-in",
-			"customer": self.customer.name,
-			"vehicle": self.vehicle.name,
-			"intake_mileage": 25400,
-			"customer_concern": "Squeaking sound from front brakes",
-			"check_in_date": frappe.utils.now_datetime(),
-		}).insert(ignore_permissions=True)
+		check_in = self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+			intake_mileage=25400,
+			customer_concern="Squeaking sound from front brakes",
+		)
 
 		self.assertTrue(check_in.name.startswith("CHK-IN-"))
 		self.assertEqual(check_in.status, "Checked In")
@@ -58,14 +42,12 @@ class TestVehicleCheckin(unittest.TestCase):
 		self.assertRaises(frappe.ValidationError, check_in.insert)
 
 	def test_make_quotation_mapping(self):
-		check_in = frappe.get_doc({
-			"doctype": "Vehicle Check-in",
-			"customer": self.customer.name,
-			"vehicle": self.vehicle.name,
-			"intake_mileage": 31200,
-			"customer_concern": "Annual maintenance inspection",
-			"check_in_date": frappe.utils.now_datetime(),
-		}).insert(ignore_permissions=True)
+		check_in = self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+			intake_mileage=31200,
+			customer_concern="Annual maintenance inspection",
+		)
 
 		quotation = make_quotation(check_in.name)
 		self.assertEqual(quotation.party_name, self.customer.name)
@@ -75,36 +57,25 @@ class TestVehicleCheckin(unittest.TestCase):
 		self.assertEqual(quotation.custom_customer_concern, "Annual maintenance inspection")
 
 	def test_check_out_vehicle(self):
-		check_in = frappe.get_doc({
-			"doctype": "Vehicle Check-in",
-			"customer": self.customer.name,
-			"vehicle": self.vehicle.name,
-			"intake_mileage": 31500,
-			"check_in_date": frappe.utils.now_datetime(),
-		}).insert(ignore_permissions=True)
+		check_in = self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+			intake_mileage=31500,
+		)
 
 		updated = check_out_vehicle(check_in.name)
 		self.assertEqual(updated.status, "Checked Out")
 		self.assertIsNotNone(updated.checkout_date)
 
 	def test_check_in_links_customer_to_vehicle(self):
-		# Create a secondary customer (e.g., spouse)
-		spouse = frappe.get_doc({
-			"doctype": "Customer",
-			"customer_name": "_Spouse Dropoff",
-			"customer_type": "Individual",
-		}).insert(ignore_permissions=True)
+		spouse = self.create_test_customer(f"{TEST_PREFIX}Spouse_Dropoff")
 
-		# Check-in with the spouse as the customer
-		frappe.get_doc({
-			"doctype": "Vehicle Check-in",
-			"customer": spouse.name,
-			"vehicle": self.vehicle.name,
-			"intake_mileage": 32000,
-			"check_in_date": frappe.utils.now_datetime(),
-		}).insert(ignore_permissions=True)
+		self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=spouse.name,
+			intake_mileage=32000,
+		)
 
-		# Verify that the vehicle now has both customers linked
 		linked_customers = get_vehicle_customers(self.vehicle.name)
 		customer_names = [c["customer"] for c in linked_customers]
 		self.assertIn(self.customer.name, customer_names)

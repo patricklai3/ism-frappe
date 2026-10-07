@@ -30,8 +30,69 @@ class TestExpense(IntegrationTestCase):
 ```
 
 Key patterns:
-- Inherit from `frappe.tests.IntegrationTestCase` (not `unittest.TestCase`)
-- Tests run inside a transaction that rolls back — no manual cleanup needed
+- Inherit from an app base test case or `frappe.tests.IntegrationTestCase`.
+- Do not rely solely on database rollback.
+- Explicitly delete created test records in `tearDown()`.
+
+## Test data cleanup and teardown hygiene
+
+Do not rely solely on database rollback. ERPNext triggers, naming series, and sub-operations often execute `frappe.db.commit()`. When a commit occurs, records persist in the database and pollute desk list views.
+
+Always clean up test data in `tearDown()`:
+
+1. Maintain a list of created records in `setUp()`.
+2. Append created documents to the list.
+3. In `tearDown()`, process the list in reverse order.
+4. Cancel submitted documents before deletion.
+5. Delete each document with `frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)`.
+6. Prefix all test names with a distinct marker (for example, `_TEST_`).
+7. Delete residual records matching the prefix.
+8. Call `frappe.db.commit()` at the end of `tearDown()`.
+
+Example base test case pattern:
+
+```python
+import unittest
+import frappe
+
+TEST_PREFIX = "_TEST_APP_"
+
+class AppTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tracked_docs = []
+        self.cleanup_residual_data()
+
+    def tearDown(self):
+        self.cleanup_tracked_docs()
+        self.cleanup_residual_data()
+        frappe.db.commit()
+
+    def track(self, doc):
+        if hasattr(doc, "doctype") and hasattr(doc, "name"):
+            self._tracked_docs.append((doc.doctype, doc.name))
+        return doc
+
+    def cleanup_tracked_docs(self):
+        while self._tracked_docs:
+            doctype, name = self._tracked_docs.pop()
+            if frappe.db.exists(doctype, name):
+                try:
+                    doc = frappe.get_doc(doctype, name)
+                    if doc.docstatus == 1:
+                        doc.cancel()
+                    frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+                except Exception:
+                    pass
+
+    @classmethod
+    def cleanup_residual_data(cls):
+        records = frappe.get_all("Customer", filters=[["name", "like", f"{TEST_PREFIX}%"]], pluck="name")
+        for name in records:
+            try:
+                frappe.delete_doc("Customer", name, force=True, ignore_permissions=True)
+            except Exception:
+                pass
+```
 
 ## Unit tests (no database)
 
