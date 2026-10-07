@@ -426,6 +426,15 @@ class RepairVehicle(Document):
 
 	def sync_customers(self):
 		"""Sync top-level primary customer with child customers table."""
+		# Prune any customer rows whose Customer record no longer exists in database
+		if self.customers:
+			self.customers = [
+				row for row in self.customers if row.customer and frappe.db.exists("Customer", row.customer)
+			]
+
+		if self.customer and not frappe.db.exists("Customer", self.customer):
+			self.customer = None
+
 		# If customer field did not change but child primary changed, adopt child primary
 		if not self.is_new() and not self.has_value_changed("customer"):
 			primary_child = next((row.customer for row in (self.customers or []) if row.is_primary), None)
@@ -468,3 +477,9 @@ class RepairVehicle(Document):
 		]
 		for f in fields:
 			setattr(self, f, None)
+
+
+def on_customer_trash(doc, method=None):
+	"""Clean up any Repair Vehicle Customer child links when a Customer is deleted."""
+	frappe.db.delete("Repair Vehicle Customer", {"customer": doc.name})
+

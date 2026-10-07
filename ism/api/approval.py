@@ -459,6 +459,8 @@ def apply_job_decisions(
 
 	doc.flags.ignore_validate = True
 	doc.flags.ignore_validate_update_after_submit = True
+	doc.flags.ignore_links = True
+	doc.flags.ignore_mandatory = True
 	doc.save(ignore_permissions=True)
 
 	# Sync declined jobs to Repair Vehicle deferred services
@@ -474,13 +476,18 @@ def sync_declined_jobs_to_vehicle(quotation_doc):
 	if not quotation_doc.custom_vehicle:
 		return
 
-	vehicle = frappe.get_doc("Repair Vehicle", quotation_doc.custom_vehicle)
-	existing_titles = {
-		(d.job_title, d.quotation) for d in (vehicle.get("deferred_services") or [])
-	}
+	declined_jobs = [j for j in (quotation_doc.get("custom_jobs") or []) if j.status == "Declined"]
+	if not declined_jobs:
+		return
 
-	for job in quotation_doc.get("custom_jobs") or []:
-		if job.status == "Declined":
+	try:
+		vehicle = frappe.get_doc("Repair Vehicle", quotation_doc.custom_vehicle)
+		existing_titles = {
+			(d.job_title, d.quotation) for d in (vehicle.get("deferred_services") or [])
+		}
+
+		added = False
+		for job in declined_jobs:
 			key = (job.job_title, quotation_doc.name)
 			if key not in existing_titles:
 				vehicle.append("deferred_services", {
@@ -491,8 +498,20 @@ def sync_declined_jobs_to_vehicle(quotation_doc):
 					"status": "Open Recommendation",
 					"decline_reason": job.verbal_notes or _("Declined by customer during estimate authorization"),
 				})
+				added = True
 
-	vehicle.save(ignore_permissions=True)
+		if added:
+			# Prune any orphaned customer rows if customer record no longer exists
+			if vehicle.customers:
+				vehicle.customers = [
+					c for c in vehicle.customers if c.customer and frappe.db.exists("Customer", c.customer)
+				]
+			vehicle.flags.ignore_links = True
+			vehicle.flags.ignore_validate = True
+			vehicle.flags.ignore_mandatory = True
+			vehicle.save(ignore_permissions=True)
+	except Exception:
+		frappe.log_error(title="Failed to sync declined jobs to vehicle", message=frappe.get_traceback())
 
 
 @frappe.whitelist()
