@@ -43,32 +43,38 @@ def validate_quotation(doc, method=None):
 				)
 		else:
 			status = frappe.db.get_value("Vehicle Check-in", doc.custom_vehicle_check_in, "status")
-			if status == "Checked Out":
+			if status != "Checked In":
 				frappe.throw(
 					frappe._(
-						"Cannot submit Quotation: Vehicle Check-in {0} is already checked out. An active check-in is required."
-					).format(doc.custom_vehicle_check_in)
+						"Cannot submit Quotation: Vehicle Check-in {0} is not active (status: {1}). An active check-in is required."
+					).format(doc.custom_vehicle_check_in, status or "Unknown")
 				)
 
 
 @frappe.whitelist()
-def get_active_checked_in_vehicles(doctype, txt, searchfield, start, page_len, filters):
+def get_active_checked_in_vehicles(
+	doctype=None, txt=None, searchfield=None, start=0, page_len=20, filters=None, as_dict=False, **kwargs
+):
 	"""Custom query to filter vehicles that currently have an active check-in."""
+	if isinstance(filters, str):
+		filters = frappe.parse_json(filters) or {}
 	filters = filters or {}
 	customer = filters.get("customer")
 
 	conditions = ["ci.status = 'Checked In'"]
 	values = {}
 
-	if customer:
+	if customer and isinstance(customer, str):
 		conditions.append("(v.customer = %(customer)s OR rvc.customer = %(customer)s)")
 		values["customer"] = customer
 
-	if txt:
+	if txt and isinstance(txt, str):
 		conditions.append("(v.name LIKE %(txt)s OR v.license_plate LIKE %(txt)s OR v.model LIKE %(txt)s)")
 		values["txt"] = f"%{txt}%"
 
 	where_clause = " AND ".join(conditions)
+	start_val = frappe.utils.cint(start)
+	page_len_val = frappe.utils.cint(page_len) or 20
 
 	return frappe.db.sql(
 		f"""
@@ -80,16 +86,20 @@ def get_active_checked_in_vehicles(doctype, txt, searchfield, start, page_len, f
 		ORDER BY v.creation DESC
 		LIMIT %(start)s, %(page_len)s
 		""",
-		{"start": int(start), "page_len": int(page_len), **values},
+		{"start": start_val, "page_len": page_len_val, **values},
+		as_dict=as_dict,
 	)
 
 
 @frappe.whitelist()
 def get_active_check_in_for_vehicle(vehicle: str):
 	"""Return the active check-in details for a given vehicle."""
+	if not isinstance(vehicle, str) or not vehicle.strip():
+		frappe.throw(frappe._("Invalid vehicle parameter"), frappe.ValidationError)
+
 	check_in = frappe.db.get_value(
 		"Vehicle Check-in",
-		{"vehicle": vehicle, "status": "Checked In"},
+		{"vehicle": vehicle.strip(), "status": "Checked In"},
 		["name", "customer", "intake_mileage", "customer_concern"],
 		as_dict=True,
 	)

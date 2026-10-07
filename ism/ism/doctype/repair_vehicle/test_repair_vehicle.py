@@ -50,3 +50,32 @@ class TestRepairVehicle(ISMTestCase):
 		self.assertIn(cust2.name, linked_customers)
 		self.assertEqual(len(linked_customers), 2)
 		self.assertEqual(vehicle.customer, cust1.name)
+
+	def test_lowercase_vin_normalized_and_named_uppercase(self):
+		cust = self.create_test_customer(f"{TEST_PREFIX}Owner_Lower")
+		vehicle = self.create_test_vehicle(
+			vin="5yj3e1ebxnf123456",
+			customer=cust.name,
+		)
+		self.assertEqual(vehicle.name, "5YJ3E1EBXNF123456")
+		self.assertEqual(vehicle.vin, "5YJ3E1EBXNF123456")
+
+	def test_child_table_primary_sync(self):
+		cust1 = self.create_test_customer(f"{TEST_PREFIX}Cust_A")
+		cust2 = self.create_test_customer(f"{TEST_PREFIX}Cust_B")
+
+		vehicle = self.create_test_vehicle(
+			vin="5YJ3E1EBXNF123456",
+			customer=cust1.name,
+		)
+		vehicle.add_customer(cust2.name)
+		vehicle.reload()
+
+		# User switches primary in the child table
+		for row in vehicle.customers:
+			row.is_primary = 1 if row.customer == cust2.name else 0
+		vehicle.save(ignore_permissions=True)
+		vehicle.reload()
+
+		self.assertEqual(vehicle.customer, cust2.name)
+		self.assertTrue(any(r.customer == cust2.name and r.is_primary for r in vehicle.customers))

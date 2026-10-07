@@ -357,34 +357,49 @@ def get_derived_specs(model_code: str, drive_code: str, year_code: str, is_legac
 
 
 class RepairVehicle(Document):
-	def before_save(self):
+	def before_insert(self):
+		self.normalize_vin()
+
+	def before_validate(self):
+		self.normalize_vin()
+
+	def validate(self):
+		self.normalize_vin()
+		self.decode_vin()
+		self.sync_customers()
+
+	def normalize_vin(self):
+		if self.vin:
+			normalized = re.sub(r"[^A-HJ-NPR-Z0-9]", "", self.vin.upper())
+			if self.vin != normalized:
+				self.vin = normalized
+
+	def decode_vin(self):
 		if not self.vin:
 			self.clear_vin_fields()
 			return
 
-		normalized = re.sub(r"[^A-HJ-NPR-Z0-9]", "", self.vin.upper())
-		if self.vin != normalized:
-			self.vin = normalized
-
-		if len(normalized) != 17:
+		if len(self.vin) != 17:
 			self.clear_vin_fields()
 			return
 
-		wmi = normalized[0:3]
+		wmi = self.vin[0:3]
 		if wmi not in ALL_WMI:
 			self.clear_vin_fields()
 			self.is_valid_vin = 0
-			frappe.throw(frappe._('"{0}" is not a recognized Tesla manufacturer code. Only Tesla VINs are supported.').format(wmi))
+			frappe.throw(
+				frappe._('"{0}" is not a recognized Tesla manufacturer code. Only Tesla VINs are supported.').format(wmi)
+			)
 
-		expected_check = compute_vin_check_digit(normalized)
-		actual_check = normalized[8]
+		expected_check = compute_vin_check_digit(self.vin)
+		actual_check = self.vin[8]
 		self.is_valid_vin = 1 if actual_check == expected_check else 0
 
-		model_code = normalized[3]
-		year_code = normalized[9]
+		model_code = self.vin[3]
+		year_code = self.vin[9]
 		is_legacy_s = model_code == "S" and year_code in S_LEGACY_YEARS
 
-		seq = normalized[12:] if (is_legacy_s and year_code in S_LEGACY["typedSeq"]) else normalized[11:]
+		seq = self.vin[12:] if (is_legacy_s and year_code in S_LEGACY["typedSeq"]) else self.vin[11:]
 		try:
 			seq_num = int(seq)
 		except ValueError:
@@ -394,24 +409,29 @@ class RepairVehicle(Document):
 		fuel_map = S_LEGACY["fuel"].get(year_code, {}) if is_legacy_s else FUEL.get(model_code, {})
 		drive_map = S_LEGACY["drive"].get(year_code, {}) if is_legacy_s else DRIVE.get(model_code, {})
 
-		hw = get_hardware_generation(model_code, seq_num, normalized[10], year_code)
-		derived = get_derived_specs(model_code, normalized[7], year_code, is_legacy_s)
+		hw = get_hardware_generation(model_code, seq_num, self.vin[10], year_code)
+		derived = get_derived_specs(model_code, self.vin[7], year_code, is_legacy_s)
 
 		self.manufacturer = WMI.get(model_code, {}).get(wmi, "Tesla")
 		self.model = MODEL.get(model_code, "Unknown")
 		self.model_year = YEAR.get(year_code, year_code)
-		self.body_type = body_map.get(normalized[4], "Unknown") if body_map else "Unknown"
+		self.body_type = body_map.get(self.vin[4], "Unknown") if body_map else "Unknown"
 		self.trim = derived.get("trim") or "Unknown"
 		self.drivetrain = derived.get("drivetrain") or "Unknown"
-		self.battery_type = fuel_map.get(normalized[6], "Unknown") if fuel_map else "Unknown"
-		self.drive_unit = drive_map.get(normalized[7], "Unknown") if drive_map else "Unknown"
-		self.assembly_plant = PLANT.get(normalized[10], normalized[10])
+		self.battery_type = fuel_map.get(self.vin[6], "Unknown") if fuel_map else "Unknown"
+		self.drive_unit = drive_map.get(self.vin[7], "Unknown") if drive_map else "Unknown"
+		self.assembly_plant = PLANT.get(self.vin[10], self.vin[10])
 		self.production_sequence = seq
 		self.autopilot_hardware = hw.get("t") if hw else "Unknown"
-		self.sync_customers()
 
 	def sync_customers(self):
 		"""Sync top-level primary customer with child customers table."""
+		# If customer field did not change but child primary changed, adopt child primary
+		if not self.is_new() and not self.has_value_changed("customer"):
+			primary_child = next((row.customer for row in (self.customers or []) if row.is_primary), None)
+			if primary_child and primary_child != self.customer:
+				self.customer = primary_child
+
 		if self.customer:
 			existing = {row.customer for row in (self.customers or [])}
 			if self.customer not in existing:

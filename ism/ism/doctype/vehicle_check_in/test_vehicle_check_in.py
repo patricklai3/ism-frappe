@@ -81,3 +81,26 @@ class TestVehicleCheckin(ISMTestCase):
 		self.assertIn(self.customer.name, customer_names)
 		self.assertIn(spouse.name, customer_names)
 		self.assertGreaterEqual(len(customer_names), 2)
+
+	def test_duplicate_active_check_in_rejected(self):
+		self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+			intake_mileage=33000,
+		)
+		# Attempting second check-in while first is still "Checked In" must fail
+		doc2 = frappe.new_doc("Vehicle Check-in")
+		doc2.vehicle = self.vehicle.name
+		doc2.customer = self.customer.name
+		doc2.intake_mileage = 33050
+		self.assertRaises(frappe.ValidationError, doc2.insert)
+
+	def test_repeated_checkout_rejected(self):
+		check_in = self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+			intake_mileage=34000,
+		)
+		check_out_vehicle(check_in.name)
+		# Second checkout on already checked out record must fail
+		self.assertRaises(frappe.ValidationError, check_out_vehicle, check_in.name)

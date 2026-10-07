@@ -2,7 +2,10 @@
 # For license information, please see license.txt
 
 import frappe
-from ism.api.quotation import get_active_checked_in_vehicles
+from ism.api.quotation import (
+	get_active_checked_in_vehicles,
+	get_active_check_in_for_vehicle,
+)
 from ism.ism.doctype.vehicle_check_in.vehicle_check_in import check_out_vehicle
 from ism.tests.base import ISMTestCase, TEST_PREFIX
 
@@ -69,3 +72,26 @@ class TestQuotationWorkflow(ISMTestCase):
 		results = get_active_checked_in_vehicles("Repair Vehicle", "", "name", 0, 20, {"customer": spouse.name})
 		matched_vins = [row[0] for row in results]
 		self.assertIn(self.vehicle.name, matched_vins)
+
+	def test_type_validation_on_get_active_check_in(self):
+		# Must reject dicts or invalid non-string inputs
+		self.assertRaises(
+			(frappe.exceptions.FrappeTypeError, frappe.ValidationError),
+			get_active_check_in_for_vehicle,
+			{"!=": ""},
+		)
+		self.assertRaises(frappe.ValidationError, get_active_check_in_for_vehicle, "")
+
+	def test_active_vehicle_query_accepts_kwargs_and_none_start(self):
+		# Must handle None start/page_len and arbitrary kwargs without error
+		results = get_active_checked_in_vehicles(
+			doctype="Repair Vehicle",
+			txt="",
+			searchfield="name",
+			start=None,
+			page_len=None,
+			filters=None,
+			as_dict=True,
+			reference_doctype="Quotation",
+		)
+		self.assertIsInstance(results, list)

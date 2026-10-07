@@ -9,6 +9,7 @@ from frappe.model.mapper import get_mapped_doc
 class VehicleCheckin(Document):
 	def validate(self):
 		self.validate_mileage()
+		self.validate_single_active_check_in()
 		self.handle_status_transition()
 
 	def on_update(self):
@@ -17,6 +18,23 @@ class VehicleCheckin(Document):
 	def validate_mileage(self):
 		if self.intake_mileage is not None and self.intake_mileage < 0:
 			frappe.throw(frappe._("Intake mileage cannot be negative."))
+
+	def validate_single_active_check_in(self):
+		if self.status == "Checked In" and self.vehicle:
+			filters = [
+				["vehicle", "=", self.vehicle],
+				["status", "=", "Checked In"],
+			]
+			if not self.is_new():
+				filters.append(["name", "!=", self.name])
+
+			existing = frappe.db.get_value("Vehicle Check-in", filters, "name")
+			if existing:
+				frappe.throw(
+					frappe._(
+						"Vehicle {0} already has an active check-in record ({1}). Check out the vehicle before creating a new check-in."
+					).format(self.vehicle, existing)
+				)
 
 	def handle_status_transition(self):
 		if self.status == "Checked Out" and not self.checkout_date:
@@ -39,16 +57,38 @@ class VehicleCheckin(Document):
 @frappe.whitelist()
 def get_vehicle_customers(vehicle: str):
 	"""Return list of all customers linked to this vehicle."""
-	if not vehicle or not frappe.db.exists("Repair Vehicle", vehicle):
+	if not isinstance(vehicle, str) or not vehicle.strip():
+		return []
+
+	if not frappe.db.exists("Repair Vehicle", vehicle):
 		return []
 
 	vehicle_doc = frappe.get_doc("Repair Vehicle", vehicle)
+	customer_ids = []
+	if vehicle_doc.customer:
+		customer_ids.append(vehicle_doc.customer)
+	for row in (vehicle_doc.customers or []):
+		if row.customer:
+			customer_ids.append(row.customer)
+
+	if not customer_ids:
+		return []
+
+	customer_names = {
+		c.name: c.customer_name
+		for c in frappe.get_all(
+			"Customer",
+			filters={"name": ["in", customer_ids]},
+			fields=["name", "customer_name"],
+		)
+	}
+
 	customers = []
 	seen = set()
 	if vehicle_doc.customer:
 		customers.append({
 			"customer": vehicle_doc.customer,
-			"customer_name": frappe.db.get_value("Customer", vehicle_doc.customer, "customer_name"),
+			"customer_name": customer_names.get(vehicle_doc.customer, vehicle_doc.customer),
 			"is_primary": 1,
 		})
 		seen.add(vehicle_doc.customer)
@@ -57,7 +97,7 @@ def get_vehicle_customers(vehicle: str):
 		if row.customer not in seen:
 			customers.append({
 				"customer": row.customer,
-				"customer_name": row.customer_name or frappe.db.get_value("Customer", row.customer, "customer_name"),
+				"customer_name": row.customer_name or customer_names.get(row.customer, row.customer),
 				"is_primary": row.is_primary,
 				"relationship": row.relationship,
 			})
@@ -69,7 +109,13 @@ def get_vehicle_customers(vehicle: str):
 @frappe.whitelist()
 def check_out_vehicle(check_in_name: str):
 	"""Mark vehicle check-in as checked out."""
+	if not isinstance(check_in_name, str) or not check_in_name.strip():
+		frappe.throw(frappe._("Invalid check_in_name parameter"))
+
 	doc = frappe.get_doc("Vehicle Check-in", check_in_name)
+	if doc.status == "Checked Out":
+		frappe.throw(frappe._("Vehicle Check-in {0} is already checked out.").format(check_in_name))
+
 	doc.status = "Checked Out"
 	doc.checkout_date = frappe.utils.now_datetime()
 	doc.save()

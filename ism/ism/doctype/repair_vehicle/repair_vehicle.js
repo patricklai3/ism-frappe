@@ -326,7 +326,13 @@ frappe.ui.form.on("Repair Vehicle", {
 			const wmi = v.slice(0, 3);
 			if (!ALL_WMI.has(wmi)) {
 				frappe.msgprint(__('"{0}" is not a recognized Tesla manufacturer code.', [wmi]));
-				frm.set_value("is_valid_vin", 0);
+				[
+					"is_valid_vin", "manufacturer", "model", "model_year", "body_type",
+					"trim", "drivetrain", "battery_type", "drive_unit",
+					"assembly_plant", "production_sequence", "autopilot_hardware",
+				].forEach((f) => {
+					frm.set_value(f, "");
+				});
 				return;
 			}
 
