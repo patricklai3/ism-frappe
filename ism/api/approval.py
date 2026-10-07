@@ -37,6 +37,8 @@ def get_or_create_approval_token(quotation_name: str) -> tuple[str, str]:
 			doc.custom_approval_status = "Pending Approval"
 		doc.flags.ignore_validate = True
 		doc.flags.ignore_validate_update_after_submit = True
+		doc.flags.ignore_links = True
+		doc.flags.ignore_mandatory = True
 		doc.save(ignore_permissions=True)
 
 	approval_url = f"{get_url()}/quote-approval?token={token}"
