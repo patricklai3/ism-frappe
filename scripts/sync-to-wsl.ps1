@@ -20,7 +20,7 @@ $Excludes = @(
 
 $DeleteFlag = if ($Delete) { "--delete" } else { "" }
 
-$Command = "rsync -rtv $DeleteFlag $($Excludes -join ' ') '$WindowsSource' '$WslDestination'"
+$Command = "rsync -rtvc $DeleteFlag $($Excludes -join ' ') '$WindowsSource' '$WslDestination'"
 
 Write-Host "[sync-to-wsl] Syncing Windows -> WSL2..." -ForegroundColor Cyan
 wsl -d Ubuntu bash -c $Command

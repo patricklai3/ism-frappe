@@ -76,107 +76,41 @@ def create_standard_inspection_template():
 
 
 def sync_workspace(workspace_name="ISM"):
-	"""Ensure the ISM Workspace and Workspace Sidebar exist and include all module DocTypes."""
-	if not frappe.db.exists("Workspace", workspace_name):
-		from frappe.model.sync import sync_for
-		sync_for("ism")
+	"""Ensure the ISM Workspace and Workspace Sidebar exist and match stage-based configuration."""
+	workspace_file = frappe.get_app_path("ism", "ism", "workspace", "ism", "ism.json")
+	if os.path.exists(workspace_file):
+		with open(workspace_file, "r") as f:
+			data = json.load(f)
 
-	if not frappe.db.exists("Workspace", workspace_name):
-		return
+		if not frappe.db.exists("Workspace", workspace_name):
+			workspace = frappe.get_doc(data)
+			workspace.insert(ignore_permissions=True)
+		else:
+			workspace = frappe.get_doc("Workspace", workspace_name)
+			workspace.content = data.get("content")
+			workspace.shortcuts = []
+			for sc in data.get("shortcuts", []):
+				workspace.append("shortcuts", sc)
+			workspace.links = []
+			for lnk in data.get("links", []):
+				workspace.append("links", lnk)
+			workspace.save(ignore_permissions=True)
 
-	ism_doctypes = frappe.get_all(
-		"DocType",
-		filters={"module": "ISM", "istable": 0},
-		pluck="name",
-		order_by="name asc",
-	)
+	sidebar_file = frappe.get_app_path("ism", "workspace_sidebar", "ism.json")
+	if os.path.exists(sidebar_file):
+		with open(sidebar_file, "r") as f:
+			data = json.load(f)
 
-	workspace = frappe.get_doc("Workspace", workspace_name)
-	existing_links = {link.link_to for link in workspace.links if link.type == "Link" and link.link_to}
+		if not frappe.db.exists("Workspace Sidebar", workspace_name):
+			sidebar = frappe.get_doc(data)
+			sidebar.insert(ignore_permissions=True)
+		else:
+			sidebar = frappe.get_doc("Workspace Sidebar", workspace_name)
+			sidebar.items = []
+			for it in data.get("items", []):
+				sidebar.append("items", it)
+			sidebar.save(ignore_permissions=True)
 
-	card_break_idx = None
-	for idx, link in enumerate(workspace.links):
-		if link.type == "Card Break" and link.label == "ISM DocTypes":
-			card_break_idx = idx
-			break
-
-	if card_break_idx is None:
-		workspace.append(
-			"links",
-			{
-				"label": "ISM DocTypes",
-				"type": "Card Break",
-				"link_count": 0,
-				"hidden": 0,
-				"onboard": 0,
-			},
-		)
-		card_break_idx = len(workspace.links) - 1
-
-	for dt in ism_doctypes:
-		if dt not in existing_links:
-			workspace.append(
-				"links",
-				{
-					"label": dt,
-					"type": "Link",
-					"link_type": "DocType",
-					"link_to": dt,
-					"onboard": 0,
-					"hidden": 0,
-				},
-			)
-
-	ism_card_links = [
-		link for link in workspace.links
-		if link.type == "Link" and link.link_to in ism_doctypes
-	]
-	workspace.links[card_break_idx].link_count = len(ism_card_links)
-	workspace.save(ignore_permissions=True)
-
-	if frappe.db.exists("Workspace Sidebar", workspace_name):
-		sidebar = frappe.get_doc("Workspace Sidebar", workspace_name)
-		sidebar_links = {item.link_to for item in sidebar.items if item.link_to}
-
-		has_ism_section = any(
-			item.type == "Section Break" and item.label == "ISM DocTypes"
-			for item in sidebar.items
-		)
-		if not has_ism_section and ism_doctypes:
-			sidebar.append(
-				"items",
-				{
-					"label": "ISM DocTypes",
-					"type": "Section Break",
-					"child": 0,
-					"collapsible": 1,
-					"show_arrow": 0,
-				},
-			)
-
-		for dt in ism_doctypes:
-			if dt not in sidebar_links:
-				sidebar.append(
-					"items",
-					{
-						"label": dt,
-						"type": "Link",
-						"link_type": "DocType",
-						"link_to": dt,
-						"child": 1,
-						"collapsible": 1,
-						"icon": "file",
-						"show_arrow": 0,
-					},
-				)
-
-		sidebar.save(ignore_permissions=True)
-
-	if frappe.conf.developer_mode:
-		try:
-			export_to_files(record_list=[["Workspace", workspace_name]])
-		except Exception:
-			pass
 
 
 def sync_doctype_to_workspace(doc, method=None):

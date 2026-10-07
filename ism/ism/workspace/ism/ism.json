@@ -1,8 +1,8 @@
 {
  "app": "ism",
  "charts": [],
- "content": "[{\"id\":\"hdr_sales\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Automotive Repair Sales Workflow</b></span>\",\"col\":12}},{\"id\":\"card_sales\",\"type\":\"card\",\"data\":{\"card_name\":\"Sales Workflow\",\"col\":4}},{\"id\":\"card_masters\",\"type\":\"card\",\"data\":{\"card_name\":\"Shop Masters\",\"col\":4}},{\"id\":\"card_ism\",\"type\":\"card\",\"data\":{\"card_name\":\"ISM DocTypes\",\"col\":4}}]",
- "creation": "2026-10-06 00:00:00",
+ "content": "[{\"id\":\"hdr_sales\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Automotive Repair Workflow</b></span>\",\"col\":12}},{\"id\":\"card_stage1\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 1: Intake & Estimate\",\"col\":4}},{\"id\":\"card_handoff1\",\"type\":\"card\",\"data\":{\"card_name\":\"Handoff 1: Estimate Authorization\",\"col\":4}},{\"id\":\"card_stage2\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 2: Repair Order Execution\",\"col\":4}},{\"id\":\"card_handoff2\",\"type\":\"card\",\"data\":{\"card_name\":\"Handoff 2: Work Completion & Billing Audit\",\"col\":4}},{\"id\":\"card_stage3\",\"type\":\"card\",\"data\":{\"card_name\":\"Stage 3: Invoicing & Vehicle Release\",\"col\":4}},{\"id\":\"card_postservice\",\"type\":\"card\",\"data\":{\"card_name\":\"Post-Service: Retention & Reminders\",\"col\":4}}]",
+ "creation": "2026-10-07 07:15:29.701707",
  "custom_blocks": [],
  "docstatus": 0,
  "doctype": "Workspace",
@@ -16,10 +16,33 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Sales Workflow",
+   "label": "Stage 1: Intake & Estimate",
    "link_count": 5,
+   "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Vehicle Check-in",
+   "link_count": 0,
+   "link_to": "Vehicle Check-in",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Repair Vehicle",
+   "link_count": 0,
+   "link_to": "Repair Vehicle",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
   },
   {
    "dependencies": "",
@@ -36,12 +59,81 @@
    "dependencies": "",
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Inspection Template",
+   "link_count": 0,
+   "link_to": "Inspection Template",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Customer",
+   "link_count": 0,
+   "link_to": "Customer",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Handoff 1: Estimate Authorization",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stage 2: Repair Order Execution",
+   "link_count": 2,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Sales Order",
    "link_count": 0,
    "link_to": "Sales Order",
    "link_type": "DocType",
    "onboard": 1,
    "type": "Link"
+  },
+  {
+   "dependencies": "",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Item",
+   "link_count": 0,
+   "link_to": "Item",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Handoff 2: Work Completion & Billing Audit",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Stage 3: Invoicing & Vehicle Release",
+   "link_count": 3,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
   },
   {
    "dependencies": "",
@@ -79,106 +171,14 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Shop Masters",
-   "link_count": 5,
+   "label": "Post-Service: Retention & Reminders",
+   "link_count": 0,
+   "link_type": "DocType",
    "onboard": 0,
    "type": "Card Break"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Vehicle",
-   "link_count": 0,
-   "link_to": "Vehicle",
-   "link_type": "DocType",
-   "onboard": 1,
-   "type": "Link"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Customer",
-   "link_count": 0,
-   "link_to": "Customer",
-   "link_type": "DocType",
-   "onboard": 1,
-   "type": "Link"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Item",
-   "link_count": 0,
-   "link_to": "Item",
-   "link_type": "DocType",
-   "onboard": 1,
-   "type": "Link"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Price List",
-   "link_count": 0,
-   "link_to": "Price List",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "dependencies": "",
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Item Price",
-   "link_count": 0,
-   "link_to": "Item Price",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "ISM DocTypes",
-   "link_count": 3,
-   "onboard": 0,
-   "type": "Card Break"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Repair Vehicle",
-   "link_count": 0,
-   "link_to": "Repair Vehicle",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Inspection Template",
-   "link_count": 0,
-   "link_to": "Inspection Template",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Vehicle Check-in",
-   "link_count": 0,
-   "link_to": "Vehicle Check-in",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
   }
  ],
- "modified": "2026-10-06 14:40:55.531695",
+ "modified": "2026-10-07 07:16:09.912231",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM",
@@ -191,6 +191,24 @@
  "roles": [],
  "sequence_id": 1.0,
  "shortcuts": [
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "format": "{}",
+   "icon": "car",
+   "label": "Vehicle Check-in",
+   "link_to": "Vehicle Check-in",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "format": "{}",
+   "icon": "assets",
+   "label": "Repair Vehicle",
+   "link_to": "Repair Vehicle",
+   "type": "DocType"
+  },
   {
    "color": "Grey",
    "doc_view": "List",
@@ -225,24 +243,6 @@
    "icon": "money-coins-1",
    "label": "Payment Entry",
    "link_to": "Payment Entry",
-   "type": "DocType"
-  },
-  {
-   "color": "Grey",
-   "doc_view": "List",
-   "format": "{}",
-   "icon": "assets",
-   "label": "Vehicle",
-   "link_to": "Vehicle",
-   "type": "DocType"
-  },
-  {
-   "color": "Grey",
-   "doc_view": "List",
-   "format": "{}",
-   "icon": "customer",
-   "label": "Customer",
-   "link_to": "Customer",
    "type": "DocType"
   }
  ],
