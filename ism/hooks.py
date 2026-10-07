@@ -202,6 +202,10 @@ doc_events = {
 # Overriding Methods
 # ------------------------------
 
+website_route_rules = [
+	{"from_route": "/quote-approval", "to_route": "quote_approval"},
+]
+
 override_whitelisted_methods = {
 	"erpnext.selling.doctype.quotation.quotation.make_sales_order": "ism.api.quotation.make_sales_order"
 }
