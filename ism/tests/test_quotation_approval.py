@@ -35,7 +35,7 @@ class TestQuotationApproval(ISMTestCase):
 		self.item_1 = self.get_or_create_test_item(f"{TEST_PREFIX}Brakes")
 		self.item_2 = self.get_or_create_test_item(f"{TEST_PREFIX}Flush")
 
-	def create_quote_with_jobs(self):
+	def create_quote_with_jobs(self, submit=True):
 		"""Helper to create Quotation with two distinct jobs and linked items."""
 		q = frappe.get_doc({
 			"doctype": "Quotation",
@@ -72,11 +72,13 @@ class TestQuotationApproval(ISMTestCase):
 		})
 		q.insert(ignore_permissions=True)
 		self.track(q)
+		if submit:
+			q.submit()
 		return q
 
 	def test_job_estimated_total_calculation(self):
 		"""Ensure job.estimated_total is automatically computed from linked items."""
-		q = self.create_quote_with_jobs()
+		q = self.create_quote_with_jobs(submit=False)
 		q.reload()
 		self.assertEqual(q.custom_jobs[0].estimated_total, 300.0)
 		self.assertEqual(q.custom_jobs[1].estimated_total, 120.0)
@@ -141,7 +143,7 @@ class TestQuotationApproval(ISMTestCase):
 	def test_conversion_blocked_with_unresolved_jobs(self):
 		"""TEST-AUTH-02: Conversion to Sales Order must fail if any job is unresolved."""
 		q = self.create_quote_with_jobs()
-		# Job status is Draft
+		# Job status is Pending Approval on submitted quote
 		self.assertRaises(frappe.ValidationError, make_sales_order, q.name)
 
 	def test_approved_only_sales_order_transfer(self):
@@ -161,7 +163,6 @@ class TestQuotationApproval(ISMTestCase):
 			signer_name="John In-Person",
 		)
 		q.reload()
-		q.submit()
 
 		so = make_sales_order(q.name)
 		so.delivery_date = frappe.utils.nowdate()
@@ -218,7 +219,6 @@ class TestQuotationApproval(ISMTestCase):
 			signer_name="Initial Client",
 		)
 		q.reload()
-		q.submit()
 
 		so = make_sales_order(q.name)
 		so.delivery_date = frappe.utils.nowdate()
@@ -249,6 +249,7 @@ class TestQuotationApproval(ISMTestCase):
 			"custom_job_title": "Brake Caliper Replacement",
 		})
 		supp_quote.save(ignore_permissions=True)
+		supp_quote.submit()
 		supp_quote.reload()
 		caliper_job_id = supp_quote.custom_jobs[0].name
 
@@ -386,3 +387,38 @@ class TestQuotationApproval(ISMTestCase):
 		# Job estimated total should equal labor ($150) + parts ($100) = $250
 		self.assertEqual(flt(q.custom_jobs[0].estimated_total), 250.0)
 		self.assertEqual(flt(q.net_total), 250.0)
+
+	def test_quotation_submission_with_unresolved_jobs_succeeds(self):
+		"""Verify Quotation submits cleanly with unresolved jobs before presenting to customer."""
+		q = self.create_quote_with_jobs(submit=False)
+		self.assertEqual(q.docstatus, 0)
+		self.assertEqual(q.custom_approval_status, "Draft")
+		self.assertEqual(q.custom_jobs[0].status, "Draft")
+
+		# Submit estimate - must succeed and transition to Pending Approval
+		q.submit()
+		q.reload()
+		self.assertEqual(q.docstatus, 1)
+		self.assertEqual(q.custom_approval_status, "Pending Approval")
+		self.assertEqual(q.custom_jobs[0].status, "Pending Approval")
+
+		# Conversion to Sales Order is blocked until customer approves
+		self.assertRaises(frappe.ValidationError, make_sales_order, q.name)
+
+		# Customer approves jobs
+		capture_in_person_signature(
+			quotation_name=q.name,
+			approvals=[
+				{"name": q.custom_jobs[0].name, "status": "Approved"},
+				{"name": q.custom_jobs[1].name, "status": "Approved"},
+			],
+			signature_data="",
+			signer_name="Happy Customer",
+		)
+		q.reload()
+		self.assertEqual(q.custom_approval_status, "Customer Approved")
+
+		# Sales order conversion now succeeds
+		so = make_sales_order(q.name)
+		self.assertEqual(len(so.custom_jobs), 2)
+

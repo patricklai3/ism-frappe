@@ -36,6 +36,7 @@ def get_or_create_approval_token(quotation_name: str) -> tuple[str, str]:
 		if doc.custom_approval_status == "Draft":
 			doc.custom_approval_status = "Pending Approval"
 		doc.flags.ignore_validate = True
+		doc.flags.ignore_validate_update_after_submit = True
 		doc.save(ignore_permissions=True)
 
 	approval_url = f"{get_url()}/quote-approval?token={token}"
@@ -252,9 +253,9 @@ def submit_public_quote_approval(
 
 	doc = frappe.get_doc("Quotation", quotation_name)
 
-	# Validate docstatus - cannot modify submitted or cancelled quotation
-	if doc.docstatus != 0:
-		frappe.throw(_("Quotation {0} is already submitted or cancelled and cannot be modified.").format(doc.name))
+	# Validate docstatus - cannot modify cancelled quotation
+	if doc.docstatus == 2:
+		frappe.throw(_("Quotation {0} is cancelled and cannot be modified.").format(doc.name))
 
 	# Validate that quote still has unresolved jobs (prevent replay / tampering)
 	jobs = doc.get("custom_jobs") or []
@@ -457,6 +458,7 @@ def apply_job_decisions(
 		doc.custom_approval_status = "Declined"
 
 	doc.flags.ignore_validate = True
+	doc.flags.ignore_validate_update_after_submit = True
 	doc.save(ignore_permissions=True)
 
 	# Sync declined jobs to Repair Vehicle deferred services

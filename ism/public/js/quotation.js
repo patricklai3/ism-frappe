@@ -108,6 +108,16 @@ frappe.ui.form.on("Quotation", {
 
 
 function open_send_approval_dialog(frm) {
+	if (frm.doc.docstatus === 0) {
+		frappe.confirm(
+			__("The quotation must be submitted to freeze the estimate before presenting it to the customer. Submit now?"),
+			() => {
+				frm.savesubmit();
+			}
+		);
+		return;
+	}
+
 	const d = new frappe.ui.Dialog({
 		title: __("Send Approval Request"),
 		fields: [
@@ -163,6 +173,16 @@ function open_send_approval_dialog(frm) {
 
 
 function open_in_person_signature_dialog(frm) {
+	if (frm.doc.docstatus === 0) {
+		frappe.confirm(
+			__("The quotation must be submitted to freeze the estimate before capturing customer signature. Submit now?"),
+			() => {
+				frm.savesubmit();
+			}
+		);
+		return;
+	}
+
 	const jobs = frm.doc.custom_jobs || [];
 	if (!jobs.length) {
 		frappe.msgprint(__("Please configure at least one Repair Job before capturing customer signature."));
@@ -309,6 +329,16 @@ function open_in_person_signature_dialog(frm) {
 
 
 function open_verbal_approval_dialog(frm) {
+	if (frm.doc.docstatus === 0) {
+		frappe.confirm(
+			__("The quotation must be submitted to freeze the estimate before recording verbal authorization. Submit now?"),
+			() => {
+				frm.savesubmit();
+			}
+		);
+		return;
+	}
+
 	const jobs = frm.doc.custom_jobs || [];
 	if (!jobs.length) {
 		frappe.msgprint(__("Please configure at least one Repair Job before logging verbal authorization."));

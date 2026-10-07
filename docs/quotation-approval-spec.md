@@ -219,8 +219,9 @@ When a technician identifies secondary repairs during vehicle teardown:
 
 ## 6. Strict Validation Gates and Gating Enforcement
 
-### Gate 1: Quotation Submission and Sales Order Conversion
-- **Rule 1.1 (Resolution Completeness)**: A Quotation cannot be converted into a Sales Order if any `Quotation Job` remains in `Draft` or `Pending Approval`. Every job must have an explicit status of either `Approved` or `Declined`.
+### Gate 1: Sales Order Conversion (Pre-Repair Execution Gate)
+- **Quotation Submission Lifecycle**: Service advisors first submit the `Quotation` (`docstatus = 1`) to freeze the repair estimate. Submitting automatically transitions jobs and estimate status from `Draft` to `Pending Approval`. The submitted quotation is then presented to the customer for authorization.
+- **Rule 1.1 (Resolution Completeness)**: A Quotation cannot be converted into a Sales Order if any `Quotation Job` remains in `Draft` or `Pending Approval`. Every job must have an explicit status of either `Approved` or `Declined` before a Sales Order can be created.
 - **Rule 1.2 (Minimum Approval)**: A Quotation cannot be converted to a Sales Order if zero jobs are approved. At least one job must be `Approved`.
 - **Rule 1.3 (Approved-Only Transfer)**: The standard "Make -> Sales Order" mapper is overridden. Only `Quotation Item` rows belonging to `Approved` jobs are transferred into the Sales Order. Items linked to `Declined` jobs are excluded.
 - **Rule 1.4 (Automated Deferred Sync)**: Any jobs marked `Declined` are automatically copied into the `Repair Vehicle` document's `deferred_services` child table.
