@@ -95,3 +95,15 @@ class TestQuotationWorkflow(ISMTestCase):
 			reference_doctype="Quotation",
 		)
 		self.assertIsInstance(results, list)
+
+	def test_active_vehicle_query_tuple_and_dict_modes(self):
+		self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+		)
+		dict_res = get_active_checked_in_vehicles("Repair Vehicle", as_dict=True)
+		self.assertTrue(any(r["name"] == self.vehicle.name for r in dict_res))
+
+		tuple_res = get_active_checked_in_vehicles("Repair Vehicle", as_dict=False)
+		self.assertTrue(any(r[0] == self.vehicle.name for r in tuple_res))
+

@@ -34,6 +34,7 @@ frappe.ui.form.on("Quotation", {
 				callback(r) {
 					if (r && r.message) {
 						const ci = r.message;
+						frm._setting_from_vehicle = true;
 						frm.set_value("custom_vehicle_check_in", ci.name);
 						if (!frm.doc.custom_odometer_in && ci.intake_mileage) {
 							frm.set_value("custom_odometer_in", ci.intake_mileage);
@@ -45,6 +46,7 @@ frappe.ui.form.on("Quotation", {
 							frm.set_value("quotation_to", "Customer");
 							frm.set_value("party_name", ci.customer);
 						}
+						frm._setting_from_vehicle = false;
 					}
 				},
 			});
@@ -52,6 +54,9 @@ frappe.ui.form.on("Quotation", {
 	},
 
 	custom_vehicle_check_in(frm) {
+		if (frm._setting_from_vehicle) {
+			return;
+		}
 		if (frm.doc.custom_vehicle_check_in) {
 			frappe.db.get_value(
 				"Vehicle Check-in",

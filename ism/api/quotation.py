@@ -9,6 +9,7 @@ def validate_quotation(doc, method=None):
 	if not doc.custom_vehicle:
 		return
 
+	check_in = None
 	if doc.custom_vehicle_check_in:
 		check_in = frappe.db.get_value(
 			"Vehicle Check-in",
@@ -42,7 +43,7 @@ def validate_quotation(doc, method=None):
 					).format(doc.custom_vehicle)
 				)
 		else:
-			status = frappe.db.get_value("Vehicle Check-in", doc.custom_vehicle_check_in, "status")
+			status = check_in.status if check_in else frappe.db.get_value("Vehicle Check-in", doc.custom_vehicle_check_in, "status")
 			if status != "Checked In":
 				frappe.throw(
 					frappe._(
@@ -61,34 +62,37 @@ def get_active_checked_in_vehicles(
 	filters = filters or {}
 	customer = filters.get("customer")
 
-	conditions = ["ci.status = 'Checked In'"]
-	values = {}
+	v = frappe.qb.DocType("Repair Vehicle")
+	ci = frappe.qb.DocType("Vehicle Check-in")
+	rvc = frappe.qb.DocType("Repair Vehicle Customer")
+
+	query = (
+		frappe.qb.from_(v)
+		.inner_join(ci)
+		.on(ci.vehicle == v.name)
+		.left_join(rvc)
+		.on(rvc.parent == v.name)
+		.select(v.name, v.model, v.license_plate, v.customer)
+		.distinct()
+		.where(ci.status == "Checked In")
+		.orderby(v.creation, order=frappe.qb.desc)
+	)
 
 	if customer and isinstance(customer, str):
-		conditions.append("(v.customer = %(customer)s OR rvc.customer = %(customer)s)")
-		values["customer"] = customer
+		query = query.where((v.customer == customer) | (rvc.customer == customer))
 
-	if txt and isinstance(txt, str):
-		conditions.append("(v.name LIKE %(txt)s OR v.license_plate LIKE %(txt)s OR v.model LIKE %(txt)s)")
-		values["txt"] = f"%{txt}%"
+	if txt and isinstance(txt, str) and txt.strip():
+		like_term = f"%{txt.strip()}%"
+		query = query.where(
+			(v.name.like(like_term)) | (v.license_plate.like(like_term)) | (v.model.like(like_term))
+		)
 
-	where_clause = " AND ".join(conditions)
 	start_val = frappe.utils.cint(start)
 	page_len_val = frappe.utils.cint(page_len) or 20
 
-	return frappe.db.sql(
-		f"""
-		SELECT DISTINCT v.name, v.model, v.license_plate, v.customer
-		FROM `tabRepair Vehicle` v
-		INNER JOIN `tabVehicle Check-in` ci ON ci.vehicle = v.name
-		LEFT JOIN `tabRepair Vehicle Customer` rvc ON rvc.parent = v.name
-		WHERE {where_clause}
-		ORDER BY v.creation DESC
-		LIMIT %(start)s, %(page_len)s
-		""",
-		{"start": start_val, "page_len": page_len_val, **values},
-		as_dict=as_dict,
-	)
+	query = query.offset(start_val).limit(page_len_val)
+
+	return query.run(as_dict=as_dict)
 
 
 @frappe.whitelist()
@@ -96,6 +100,8 @@ def get_active_check_in_for_vehicle(vehicle: str):
 	"""Return the active check-in details for a given vehicle."""
 	if not isinstance(vehicle, str) or not vehicle.strip():
 		frappe.throw(frappe._("Invalid vehicle parameter"), frappe.ValidationError)
+
+	frappe.has_permission("Vehicle Check-in", "read", throw=True)
 
 	check_in = frappe.db.get_value(
 		"Vehicle Check-in",

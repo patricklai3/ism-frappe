@@ -44,14 +44,20 @@ class VehicleCheckin(Document):
 
 	def link_vehicle_to_customer(self):
 		"""Link check-in customer to vehicle if not already associated."""
-		if self.vehicle and self.customer and frappe.db.exists("Repair Vehicle", self.vehicle):
-			vehicle_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
-			existing_customers = {row.customer for row in (vehicle_doc.customers or [])}
-			if vehicle_doc.customer:
-				existing_customers.add(vehicle_doc.customer)
+		if not (self.vehicle and self.customer):
+			return
 
-			if self.customer not in existing_customers:
-				vehicle_doc.add_customer(self.customer)
+		# Check primary customer first (fast indexed lookup)
+		if frappe.db.get_value("Repair Vehicle", self.vehicle, "customer") == self.customer:
+			return
+
+		# Check child customers table
+		if frappe.db.exists("Repair Vehicle Customer", {"parent": self.vehicle, "customer": self.customer}):
+			return
+
+		if frappe.db.exists("Repair Vehicle", self.vehicle):
+			vehicle_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
+			vehicle_doc.add_customer(self.customer)
 
 
 @frappe.whitelist()
@@ -59,6 +65,8 @@ def get_vehicle_customers(vehicle: str):
 	"""Return list of all customers linked to this vehicle."""
 	if not isinstance(vehicle, str) or not vehicle.strip():
 		return []
+
+	frappe.has_permission("Repair Vehicle", "read", throw=True)
 
 	if not frappe.db.exists("Repair Vehicle", vehicle):
 		return []
@@ -113,6 +121,7 @@ def check_out_vehicle(check_in_name: str):
 		frappe.throw(frappe._("Invalid check_in_name parameter"))
 
 	doc = frappe.get_doc("Vehicle Check-in", check_in_name)
+	doc.check_permission("write")
 	if doc.status == "Checked Out":
 		frappe.throw(frappe._("Vehicle Check-in {0} is already checked out.").format(check_in_name))
 
