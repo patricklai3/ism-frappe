@@ -114,13 +114,17 @@ Convert approved estimate lines into an active Repair Order (RO), reserve or ord
 - **Printed Job Card**: Generate a technician worksheet that hides prices and shows symptoms and labor instructions.
 
 ### Your Notes & Specifications
-<!-- Fill in your specific requirements, preferred fields, or business rules below -->
+<!-- Detailed technical specification defined in docs/quotation-approval-spec.md -->
 - **Approval Capture Method (Signature pad, SMS link, verbal confirmation log)**:
-  - 
+  - Multi-channel capture: Remote tokenized web link (SMS & email, 48-hr expiry), in-person tablet canvas signature modal in Desk, and advisor-logged verbal phone authorization modal with caller audit trail.
+  - Per-job granularity: Customers can partially approve (e.g. approve brakes, decline transmission flush).
+  - Detailed spec: See [quotation-approval-spec.md](file:///C:/Users/real2/.gemini/antigravity/worktrees/ism/spec_quotation_approval/docs/quotation-approval-spec.md).
 - **Handling of Unapproved / Declined Items**:
-  - 
+  - Strict gating: Quotation to Sales Order conversion requires all jobs to be resolved (`Approved` or `Declined`). Conversion is blocked if any job remains `Pending`.
+  - Only approved jobs and their linked items transfer to Sales Order.
+  - Declined jobs automatically copy to the vehicle's `deferred_services` log for retention, future marketing, and liability protection.
 - **Stock Reservation Rules**:
-  - 
+  - Material requests and stock reservations trigger only for approved jobs upon Sales Order creation.
 
 ---
 
@@ -310,7 +314,7 @@ As features are scoped, classify them here:
 | `FEAT-001` | Vehicle DocType & Link | Quotation | ERPNext Customer | `P0` | Draft |
 | `FEAT-002` | Job Package / Canned Jobs | Quotation | ERPNext Item | `P0` | Draft |
 | `FEAT-003` | Parts Markup Matrix | Quotation | ERPNext Item Price | `P1` | Draft |
-| `FEAT-004` | Digital Customer Approval | Handoff 1 | Quotation | `P1` | Draft |
+| `FEAT-004` | Digital Customer Approval | Handoff 1 | Quotation | `P0` | Specified ([Spec](file:///C:/Users/real2/.gemini/antigravity/worktrees/ism/spec_quotation_approval/docs/quotation-approval-spec.md)) |
 | `FEAT-005` | Technician Labor Time Logs | Sales Order | ERPNext Employee | `P1` | Draft |
 | `FEAT-006` | Shop Supplies & EPA Fees | Sales Invoice | Sales Taxes & Charges | `P0` | Draft |
 | `FEAT-007` | Automotive Print Formats | Sales Invoice | Print Format | `P0` | Draft |
