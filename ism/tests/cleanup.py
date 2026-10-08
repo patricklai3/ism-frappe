@@ -176,11 +176,11 @@ def cleanup_all_test_data(verbose: bool = True):
 	# 9. Clean signature files and test attachments
 	test_files = frappe.get_all(
 		"File",
-		filters=[["file_name", "like", "sig_%"]],
+		filters=[["attached_to_name", "like", "_TEST%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"File",
-		filters=[["attached_to_name", "like", "_TEST%"]],
+		filters=[["attached_to_name", "like", "_Test%"]],
 		pluck="name",
 	)
 	for f in set(test_files):
@@ -189,6 +189,26 @@ def cleanup_all_test_data(verbose: bool = True):
 			log(f"Deleted test File: {f}")
 		except Exception as e:
 			log(f"Failed deleting test File {f}: {e}")
+
+	# 10. Clean test Repair Orders
+	test_ros = frappe.get_all(
+		"Repair Order",
+		filters=[["customer", "like", "_Test%"]],
+		pluck="name",
+	) + frappe.get_all(
+		"Repair Order",
+		filters=[["customer", "like", "_TEST%"]],
+		pluck="name",
+	)
+	for ro in set(test_ros):
+		try:
+			doc = frappe.get_doc("Repair Order", ro)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc("Repair Order", ro, force=True, ignore_permissions=True)
+			log(f"Deleted test Repair Order: {ro}")
+		except Exception as e:
+			log(f"Failed deleting test Repair Order {ro}: {e}")
 
 	frappe.db.commit()
 	log("Cleanup of test data completed successfully.")

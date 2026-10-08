@@ -6,7 +6,13 @@ frappe.ui.form.on("Vehicle Check-in", {
 		if (!frm.is_new()) {
 			frm._original_mileage = frm.doc.intake_mileage;
 
-			if (frm.doc.status === "Checked In") {
+				frm.add_custom_button(__("Repair Order"), () => {
+					frappe.model.open_mapped_doc({
+						method: "ism.ism.doctype.repair_order.repair_order.make_repair_order",
+						frm: frm,
+					});
+				}, __("Create"));
+
 				frm.add_custom_button(__("Quotation"), () => {
 					frappe.model.open_mapped_doc({
 						method: "ism.ism.doctype.vehicle_check_in.vehicle_check_in.make_quotation",

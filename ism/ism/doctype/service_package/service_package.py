@@ -62,12 +62,12 @@ class ServicePackage(Document):
 		"""Clean up auto-created Item if no transactions reference it."""
 		item_code = (self.package_name or self.name or "").strip()
 		if item_code and frappe.db.exists("Item", item_code):
-			has_quotations = frappe.db.count("Quotation Item", {"item_code": item_code})
-			has_so = frappe.db.count("Sales Order Item", {"item_code": item_code})
-			has_si = frappe.db.count("Sales Invoice Item", {"item_code": item_code})
-			if not (has_quotations or has_so or has_si):
+			has_ro = frappe.db.count("Repair Order Item", {"item_code": item_code}) if frappe.db.table_exists("tabRepair Order Item") else 0
+			has_quotations = frappe.db.count("Quotation Item", {"item_code": item_code}) if frappe.db.table_exists("tabQuotation Item") else 0
+			has_so = frappe.db.count("Sales Order Item", {"item_code": item_code}) if frappe.db.table_exists("tabSales Order Item") else 0
+			has_si = frappe.db.count("Sales Invoice Item", {"item_code": item_code}) if frappe.db.table_exists("tabSales Invoice Item") else 0
+			if not (has_ro or has_quotations or has_so or has_si):
 				try:
 					frappe.delete_doc("Item", item_code, force=True, ignore_permissions=True)
 				except Exception:
 					pass
-

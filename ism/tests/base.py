@@ -72,11 +72,36 @@ class ISMTestCase(unittest.TestCase):
 		}).insert(ignore_permissions=True)
 		return self.track(doc)
 
+	def create_test_repair_order(self, customer, vehicle, odometer_in=10000, **kwargs):
+		doc = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": customer,
+			"vehicle": vehicle,
+			"odometer_in": odometer_in,
+			**kwargs,
+		}).insert(ignore_permissions=True)
+		return self.track(doc)
+
+	def create_test_item(self, item_code, is_stock_item=0, standard_rate=0.0, **kwargs):
+		if frappe.db.exists("Item", item_code):
+			frappe.delete_doc("Item", item_code, force=True, ignore_permissions=True)
+		doc = frappe.get_doc({
+			"doctype": "Item",
+			"item_code": item_code,
+			"item_name": item_code,
+			"item_group": "Services" if not is_stock_item else "All Item Groups",
+			"is_stock_item": is_stock_item,
+			"standard_rate": standard_rate,
+			**kwargs,
+		}).insert(ignore_permissions=True)
+		return self.track(doc)
+
 	def get_or_create_test_item(self, item_code=f"{TEST_PREFIX}Labor_Item"):
 		if not frappe.db.exists("Item", item_code):
 			doc = frappe.get_doc({
 				"doctype": "Item",
 				"item_code": item_code,
+				"item_name": item_code,
 				"item_group": "Services",
 				"is_stock_item": 0,
 			}).insert(ignore_permissions=True)

@@ -14,6 +14,12 @@
   "is_valid_vin",
   "sb_customers",
   "customers",
+  "sb_service_history",
+  "last_odometer",
+  "last_service_date",
+  "col_service",
+  "next_service_odometer",
+  "next_service_date",
   "sb_details",
   "manufacturer",
   "model",
@@ -40,14 +46,16 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Customer",
-   "options": "Customer"
+   "options": "Customer",
+   "search_index": 1
   },
   {
    "allow_in_quick_entry": 1,
    "fieldname": "license_plate",
    "fieldtype": "Data",
    "in_list_view": 1,
-   "label": "License Plate"
+   "label": "License Plate",
+   "search_index": 1
   },
   {
    "allow_in_quick_entry": 1,
@@ -82,6 +90,37 @@
    "fieldtype": "Table",
    "label": "Customers",
    "options": "Repair Vehicle Customer"
+  },
+  {
+   "fieldname": "sb_service_history",
+   "fieldtype": "Section Break",
+   "label": "Service History & Mileage"
+  },
+  {
+   "fieldname": "last_odometer",
+   "fieldtype": "Int",
+   "label": "Last Recorded Mileage",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_service_date",
+   "fieldtype": "Date",
+   "label": "Last Service Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "col_service",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "next_service_odometer",
+   "fieldtype": "Int",
+   "label": "Next Service Mileage"
+  },
+  {
+   "fieldname": "next_service_date",
+   "fieldtype": "Date",
+   "label": "Next Service Date"
   },
   {
    "fieldname": "sb_details",

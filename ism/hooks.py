@@ -137,11 +137,11 @@ doctype_js = {
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
 # }
 
-# Document Events
-# ---------------
-# Hook on document methods and events
-
 after_migrate = ["ism.setup.after_migrate"]
+
+website_route_rules = [
+	{"from_route": "/quote-approval", "to_route": "quote_approval"},
+]
 
 doc_events = {
 	"DocType": {
@@ -163,7 +163,6 @@ doc_events = {
 		"before_submit": "ism.api.sales_invoice.validate_sales_invoice_authorization",
 	},
 }
-
 
 # Scheduled Tasks
 # ---------------

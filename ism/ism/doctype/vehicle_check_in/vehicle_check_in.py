@@ -132,6 +132,13 @@ def check_out_vehicle(check_in_name: str):
 
 
 @frappe.whitelist()
+def make_repair_order(source_name: str, target_doc=None):
+	"""Create a draft Repair Order from a Vehicle Check-in document."""
+	from ism.ism.doctype.repair_order.repair_order import make_repair_order as _make_ro
+	return _make_ro(source_name, target_doc)
+
+
+@frappe.whitelist()
 def make_quotation(source_name: str, target_doc=None):
 	"""Create a draft Quotation from a Vehicle Check-in document."""
 	def set_missing_values(source, target):

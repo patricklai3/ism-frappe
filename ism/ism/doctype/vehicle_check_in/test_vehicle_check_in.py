@@ -6,6 +6,7 @@ from ism.ism.doctype.vehicle_check_in.vehicle_check_in import (
 	check_out_vehicle,
 	get_vehicle_customers,
 	make_quotation,
+	make_repair_order,
 )
 from ism.tests.base import ISMTestCase, TEST_PREFIX
 
@@ -41,7 +42,11 @@ class TestVehicleCheckin(ISMTestCase):
 		check_in.intake_mileage = -50
 		self.assertRaises(frappe.ValidationError, check_in.insert)
 
+<<<<<<< HEAD
 	def test_make_quotation_mapping(self):
+=======
+	def test_make_repair_order_mapping(self):
+>>>>>>> custom_repair_sales_doctype
 		check_in = self.create_test_check_in(
 			vehicle=self.vehicle.name,
 			customer=self.customer.name,
@@ -49,6 +54,25 @@ class TestVehicleCheckin(ISMTestCase):
 			customer_concern="Annual maintenance inspection",
 		)
 
+		ro = make_repair_order(check_in.name)
+		self.assertEqual(ro.customer, self.customer.name)
+		self.assertEqual(ro.vehicle, self.vehicle.name)
+		self.assertEqual(ro.vehicle_check_in, check_in.name)
+		self.assertEqual(ro.odometer_in, 31200)
+		self.assertEqual(ro.customer_concern, "Annual maintenance inspection")
+		self.assertEqual(ro.status, "Draft Estimate")
+		self.assertEqual(ro.vehicle_location, "In Customer Lot")
+
+		ro.insert(ignore_permissions=True)
+		self.track(ro)
+
+	def test_make_quotation_mapping(self):
+		check_in = self.create_test_check_in(
+			vehicle=self.vehicle.name,
+			customer=self.customer.name,
+			intake_mileage=31200,
+			customer_concern="Annual maintenance inspection",
+		)
 		quotation = make_quotation(check_in.name)
 		self.assertEqual(quotation.party_name, self.customer.name)
 		self.assertEqual(quotation.custom_vehicle, self.vehicle.name)
@@ -57,7 +81,6 @@ class TestVehicleCheckin(ISMTestCase):
 		self.assertEqual(quotation.custom_customer_concern, "Annual maintenance inspection")
 		self.assertEqual(quotation.status, "Draft")
 
-		# Ensure mapped draft quotation saves without select validation error
 		quotation.append("items", {
 			"item_code": self.get_or_create_test_item(),
 			"qty": 1,
