@@ -33,6 +33,20 @@ class RepairOrder(Document):
 		self._update_progress_and_job_timing()
 		self._sync_declined_to_deferred_services()
 
+	def before_update_after_submit(self):
+		self.validate()
+
+	def on_cancel(self):
+		if self.sales_invoice:
+			si_docstatus = frappe.db.get_value("Sales Invoice", self.sales_invoice, "docstatus")
+			if si_docstatus == 1:
+				frappe.throw(
+					_("Cannot cancel Repair Order while active Sales Invoice {0} exists. Please cancel the Sales Invoice first.").format(
+						self.sales_invoice
+					)
+				)
+		self.status = "Cancelled"
+
 	def _validate_vehicle_and_customer(self):
 		if not self.vehicle or not self.customer:
 			return
@@ -169,7 +183,7 @@ class RepairOrder(Document):
 		self.vehicle_location = "In Bay / Being Serviced"
 		if self.status in ["Draft Estimate", "Pending Authorization"]:
 			self.status = "Authorized - In Progress"
-		self.save()
+		self.save(ignore_permissions=True)
 		return {"status": "success", "vehicle_location": self.vehicle_location, "picked_up_at": self.picked_up_at}
 
 	@frappe.whitelist()
@@ -181,7 +195,7 @@ class RepairOrder(Document):
 		self.status = "Work Completed"
 		if self.picked_up_at:
 			self.total_bay_hours = flt(time_diff_in_hours(self.parked_at, self.picked_up_at), 2)
-		self.save()
+		self.save(ignore_permissions=True)
 		return {"status": "success", "vehicle_location": self.vehicle_location, "total_bay_hours": self.total_bay_hours}
 
 	@frappe.whitelist()
@@ -200,7 +214,7 @@ class RepairOrder(Document):
 					job.completed_by = None
 					job.actual_duration_hours = 0.0
 				break
-		self.save()
+		self.save(ignore_permissions=True)
 		return {"status": "success", "progress_percent": self.progress_percent}
 
 	@frappe.whitelist()
@@ -254,7 +268,7 @@ class RepairOrder(Document):
 		audit_payload = f"{self.name}|{self.authorized_by}|{self.authorized_at}|{json.dumps(approvals, sort_keys=True)}"
 		self.audit_hash = hashlib.sha256(audit_payload.encode()).hexdigest()
 
-		self.save()
+		self.save(ignore_permissions=True)
 		return {"status": "success", "approval_status": self.approval_status}
 
 	@frappe.whitelist()
@@ -262,6 +276,7 @@ class RepairOrder(Document):
 		"""Expand canned service package into a new Job and child Items."""
 		pkg = frappe.get_doc("Service Package", service_package)
 		new_job_id = f"JOB-{len(self.jobs) + 1}"
+		is_supp = 1 if (self.docstatus == 1 or any(j.status == "Approved" for j in self.jobs)) else 0
 
 		self.append("jobs", {
 			"job_id": new_job_id,
@@ -269,7 +284,8 @@ class RepairOrder(Document):
 			"job_category": pkg.category or "Maintenance",
 			"service_package": pkg.name,
 			"estimated_labor_hours": flt(pkg.standard_labor_hours),
-			"status": "Draft",
+			"status": "Pending Approval" if is_supp else "Draft",
+			"is_supplement": is_supp,
 			"advisor_notes": pkg.description or "",
 		})
 
@@ -285,10 +301,71 @@ class RepairOrder(Document):
 				"uom": getattr(row, "uom", None) or item_doc.stock_uom,
 				"rate": flt(row.rate),
 				"amount": flt(row.qty or 1.0) * flt(row.rate),
-				"status": "Draft",
+				"status": "Pending Approval" if is_supp else "Draft",
 			})
 
-		self.save()
+		self.save(ignore_permissions=True)
+		return {"status": "success", "job_id": new_job_id}
+
+	@frappe.whitelist()
+	def add_supplement(self, job_title, job_category="Maintenance", estimated_labor_hours=0, labor_rate=0, parts=None, notes=None):
+		"""Add a supplemental repair job to an existing Repair Order."""
+		new_job_id = f"JOB-{len(self.jobs) + 1}"
+		self.append("jobs", {
+			"job_id": new_job_id,
+			"job_title": job_title,
+			"job_category": job_category,
+			"estimated_labor_hours": flt(estimated_labor_hours),
+			"status": "Pending Approval",
+			"is_supplement": 1,
+			"advisor_notes": notes or _("Discovered during teardown / inspection"),
+		})
+
+		rate = flt(labor_rate) or 120.0
+		hours = flt(estimated_labor_hours)
+		if hours > 0:
+			default_labor = "LABOR-STD"
+			if not frappe.db.exists("Item", default_labor):
+				fallback = frappe.db.get_value("Item", {"is_stock_item": 0}, "name")
+				if fallback:
+					default_labor = fallback
+
+			self.append("items", {
+				"job_id": new_job_id,
+				"job_title": job_title,
+				"item_type": "Labor",
+				"item_code": default_labor,
+				"item_name": f"Labor: {job_title}",
+				"qty": hours,
+				"uom": "Hour",
+				"rate": rate,
+				"amount": hours * rate,
+				"status": "Pending Approval",
+			})
+
+		if parts:
+			if isinstance(parts, str):
+				parts = json.loads(parts)
+			for p in parts:
+				item_code = p.get("item_code")
+				if item_code and frappe.db.exists("Item", item_code):
+					item_doc = frappe.get_cached_doc("Item", item_code)
+					qty = flt(p.get("qty", 1.0))
+					part_rate = flt(p.get("rate", item_doc.standard_rate or 0.0))
+					self.append("items", {
+						"job_id": new_job_id,
+						"job_title": job_title,
+						"item_type": "Part",
+						"item_code": item_code,
+						"item_name": item_doc.item_name,
+						"qty": qty,
+						"uom": getattr(item_doc, "stock_uom", "Nos"),
+						"rate": part_rate,
+						"amount": qty * part_rate,
+						"status": "Pending Approval",
+					})
+
+		self.save(ignore_permissions=True)
 		return {"status": "success", "job_id": new_job_id}
 
 	@frappe.whitelist()
@@ -420,7 +497,11 @@ class RepairOrder(Document):
 				},
 			)
 
-		self.submit()
+		if self.docstatus == 0:
+			self.submit()
+		else:
+			self.save(ignore_permissions=True)
+
 		return {
 			"status": "success",
 			"sales_invoice": self.sales_invoice,

@@ -29,11 +29,17 @@ frappe.ui.form.on("Repair Order", {
 	refresh(frm) {
 		frm.trigger("render_progress_indicator");
 
-		if (!frm.is_new() && frm.doc.docstatus === 0) {
-			// 1. Service Packages
-			frm.add_custom_button(__("Add Service Package"), () => {
-				frm.trigger("open_service_package_dialog");
-			});
+		if (!frm.is_new() && frm.doc.docstatus !== 2) {
+			// 1. Service Packages & Supplements
+			if (!frm.doc.vehicle_released) {
+				frm.add_custom_button(__("Add Service Package"), () => {
+					frm.trigger("open_service_package_dialog");
+				}, __("Jobs & Packages"));
+
+				frm.add_custom_button(__("Add Supplement"), () => {
+					frm.trigger("open_add_supplement_dialog");
+				}, __("Jobs & Packages"));
+			}
 
 			// 2. Bay Shop Floor Execution Buttons
 			if (frm.doc.vehicle_location !== "In Bay / Being Serviced" && !frm.doc.vehicle_released) {
@@ -42,41 +48,47 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Bay Execution"));
 			}
 
-			if (frm.doc.vehicle_location === "In Bay / Being Serviced") {
+			if (frm.doc.vehicle_location === "In Bay / Being Serviced" && !frm.doc.vehicle_released) {
 				frm.add_custom_button(__("Park Vehicle (Lot / Ready)"), () => {
 					frm.call("park_vehicle").then(() => frm.reload_doc());
 				}, __("Bay Execution"));
 			}
 
 			// 3. Customer Approvals
-			frm.add_custom_button(__("Send Approval Link"), () => {
-				frm.trigger("open_send_approval_dialog");
-			}, __("Customer Approval"));
+			if (!frm.doc.vehicle_released) {
+				frm.add_custom_button(__("Send Approval Link"), () => {
+					frm.trigger("open_send_approval_dialog");
+				}, __("Customer Approval"));
 
-			frm.add_custom_button(__("In-Person Signature"), () => {
-				frm.trigger("open_in_person_signature_dialog");
-			}, __("Customer Approval"));
+				frm.add_custom_button(__("In-Person Signature"), () => {
+					frm.trigger("open_in_person_signature_dialog");
+				}, __("Customer Approval"));
 
-			frm.add_custom_button(__("Log Verbal Approval"), () => {
-				frm.trigger("open_verbal_approval_dialog");
-			}, __("Customer Approval"));
+				frm.add_custom_button(__("Log Verbal Approval"), () => {
+					frm.trigger("open_verbal_approval_dialog");
+				}, __("Customer Approval"));
+			}
 
 			// 4. Procurement & Material Request
-			frm.add_custom_button(__("Create Material Request"), () => {
-				frm.call("create_material_request").then((r) => {
-					if (r && r.message && r.message.material_request) {
-						frappe.show_alert({
-							message: __("Material Request {0} created", [r.message.material_request]),
-							indicator: "green",
-						});
-					}
-				});
-			}, __("Inventory"));
+			if (!frm.doc.vehicle_released) {
+				frm.add_custom_button(__("Create Material Request"), () => {
+					frm.call("create_material_request").then((r) => {
+						if (r && r.message && r.message.material_request) {
+							frappe.show_alert({
+								message: __("Material Request {0} created", [r.message.material_request]),
+								indicator: "green",
+							});
+						}
+					});
+				}, __("Inventory"));
+			}
 
 			// 5. Billing & Release Action
-			frm.add_custom_button(__("Process Payment & Release"), () => {
-				frm.trigger("open_payment_modal");
-			}).addClass("btn-primary");
+			if (!frm.doc.vehicle_released && frm.doc.status !== "Closed / Released") {
+				frm.add_custom_button(__("Process Payment & Release"), () => {
+					frm.trigger("open_payment_modal");
+				}).addClass("btn-primary");
+			}
 		}
 	},
 
@@ -400,6 +412,77 @@ frappe.ui.form.on("Repair Order", {
 		});
 		d.show();
 	},
+
+	open_add_supplement_dialog(frm) {
+		const d = new frappe.ui.Dialog({
+			title: __("Add Supplemental Repair Job"),
+			fields: [
+				{
+					fieldtype: "Data",
+					fieldname: "job_title",
+					label: __("Job Title / Operation"),
+					reqd: 1,
+				},
+				{
+					fieldtype: "Select",
+					fieldname: "job_category",
+					label: __("Category"),
+					options: "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther",
+					default: "Mechanical",
+					reqd: 1,
+				},
+				{
+					fieldtype: "Column Break",
+				},
+				{
+					fieldtype: "Float",
+					fieldname: "estimated_labor_hours",
+					label: __("Est. Labor Hours"),
+					default: 1.0,
+				},
+				{
+					fieldtype: "Currency",
+					fieldname: "labor_rate",
+					label: __("Labor Rate ($/hr)"),
+					default: 120.0,
+				},
+				{
+					fieldtype: "Section Break",
+					label: __("Findings & Reason for Supplement"),
+				},
+				{
+					fieldtype: "Small Text",
+					fieldname: "advisor_notes",
+					label: __("Advisor Notes / Discovery Reason"),
+					placeholder: __("E.g. Discovered seized caliper slide pins while replacing brake pads"),
+				},
+			],
+			primary_action_label: __("Add Supplement"),
+			primary_action(values) {
+				frm.call({
+					method: "add_supplement",
+					args: {
+						job_title: values.job_title,
+						job_category: values.job_category,
+						estimated_labor_hours: values.estimated_labor_hours,
+						labor_rate: values.labor_rate,
+						notes: values.advisor_notes,
+					},
+					callback(r) {
+						if (r.message && r.message.status === "success") {
+							frappe.show_alert({
+								message: __("Supplement {0} added to Repair Order", [r.message.job_id]),
+								indicator: "green",
+							});
+							d.hide();
+							frm.reload_doc();
+						}
+					},
+				});
+			},
+		});
+		d.show();
+	},
 });
 
 frappe.ui.form.on("Repair Order Job", {
@@ -408,5 +491,30 @@ frappe.ui.form.on("Repair Order Job", {
 		frm.call("toggle_job_completion", { job_id: row.job_id, is_completed: row.is_completed }).then(() => {
 			frm.reload_doc();
 		});
+	},
+});
+
+frappe.ui.form.on("Repair Order Item", {
+	qty(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		frappe.model.set_value(cdt, cdn, "amount", flt(row.qty) * flt(row.rate));
+	},
+	rate(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		frappe.model.set_value(cdt, cdn, "amount", flt(row.qty) * flt(row.rate));
+	},
+	item_code(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (row.item_code) {
+			frappe.db.get_value("Item", row.item_code, ["item_name", "stock_uom", "standard_rate"], (r) => {
+				if (r) {
+					frappe.model.set_value(cdt, cdn, "item_name", r.item_name || row.item_code);
+					frappe.model.set_value(cdt, cdn, "uom", r.stock_uom);
+					if (!row.rate && r.standard_rate) {
+						frappe.model.set_value(cdt, cdn, "rate", r.standard_rate);
+					}
+				}
+			});
+		}
 	},
 });

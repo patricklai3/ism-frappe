@@ -261,3 +261,88 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.customer_concern, "Engine vibration at idle")
 		self.assertEqual(ro.status, "Draft Estimate")
 		self.assertEqual(ro.vehicle_location, "In Customer Lot")
+
+	def test_submitted_repair_order_dynamic_lifecycle_and_supplements(self):
+		part1 = self.create_test_item("TEST-BRAKE-PAD", is_stock_item=0, standard_rate=150)
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 60000,
+			"customer_concern": "Brake grind and inspection",
+			"jobs": [
+				{"job_id": "JOB-1", "job_title": "Brake Service", "status": "Approved", "estimated_labor_hours": 2.0}
+			],
+			"items": [
+				{"job_id": "JOB-1", "item_code": part1.name, "item_name": "Brake Pad", "qty": 1, "rate": 150, "amount": 150}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		# 1. User submits Repair Order at intake for audit trail
+		ro.submit()
+		self.assertEqual(ro.docstatus, 1)
+
+		# 2. Bay execution on submitted document
+		ro.pick_up_vehicle()
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+		self.assertIsNotNone(ro.picked_up_at)
+
+		# 3. Technician toggles completion on submitted document
+		ro.toggle_job_completion(job_id="JOB-1", is_completed=1)
+		ro.reload()
+		self.assertEqual(ro.jobs[0].is_completed, 1)
+		self.assertIsNotNone(ro.jobs[0].completed_at)
+		self.assertEqual(ro.progress_percent, 100.0)
+
+		# 4. Discovered teardown issue -> Add supplement on submitted document
+		supp_res = ro.add_supplement(
+			job_title="Replace Warped Rotor",
+			job_category="Mechanical",
+			estimated_labor_hours=1.0,
+			labor_rate=120.0,
+			notes="Rotor thickness below discard spec",
+		)
+		ro.reload()
+		self.assertEqual(len(ro.jobs), 2)
+		self.assertEqual(ro.jobs[1].is_supplement, 1)
+		self.assertEqual(ro.jobs[1].status, "Pending Approval")
+		# Only JOB-1 is approved so far, so 1 of 1 approved jobs is completed = 100%
+		self.assertEqual(ro.progress_percent, 100.0)
+
+		# 5. Authorize supplement
+		ro.authorize_jobs(
+			approvals={"JOB-1": "Approved", "JOB-2": "Approved"},
+			channel="In-Person Signature",
+			signer_name="Test Customer",
+		)
+		ro.reload()
+		self.assertEqual(ro.jobs[1].status, "Approved")
+		# Now 1 of 2 approved jobs is completed = 50%
+		self.assertEqual(ro.progress_percent, 50.0)
+
+		# Complete supplement job
+		ro.toggle_job_completion(job_id="JOB-2", is_completed=1)
+		ro.reload()
+		self.assertEqual(ro.progress_percent, 100.0)
+
+		# 6. Park vehicle back in lot
+		ro.park_vehicle()
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "Completed / Parked in Lot")
+		self.assertEqual(ro.status, "Work Completed")
+
+		# 7. Finalize payment and vehicle release
+		release_res = ro.process_payment_and_release(
+			payment_method="Cash",
+			odometer_out=60015,
+		)
+		ro.reload()
+		self.assertEqual(release_res.get("status"), "success")
+		self.assertEqual(ro.status, "Billed / Paid")
+		self.assertEqual(ro.vehicle_released, 1)
+		self.assertEqual(ro.vehicle_location, "Released to Customer")
+		self.assertIsNotNone(ro.sales_invoice)
