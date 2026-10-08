@@ -746,3 +746,55 @@ class TestRepairOrder(ISMTestCase):
 			params = list(inspect.signature(fn).parameters.keys())
 			self.assertNotIn("args", params, f"Method {method_name} should not have 'args' parameter (e.g. *args)")
 
+	def test_run_doc_method_pick_up_and_park_vehicle_handler(self):
+		"""Verify that run_doc_method handler executes pick_up_vehicle and park_vehicle cleanly when called from desk."""
+		from frappe.handler import run_doc_method
+		from werkzeug.test import EnvironBuilder
+		from werkzeug.wrappers import Request
+
+		builder = EnvironBuilder(method="POST", data={})
+		frappe.local.request = Request(builder.get_environ())
+
+		item = self.create_test_item("TEST-P7-X", is_stock_item=0, standard_rate=100)
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 55000,
+			"status": "Authorized - In Progress",
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Brake Flush",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": item.name, "qty": 1, "rate": 20}]),
+				},
+			],
+		})
+		ro.insert()
+		ro.submit()
+		self.track(ro)
+
+		# 1. Simulate client calling frm.call({ doc: frm.doc, method: "pick_up_vehicle" })
+		frappe.response = frappe._dict()
+		frappe.response.docs = []
+		run_doc_method("pick_up_vehicle", docs=ro.as_json())
+		self.assertEqual(frappe.response.message.get("status"), "success")
+		self.assertEqual(frappe.response.message.get("vehicle_location"), "In Bay / Being Serviced")
+
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+
+		# 2. Simulate client calling frm.call({ doc: frm.doc, method: "park_vehicle" })
+		frappe.response = frappe._dict()
+		frappe.response.docs = []
+		run_doc_method("park_vehicle", docs=ro.as_json())
+		self.assertEqual(frappe.response.message.get("status"), "success")
+		self.assertEqual(frappe.response.message.get("vehicle_location"), "Completed / Parked in Lot")
+
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "Completed / Parked in Lot")
+		self.assertEqual(ro.status, "Work Completed")
+

@@ -399,7 +399,7 @@ class RepairOrder(Document):
 				)
 
 	@frappe.whitelist()
-	def pick_up_vehicle(self, **kwargs):
+	def pick_up_vehicle(self):
 		"""Technician pulls vehicle from lot into service bay."""
 		has_approved = any(s.status == "Approved" for s in self.services)
 		if self.approval_status == "Approved":
@@ -427,7 +427,7 @@ class RepairOrder(Document):
 		return {"status": "success", "vehicle_location": self.vehicle_location, "picked_up_at": self.picked_up_at}
 
 	@frappe.whitelist()
-	def park_vehicle(self, **kwargs):
+	def park_vehicle(self):
 		"""Technician parks vehicle back in lot after completing work."""
 		self.parked_at = now_datetime()
 		self.parked_by = frappe.session.user
@@ -449,6 +449,9 @@ class RepairOrder(Document):
 	@frappe.whitelist()
 	def toggle_service_completion(self, service_row_id=None, is_completed=None, **kwargs):
 		"""Toggle individual service completion with timestamping."""
+		if isinstance(service_row_id, dict):
+			is_completed = service_row_id.get("is_completed", is_completed)
+			service_row_id = service_row_id.get("service_row_id") or service_row_id.get("job_id")
 		service_row_id = service_row_id or kwargs.get("service_row_id")
 		if is_completed is None:
 			is_completed = kwargs.get("is_completed", 0)
@@ -502,7 +505,7 @@ class RepairOrder(Document):
 		return self.toggle_service_completion(service_row_id=job_id, is_completed=is_completed, **kwargs)
 
 	@frappe.whitelist()
-	def generate_approval_token(self, **kwargs):
+	def generate_approval_token(self):
 		"""Generate token for remote customer signature portal."""
 		self.approval_token = secrets.token_urlsafe(32)
 		self.approval_token_expiry = add_days(now_datetime(), 2)
@@ -618,6 +621,8 @@ class RepairOrder(Document):
 	@frappe.whitelist()
 	def add_service_package(self, service_package=None, **kwargs):
 		"""Expand canned service package into a new Service row with nested Parts."""
+		if isinstance(service_package, dict):
+			service_package = service_package.get("service_package")
 		service_package = service_package or kwargs.get("service_package")
 		pkg = frappe.get_doc("Service Package", service_package)
 		is_supp = 1 if (self.docstatus == 1 or any(s.status == "Approved" for s in self.services)) else 0
@@ -672,6 +677,14 @@ class RepairOrder(Document):
 	@frappe.whitelist()
 	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, parts=None, notes=None, job_title=None, **kwargs):
 		"""Add a supplemental repair service to an existing Repair Order."""
+		if isinstance(service_title, dict):
+			category = service_title.get("category", category)
+			labor_hours = service_title.get("labor_hours", labor_hours)
+			labor_rate = service_title.get("labor_rate", labor_rate)
+			parts = service_title.get("parts", parts)
+			notes = service_title.get("notes", notes)
+			job_title = service_title.get("job_title", job_title)
+			service_title = service_title.get("service_title")
 		title = service_title or job_title or kwargs.get("service_title") or kwargs.get("job_title") or "Supplemental Service"
 		hours = flt(labor_hours)
 		rate = flt(labor_rate) or 120.0
@@ -728,6 +741,9 @@ class RepairOrder(Document):
 		"""
 		Save a one-off repair service and its nested parts as a reusable Service Package.
 		"""
+		if isinstance(service_row_id, dict):
+			package_name = service_row_id.get("package_name", package_name)
+			service_row_id = service_row_id.get("service_row_id")
 		service_row_id = service_row_id or kwargs.get("service_row_id")
 		package_name = package_name or kwargs.get("package_name")
 
@@ -791,6 +807,10 @@ class RepairOrder(Document):
 		3. Creates matching Payment Entry
 		4. Marks vehicle released, stamps vehicle last service specs, and submits RO
 		"""
+		if isinstance(payment_method, dict):
+			paid_amount = payment_method.get("paid_amount", paid_amount)
+			odometer_out = payment_method.get("odometer_out", odometer_out)
+			payment_method = payment_method.get("payment_method") or "Debit / Interac"
 		payment_method = kwargs.get("payment_method") or payment_method
 		if paid_amount is None and "paid_amount" in kwargs:
 			paid_amount = kwargs.get("paid_amount")
@@ -946,7 +966,7 @@ class RepairOrder(Document):
 		}
 
 	@frappe.whitelist()
-	def create_material_request(self, **kwargs):
+	def create_material_request(self):
 		"""Create background ERPNext Material Request for all parts in approved services."""
 		approved_services = [s for s in self.services if s.status == "Approved"]
 		if not approved_services:
@@ -1095,7 +1115,7 @@ def pick_up_vehicle(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.pick_up_vehicle(**kwargs)
+	return ro.pick_up_vehicle()
 
 
 @frappe.whitelist()
@@ -1103,7 +1123,7 @@ def park_vehicle(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.park_vehicle(**kwargs)
+	return ro.park_vehicle()
 
 
 @frappe.whitelist()
@@ -1135,7 +1155,7 @@ def generate_approval_token(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.generate_approval_token(**kwargs)
+	return ro.generate_approval_token()
 
 
 @frappe.whitelist()
@@ -1143,7 +1163,7 @@ def create_material_request(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.create_material_request(**kwargs)
+	return ro.create_material_request()
 
 
 @frappe.whitelist()
