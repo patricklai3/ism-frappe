@@ -1,0 +1,483 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-10-07 20:40:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_info",
+  "naming_series",
+  "company",
+  "customer",
+  "contact_person",
+  "posting_date",
+  "price_list",
+  "currency",
+  "col_info",
+  "vehicle",
+  "vehicle_check_in",
+  "odometer_in",
+  "odometer_out",
+  "service_advisor",
+  "status",
+  "sec_concerns",
+  "customer_concern",
+  "sec_bay",
+  "vehicle_location",
+  "picked_up_at",
+  "picked_up_by",
+  "parked_at",
+  "parked_by",
+  "col_bay",
+  "progress_percent",
+  "total_bay_hours",
+  "total_billed_hours",
+  "vehicle_released",
+  "sec_jobs",
+  "jobs",
+  "sec_items",
+  "items",
+  "sec_time",
+  "time_logs",
+  "sec_totals",
+  "taxes_and_charges",
+  "tax_rate",
+  "net_total",
+  "total_taxes_and_charges",
+  "grand_total",
+  "col_totals",
+  "sales_invoice",
+  "payment_status",
+  "paid_amount",
+  "outstanding_amount",
+  "sec_auth",
+  "approval_status",
+  "approval_token",
+  "approval_token_expiry",
+  "authorized_by",
+  "authorized_at",
+  "col_auth",
+  "signature_image",
+  "verbal_notes",
+  "audit_hash",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_info",
+   "fieldtype": "Section Break",
+   "label": "Customer & Vehicle Information"
+  },
+  {
+   "default": "RO-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "RO-.YYYY.-.#####",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1
+  },
+  {
+   "fieldname": "contact_person",
+   "fieldtype": "Link",
+   "label": "Contact Person",
+   "options": "Contact"
+  },
+  {
+   "default": "Today",
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "label": "Posting Date",
+   "reqd": 1
+  },
+  {
+   "default": "Standard Selling",
+   "fieldname": "price_list",
+   "fieldtype": "Link",
+   "label": "Price List",
+   "options": "Price List"
+  },
+  {
+   "default": "CAD",
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency"
+  },
+  {
+   "fieldname": "col_info",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "vehicle",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Vehicle",
+   "options": "Repair Vehicle",
+   "reqd": 1
+  },
+  {
+   "fieldname": "vehicle_check_in",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Vehicle Check-in",
+   "options": "Vehicle Check-in"
+  },
+  {
+   "fieldname": "odometer_in",
+   "fieldtype": "Int",
+   "label": "Odometer In",
+   "reqd": 1
+  },
+  {
+   "fieldname": "odometer_out",
+   "fieldtype": "Int",
+   "label": "Odometer Out"
+  },
+  {
+   "fieldname": "service_advisor",
+   "fieldtype": "Link",
+   "label": "Service Advisor",
+   "options": "User"
+  },
+  {
+   "default": "Draft Estimate",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft Estimate\nPending Authorization\nAuthorized - In Progress\nWaiting on Parts\nWork Completed\nBilled / Paid\nClosed / Released\nCancelled",
+   "reqd": 1
+  },
+  {
+   "fieldname": "sec_concerns",
+   "fieldtype": "Section Break",
+   "label": "Customer Concern & Initial Symptoms"
+  },
+  {
+   "fieldname": "customer_concern",
+   "fieldtype": "Small Text",
+   "label": "Customer Concern"
+  },
+  {
+   "fieldname": "sec_bay",
+   "fieldtype": "Section Break",
+   "label": "Workshop Bay & Execution"
+  },
+  {
+   "default": "In Customer Lot",
+   "fieldname": "vehicle_location",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Vehicle Location",
+   "options": "In Customer Lot\nIn Bay / Being Serviced\nCompleted / Parked in Lot\nReleased to Customer"
+  },
+  {
+   "fieldname": "picked_up_at",
+   "fieldtype": "Datetime",
+   "label": "Bay Picked Up At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "picked_up_by",
+   "fieldtype": "Link",
+   "label": "Picked Up By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "parked_at",
+   "fieldtype": "Datetime",
+   "label": "Lot Parked At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "parked_by",
+   "fieldtype": "Link",
+   "label": "Parked By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "col_bay",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "progress_percent",
+   "fieldtype": "Percent",
+   "label": "Job Progress",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_bay_hours",
+   "fieldtype": "Float",
+   "label": "Total Bay Hours",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_billed_hours",
+   "fieldtype": "Float",
+   "label": "Total Billed Hours",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "vehicle_released",
+   "fieldtype": "Check",
+   "label": "Vehicle Released",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_jobs",
+   "fieldtype": "Section Break",
+   "label": "Authorized Repair Jobs"
+  },
+  {
+   "fieldname": "jobs",
+   "fieldtype": "Table",
+   "label": "Repair Jobs",
+   "options": "Repair Order Job"
+  },
+  {
+   "fieldname": "sec_items",
+   "fieldtype": "Section Break",
+   "label": "Line Items (Parts, Labor & Sublet)"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Line Items",
+   "options": "Repair Order Item"
+  },
+  {
+   "fieldname": "sec_time",
+   "fieldtype": "Section Break",
+   "label": "Bay Time Logs"
+  },
+  {
+   "fieldname": "time_logs",
+   "fieldtype": "Table",
+   "label": "Time Logs",
+   "options": "Repair Order Time Log"
+  },
+  {
+   "fieldname": "sec_totals",
+   "fieldtype": "Section Break",
+   "label": "Taxes & Financial Totals"
+  },
+  {
+   "fieldname": "taxes_and_charges",
+   "fieldtype": "Link",
+   "label": "Taxes and Charges Template",
+   "options": "Sales Taxes and Charges Template"
+  },
+  {
+   "default": "0",
+   "fieldname": "tax_rate",
+   "fieldtype": "Percent",
+   "label": "Tax Rate (%)"
+  },
+  {
+   "default": "0",
+   "fieldname": "net_total",
+   "fieldtype": "Currency",
+   "label": "Net Total",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "total_taxes_and_charges",
+   "fieldtype": "Currency",
+   "label": "Total Taxes",
+   "read_only": 1
+  },
+  {
+   "columns": 2,
+   "default": "0",
+   "fieldname": "grand_total",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Grand Total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "col_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "label": "Background Sales Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1
+  },
+  {
+   "default": "Unpaid",
+   "fieldname": "payment_status",
+   "fieldtype": "Select",
+   "label": "Payment Status",
+   "options": "Unpaid\nPartially Paid\nPaid",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "paid_amount",
+   "fieldtype": "Currency",
+   "label": "Paid Amount",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "outstanding_amount",
+   "fieldtype": "Currency",
+   "label": "Outstanding Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_auth",
+   "fieldtype": "Section Break",
+   "label": "Customer Authorization & Digital Signature"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "Draft",
+   "fieldname": "approval_status",
+   "fieldtype": "Select",
+   "label": "Approval Status",
+   "options": "Draft\nPending Approval\nApproved\nPartially Approved\nDeclined"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "approval_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Approval Token",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "approval_token_expiry",
+   "fieldtype": "Datetime",
+   "label": "Approval Token Expiry",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "authorized_by",
+   "fieldtype": "Data",
+   "label": "Authorized By"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "authorized_at",
+   "fieldtype": "Datetime",
+   "label": "Authorized At"
+  },
+  {
+   "fieldname": "col_auth",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "signature_image",
+   "fieldtype": "Attach Image",
+   "label": "Customer Signature"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "verbal_notes",
+   "fieldtype": "Small Text",
+   "label": "Verbal Authorization Notes"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "audit_hash",
+   "fieldtype": "Data",
+   "label": "Audit Hash",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Repair Order",
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-10-07 20:40:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Repair Order",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "role": "Maintenance User",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "search_fields": "customer,vehicle,status",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

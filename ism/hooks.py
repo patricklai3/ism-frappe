@@ -134,17 +134,17 @@ app_license = "mit"
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
 # }
 
-# Document Events
-# ---------------
-# Hook on document methods and events
+after_migrate = ["ism.setup.after_migrate"]
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+website_route_rules = [
+	{"from_route": "/quote-approval", "to_route": "quote_approval"},
+]
+
+doc_events = {
+	"Customer": {
+		"on_trash": "ism.ism.doctype.repair_vehicle.repair_vehicle.on_customer_trash",
+	},
+}
 
 # Scheduled Tasks
 # ---------------

@@ -1,0 +1,132 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:package_name",
+ "creation": "2026-10-06 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "package_name",
+  "category",
+  "description",
+  "col_break_rates",
+  "standard_labor_hours",
+  "hourly_rate",
+  "service_rate",
+  "is_flat_rate",
+  "sb_items",
+  "items"
+ ],
+ "fields": [
+  {
+   "fieldname": "package_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Service / Job Title",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "Maintenance",
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Category",
+   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Scope of Work / Description"
+  },
+  {
+   "fieldname": "col_break_rates",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1.0",
+   "fieldname": "standard_labor_hours",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Labor Hours"
+  },
+  {
+   "default": "0",
+   "fieldname": "hourly_rate",
+   "fieldtype": "Currency",
+   "label": "Hourly Labor Rate ($/hr)"
+  },
+  {
+   "default": "0",
+   "fieldname": "service_rate",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Labor / Service Amount ($)"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_flat_rate",
+   "fieldtype": "Check",
+   "label": "Flat Rate / Fixed Price"
+  },
+  {
+   "fieldname": "sb_items",
+   "fieldtype": "Section Break",
+   "label": "Required Parts & Materials"
+  },
+  {
+   "fieldname": "items",
+   "fieldtype": "Table",
+   "label": "Parts",
+   "options": "Service Package Item"
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-06 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Service Package",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Maintenance User",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "search_fields": "package_name,category",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}
