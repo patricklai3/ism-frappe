@@ -3,7 +3,7 @@
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_days, flt, today
+from frappe.utils import add_days, cint, flt, today
 
 from ism.ism.doctype.repair_order.repair_order import make_repair_order
 from ism.tests.base import ISMTestCase
@@ -34,6 +34,19 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.status, "Draft Estimate")
 		self.assertEqual(ro.vehicle_location, "In Customer Lot")
 		self.assertEqual(ro.odometer_in, 54000)
+
+	def test_user_creation_permission_and_in_create_flag(self):
+		for dt in ["Vehicle Check-in", "Repair Order", "Repair Vehicle", "Service Package"]:
+			meta = frappe.get_meta(dt)
+			self.assertEqual(
+				cint(getattr(meta, "in_create", 0)),
+				0,
+				f"DocType {dt} has in_create=1 ('User Cannot Create'), which hides the '+ Add' button on List Views.",
+			)
+			self.assertTrue(
+				frappe.has_permission(dt, "create", user="Administrator"),
+				f"Administrator should have create permission on {dt}",
+			)
 
 	def test_service_package_expansion_and_totals(self):
 		# Create test items

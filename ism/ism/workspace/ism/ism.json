@@ -16,11 +16,19 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Vehicle Intake",
+   "link_count": 0,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Vehicle Check-in",
    "link_count": 0,
    "link_to": "Vehicle Check-in",
    "link_type": "DocType",
-   "onboard": 0,
+   "onboard": 1,
    "type": "Link"
   },
   {
@@ -36,11 +44,47 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Repair Orders & Service",
+   "link_count": 0,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Repair Order",
    "link_count": 0,
    "link_to": "Repair Order",
    "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Vehicle Deferred Service",
+   "link_count": 0,
+   "link_to": "Vehicle Deferred Service",
+   "link_type": "DocType",
    "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Master Records",
+   "link_count": 0,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Repair Vehicle",
+   "link_count": 0,
+   "link_to": "Repair Vehicle",
+   "link_type": "DocType",
+   "onboard": 1,
    "type": "Link"
   },
   {
@@ -49,16 +93,6 @@
    "label": "Service Package",
    "link_count": 0,
    "link_to": "Service Package",
-   "link_type": "DocType",
-   "onboard": 0,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
-   "label": "Repair Vehicle",
-   "link_count": 0,
-   "link_to": "Repair Vehicle",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"

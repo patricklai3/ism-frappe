@@ -102,14 +102,15 @@ def setup_default_ism_settings():
 	settings.save(ignore_permissions=True)
 
 
-def sync_workspace():
-	"""Ensure ISM desk workspace is properly provisioned with Repair Order cards."""
-	if not frappe.db.exists("Workspace", "ISM"):
-		return
-	# Ensure DocTypes are visible on Desk
-	for dt in ["Repair Order", "Repair Vehicle", "Vehicle Check-in", "Service Package"]:
-		if frappe.db.exists("DocType", dt):
-			frappe.db.set_value("DocType", dt, "in_create", 1)
+def ensure_doctype_creation_enabled():
+	"""Ensure ISM DocTypes allow document creation by users (in_create must be 0).
+
+	Note: In Frappe, DocType.in_create is the database column for 'User Cannot Create'.
+	Setting in_create = 1 blocks document creation and hides the '+ Add' button.
+	"""
+	frappe.db.sql("UPDATE `tabDocType` SET in_create = 0 WHERE module = 'ISM'")
+	frappe.db.commit()
+	frappe.clear_cache()
 
 
 def after_migrate():
@@ -117,4 +118,4 @@ def after_migrate():
 	cleanup_legacy_custom_fields()
 	create_standard_inspection_template()
 	setup_default_ism_settings()
-	sync_workspace()
+	ensure_doctype_creation_enabled()
