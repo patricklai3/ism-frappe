@@ -46,14 +46,16 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Customer",
-   "options": "Customer"
+   "options": "Customer",
+   "search_index": 1
   },
   {
    "allow_in_quick_entry": 1,
    "fieldname": "license_plate",
    "fieldtype": "Data",
    "in_list_view": 1,
-   "label": "License Plate"
+   "label": "License Plate",
+   "search_index": 1
   },
   {
    "allow_in_quick_entry": 1,

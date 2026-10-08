@@ -798,3 +798,137 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.vehicle_location, "Completed / Parked in Lot")
 		self.assertEqual(ro.status, "Work Completed")
 
+	def test_public_quote_approval_security_and_type_confusion(self):
+		"""Verify public quote approval endpoints reject type confusion and support portal workflow."""
+		from ism.api.approval import (
+			get_public_quote_approval,
+			submit_customer_approval,
+			submit_public_quote_approval,
+		)
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 12000,
+			"status": "Draft Estimate",
+			"approval_status": "Pending Approval",
+			"services": [
+				{
+					"service_title": "Tire Rotation",
+					"status": "Pending Approval",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		ro.generate_approval_token()
+		valid_token = ro.approval_token
+		self.assertTrue(bool(valid_token))
+
+		# 1. Type confusion attack test: pass dict instead of string token
+		with self.assertRaises(Exception):
+			get_public_quote_approval({"!=": ""})
+
+		with self.assertRaises(Exception):
+			submit_customer_approval({"!=": ""}, {}, "Hacker", "sig")
+
+		# 2. Valid token fetch
+		valid_res = get_public_quote_approval(valid_token)
+		self.assertTrue(valid_res.get("valid"))
+		self.assertEqual(valid_res.get("repair_order", {}).get("name"), ro.name)
+
+		# 3. Test submit_public_quote_approval alias with list-of-objects payload from web portal
+		fake_sig = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+		portal_approvals = [{"job_id": ro.services[0].name, "status": "Approved"}]
+
+		res = submit_public_quote_approval(
+			token=valid_token,
+			approvals=portal_approvals,
+			signer_name="Portal Tester",
+			signature_data=fake_sig,
+		)
+		self.assertTrue(res.get("success"))
+
+		ro.reload()
+		self.assertEqual(ro.approval_status, "Approved")
+		self.assertEqual(ro.services[0].status, "Approved")
+		self.assertTrue(bool(ro.signature_image))
+
+		# 4. Replay prevention: submitting again on already approved quote must fail
+		with self.assertRaises(frappe.ValidationError):
+			submit_customer_approval(valid_token, portal_approvals, "Portal Tester", fake_sig)
+
+	def test_parts_html_xss_escaping(self):
+		"""Verify _render_parts_html escapes malicious user input to prevent XSS."""
+		from ism.ism.doctype.repair_order.repair_order import _render_parts_html
+
+		malicious_parts = [
+			{
+				"item_code": '<script>alert("xss")</script>',
+				"item_name": '<img src=x onerror=alert(1)>',
+				"qty": 2,
+				"uom": "<b>Nos</b>",
+				"rate": 10.0,
+			}
+		]
+		html = _render_parts_html(malicious_parts)
+		self.assertNotIn("<script>", html)
+		self.assertNotIn("<img src=x", html)
+		self.assertIn("&lt;script&gt;", html)
+		self.assertIn("&lt;img src=x", html)
+		self.assertIn("&lt;b&gt;Nos&lt;/b&gt;", html)
+
+	def test_on_cancel_persists_status_cancelled(self):
+		"""Verify cancelling a submitted Repair Order sets status = 'Cancelled' in the database."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 15000,
+			"status": "Authorized - In Progress",
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Diagnostic",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+				}
+			],
+		})
+		ro.insert()
+		ro.submit()
+		self.track(ro)
+
+		ro.cancel()
+		db_status = frappe.db.get_value("Repair Order", ro.name, "status")
+		self.assertEqual(db_status, "Cancelled")
+
+	def test_zero_labor_rate_not_overwritten(self):
+		"""Verify that zero labor rate (e.g. warranty / complimentary service) is preserved."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 16000,
+			"status": "Draft Estimate",
+			"services": [
+				{
+					"service_title": "Complimentary Courtesy Check",
+					"status": "Draft",
+					"labor_hours": 0.5,
+					"labor_rate": 0.0,
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		self.assertEqual(ro.services[0].labor_rate, 0.0)
+		self.assertEqual(ro.services[0].labor_amount, 0.0)
+
+

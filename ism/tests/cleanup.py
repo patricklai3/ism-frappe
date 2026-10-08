@@ -176,11 +176,11 @@ def cleanup_all_test_data(verbose: bool = True):
 	# 9. Clean signature files and test attachments
 	test_files = frappe.get_all(
 		"File",
-		filters=[["file_name", "like", "sig_%"]],
+		filters=[["attached_to_name", "like", "_TEST%"]],
 		pluck="name",
 	) + frappe.get_all(
 		"File",
-		filters=[["attached_to_name", "like", "_TEST%"]],
+		filters=[["attached_to_name", "like", "_Test%"]],
 		pluck="name",
 	)
 	for f in set(test_files):

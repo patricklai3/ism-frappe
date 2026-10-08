@@ -10,6 +10,7 @@ from frappe.model.document import Document
 from frappe.utils import (
 	add_days,
 	cint,
+	escape_html,
 	flt,
 	get_datetime,
 	now_datetime,
@@ -34,10 +35,10 @@ def _render_parts_html(parts):
 
 	rows = ""
 	for p in parts:
-		item_code = p.get("item_code", "")
-		item_name = p.get("item_name", item_code)
+		item_code = escape_html(str(p.get("item_code", "")))
+		item_name = escape_html(str(p.get("item_name", p.get("item_code", ""))))
 		qty = flt(p.get("qty", 1.0))
-		uom = p.get("uom", "Nos")
+		uom = escape_html(str(p.get("uom", "Nos")))
 		rate = flt(p.get("rate", 0.0))
 		amt = flt(p.get("amount", qty * rate), 2)
 		rows += f"""
@@ -166,6 +167,7 @@ class RepairOrder(Document):
 					)
 				)
 		self.status = "Cancelled"
+		self.db_set("status", "Cancelled")
 
 	def _validate_vehicle_and_customer(self):
 		if not self.vehicle or not self.customer:
@@ -207,6 +209,7 @@ class RepairOrder(Document):
 		Calculate labor amounts, parts totals, and combined service total for each service row.
 		"""
 		total_billed_hours = 0.0
+		default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
 
 		for s in self.services:
 			# Auto-assign service title if missing but service_package is set
@@ -215,11 +218,9 @@ class RepairOrder(Document):
 
 			# Labor calculation
 			labor_hours = flt(s.labor_hours)
+			if labor_hours and (s.labor_rate is None or s.labor_rate == ""):
+				s.labor_rate = _get_default_labor_rate()
 			labor_rate = flt(s.labor_rate)
-			if labor_hours and not labor_rate:
-				labor_rate = _get_default_labor_rate()
-				s.labor_rate = labor_rate
-
 			s.labor_amount = flt(labor_hours * labor_rate, 2)
 
 			# Parse parts list
@@ -240,7 +241,7 @@ class RepairOrder(Document):
 					continue
 				qty = flt(p.get("qty", 1.0)) or 1.0
 				rate = flt(p.get("rate", 0.0))
-				amt = flt(p.get("amount", qty * rate), 2)
+				amt = flt(qty * rate, 2)
 				parts_total += amt
 				cleaned_parts.append({
 					"item_code": p.get("item_code", ""),
@@ -249,7 +250,7 @@ class RepairOrder(Document):
 					"uom": p.get("uom", "Nos"),
 					"rate": rate,
 					"amount": amt,
-					"warehouse": p.get("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+					"warehouse": p.get("warehouse") or default_wh,
 				})
 
 			s.parts = json.dumps(cleaned_parts)
@@ -309,26 +310,33 @@ class RepairOrder(Document):
 		if not self.vehicle:
 			return
 
-		for s in self.services:
-			if s.status == "Declined":
-				exists = frappe.db.exists(
-					"Vehicle Deferred Service",
-					{
-						"parent": self.vehicle,
-						"repair_order": self.name,
-						"job_title": s.service_title,
-					},
-				)
-				if not exists:
+		declined = [s for s in self.services if s.status == "Declined"]
+		if not declined:
+			return
+
+		veh_doc = None
+		for s in declined:
+			exists = frappe.db.exists(
+				"Vehicle Deferred Service",
+				{
+					"parent": self.vehicle,
+					"repair_order": self.name,
+					"job_title": s.service_title,
+				},
+			)
+			if not exists:
+				if not veh_doc:
 					veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
-					veh_doc.append("deferred_services", {
-						"job_title": s.service_title,
-						"decline_date": today(),
-						"estimated_amount": s.total_amount,
-						"repair_order": self.name,
-						"decline_reason": s.advisor_notes or _("Declined during customer authorization"),
-					})
-					veh_doc.save(ignore_permissions=True)
+				veh_doc.append("deferred_services", {
+					"job_title": s.service_title,
+					"decline_date": today(),
+					"estimated_amount": s.total_amount,
+					"repair_order": self.name,
+					"decline_reason": s.advisor_notes or _("Declined during customer authorization"),
+				})
+
+		if veh_doc:
+			veh_doc.save(ignore_permissions=True)
 
 	def _validate_authorization_guards(self):
 		"""
@@ -580,7 +588,7 @@ class RepairOrder(Document):
 					dt=self.doctype,
 					dn=self.name,
 					decode=True,
-					is_private=1,
+					is_private=0,
 					df="signature_image",
 				)
 				self.signature_image = file_doc.file_url
@@ -1168,30 +1176,48 @@ def create_material_request(docname=None, **kwargs):
 
 @frappe.whitelist()
 def get_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters):
+	frappe.has_permission("Repair Vehicle", "read", throw=True)
+	txt_pattern = f"%{txt}%"
+	start_offset = cint(start)
+	limit_len = cint(page_len) or 20
+
+	v = frappe.qb.DocType("Repair Vehicle")
 	customer = filters.get("customer") if filters else None
+
 	if customer:
-		return frappe.db.sql(
-			"""
-			SELECT v.name, v.license_plate, v.make, v.model, v.year
-			FROM `tabRepair Vehicle` v
-			JOIN `tabRepair Vehicle Customer` vc ON vc.parent = v.name
-			WHERE vc.customer = %(customer)s
-			  AND (v.name LIKE %(txt)s OR v.license_plate LIKE %(txt)s OR v.vin LIKE %(txt)s)
-			ORDER BY v.name ASC
-			LIMIT %(start)s, %(page_len)s
-			""",
-			{"customer": customer, "txt": f"%{txt}%", "start": cint(start), "page_len": cint(page_len)},
+		vc = frappe.qb.DocType("Repair Vehicle Customer")
+		query = (
+			frappe.qb.from_(v)
+			.join(vc)
+			.on(vc.parent == v.name)
+			.select(v.name, v.license_plate, v.make, v.model, v.year)
+			.where(
+				(vc.customer == customer)
+				& (
+					(v.name.like(txt_pattern))
+					| (v.license_plate.like(txt_pattern))
+					| (v.vin.like(txt_pattern))
+				)
+			)
+			.orderby(v.name)
+			.offset(start_offset)
+			.limit(limit_len)
 		)
-	return frappe.db.sql(
-		"""
-		SELECT name, license_plate, make, model, year
-		FROM `tabRepair Vehicle`
-		WHERE name LIKE %(txt)s OR license_plate LIKE %(txt)s OR vin LIKE %(txt)s
-		ORDER BY name ASC
-		LIMIT %(start)s, %(page_len)s
-		""",
-		{"txt": f"%{txt}%", "start": cint(start), "page_len": cint(page_len)},
+		return query.run()
+
+	query = (
+		frappe.qb.from_(v)
+		.select(v.name, v.license_plate, v.make, v.model, v.year)
+		.where(
+			(v.name.like(txt_pattern))
+			| (v.license_plate.like(txt_pattern))
+			| (v.vin.like(txt_pattern))
+		)
+		.orderby(v.name)
+		.offset(start_offset)
+		.limit(limit_len)
 	)
+	return query.run()
 
 
 @frappe.whitelist()

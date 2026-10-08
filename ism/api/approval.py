@@ -119,10 +119,10 @@ def send_approval_request(
 @frappe.whitelist(allow_guest=True)
 def get_public_quote_approval(token: str) -> dict:
 	"""Fetch Repair Order details for public guest approval portal via secure token."""
-	if not token:
+	if not token or not isinstance(token, str) or not token.strip():
 		return {"valid": False, "error": _("Invalid or missing approval token.")}
 
-	ro_name = frappe.db.get_value("Repair Order", {"approval_token": token}, "name")
+	ro_name = frappe.db.get_value("Repair Order", {"approval_token": token.strip()}, "name")
 	if not ro_name:
 		return {"valid": False, "error": _("The requested repair estimate could not be found.")}
 
@@ -141,14 +141,14 @@ def get_public_quote_approval(token: str) -> dict:
 		v = frappe.db.get_value(
 			"Repair Vehicle",
 			doc.vehicle,
-			["name", "make", "model", "year", "license_plate", "vin"],
+			["name", "manufacturer", "model", "model_year", "license_plate", "vin"],
 			as_dict=True,
 		)
 		if v:
 			vehicle_data = {
-				"make": v.make,
+				"make": v.manufacturer or "Tesla",
 				"model": v.model,
-				"model_year": v.year,
+				"model_year": v.model_year,
 				"license_plate": v.license_plate,
 				"vin": v.vin,
 			}
@@ -273,17 +273,17 @@ def get_public_quote_approval(token: str) -> dict:
 @frappe.whitelist(allow_guest=True)
 def submit_customer_approval(
 	token: str,
-	approvals: dict | str,
+	approvals: dict | list | str,
 	signer_name: str,
 	signature_data: str,
 	ip_address: str | None = None,
 	user_agent: str | None = None,
 ) -> dict:
 	"""Public guest endpoint to record digital signature and per-job decisions."""
-	if not token:
-		frappe.throw(_("Missing approval token."))
+	if not token or not isinstance(token, str) or not token.strip():
+		frappe.throw(_("Missing or invalid approval token."))
 
-	ro_name = frappe.db.get_value("Repair Order", {"approval_token": token}, "name")
+	ro_name = frappe.db.get_value("Repair Order", {"approval_token": token.strip()}, "name")
 	if not ro_name:
 		frappe.throw(_("Repair Order not found for token."))
 
@@ -292,8 +292,25 @@ def submit_customer_approval(
 	if doc.approval_token_expiry and now_datetime() > get_datetime(doc.approval_token_expiry):
 		frappe.throw(_("Authorization token has expired."))
 
+	if doc.approval_status in ["Approved", "Partially Approved"] and doc.signature_image:
+		frappe.throw(_("This repair estimate has already been authorized."))
+
+	# Normalize approvals if passed as list of objects from web portal
 	if isinstance(approvals, str):
-		approvals = json.loads(approvals)
+		try:
+			approvals = json.loads(approvals)
+		except Exception:
+			approvals = {}
+
+	if isinstance(approvals, list):
+		approvals_dict = {}
+		for item in approvals:
+			if isinstance(item, dict):
+				key = item.get("job_id") or item.get("service_row_id") or item.get("name")
+				status = item.get("status") or item.get("decision")
+				if key and status:
+					approvals_dict[str(key)] = status
+		approvals = approvals_dict
 
 	doc.authorize_jobs(
 		approvals=approvals,
@@ -303,3 +320,9 @@ def submit_customer_approval(
 	)
 
 	return {"success": True, "message": _("Thank you! Your authorization has been recorded.")}
+
+
+@frappe.whitelist(allow_guest=True)
+def submit_public_quote_approval(*args, **kwargs):
+	"""Whitelisted alias matching quote_approval.html client caller."""
+	return submit_customer_approval(*args, **kwargs)
