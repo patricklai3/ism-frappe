@@ -250,6 +250,12 @@ perceive ~100ms).
   ERPNext hooks, naming series, or workflows often commit mid-test. Tests must
   track created documents and delete them in `tearDown()`. Cancel submitted
   documents before deletion. Use a dedicated test prefix for test record names.
+  When tests invoke methods that generate background transactions (e.g. Sales
+  Invoices, Payment Entries), verify that teardown cancels and deletes those
+  downstream transactions in reverse dependency order before cancelling parent
+  records or deleting parties. Never delete parties while linked ledger entries
+  require reversal. Residual purge routines must query transactions by party or
+  asset rather than relying on document name prefixes.
 
 ## 8. Error messages, logging & observability
 

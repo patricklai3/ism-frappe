@@ -38,16 +38,25 @@ Key patterns:
 
 Do not rely solely on database rollback. ERPNext triggers, naming series, and sub-operations often execute `frappe.db.commit()`. When a commit occurs, records persist in the database and pollute desk list views.
 
+### Transaction Hierarchy and Dependency Order
+
+Deleting or cancelling records in the wrong order triggers link validation errors (such as `Cannot cancel Repair Order while active Sales Invoice exists` or ERPNext's `Could not find Party`). Always clean up in strict reverse dependency order:
+
+1. **Payment Entries**: Cancel and delete payment allocations referencing Sales Invoices first.
+2. **Sales Invoices**: Cancel and delete background invoices; unlink them from parent records.
+3. **Primary Transactions**: (e.g. Repair Orders, Sales Orders, Quotations) Cancel and delete once downstream financial links are clear.
+4. **Intake / Check-in Documents**: Delete check-ins.
+5. **Assets / Vehicles**: Remove child rows (e.g. `Repair Vehicle Customer`), then delete vehicle.
+6. **Customers / Parties**: **Always delete last**. ERPNext requires the party to exist when cancelling ledger entries.
+
 Always clean up test data in `tearDown()`:
 
-1. Maintain a list of created records in `setUp()`.
-2. Append created documents to the list.
-3. In `tearDown()`, process the list in reverse order.
-4. Cancel submitted documents before deletion.
-5. Delete each document with `frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)`.
-6. Prefix all test names with a distinct marker (for example, `_TEST_`).
-7. Delete residual records matching the prefix.
-8. Call `frappe.db.commit()` at the end of `tearDown()`.
+1. Maintain a list of created records in `setUp()` and track created docs with `self.track(doc)`.
+2. In `tearDown()`, process the tracked list in reverse dependency order.
+3. If a document triggered background financial/stock documents (e.g. Sales Invoice, Payment Entry), cancel and delete those downstream documents before cancelling the parent document.
+4. Delete master records (Customer, Vehicle) only after all linked transactions are gone.
+5. In `cleanup_residual_data()`, query transactions by test customer/vehicle rather than document name prefix (since naming series assign names like `RO-` or `ACC-SINV-`).
+6. Call `frappe.db.commit()` at the end of `tearDown()`.
 
 Example base test case pattern:
 
@@ -75,23 +84,64 @@ class AppTestCase(unittest.TestCase):
     def cleanup_tracked_docs(self):
         while self._tracked_docs:
             doctype, name = self._tracked_docs.pop()
-            if frappe.db.exists(doctype, name):
-                try:
-                    doc = frappe.get_doc(doctype, name)
+            if not frappe.db.exists(doctype, name):
+                continue
+            try:
+                doc = frappe.get_doc(doctype, name)
+                if doctype == "Repair Order":
+                    self._teardown_repair_order(doc)
+                elif doctype == "Sales Invoice":
+                    self._teardown_sales_invoice(doc)
+                elif doctype == "Payment Entry":
+                    self._teardown_payment_entry(doc)
+                elif doctype == "Customer":
+                    self._teardown_customer(doc)
+                else:
                     if doc.docstatus == 1:
                         doc.cancel()
                     frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
-                except Exception:
-                    pass
+            except Exception:
+                pass
+
+    def _teardown_repair_order(self, doc):
+        si_name = getattr(doc, "sales_invoice", None)
+        if si_name and frappe.db.exists("Sales Invoice", si_name):
+            self._teardown_sales_invoice(frappe.get_doc("Sales Invoice", si_name))
+            doc.db_set("sales_invoice", None)
+            doc.reload()
+        if doc.docstatus == 1:
+            doc.cancel()
+        frappe.delete_doc("Repair Order", doc.name, force=True, ignore_permissions=True)
+
+    def _teardown_sales_invoice(self, doc):
+        pe_refs = frappe.get_all(
+            "Payment Entry Reference",
+            filters={"reference_doctype": "Sales Invoice", "reference_name": doc.name},
+            pluck="parent",
+        )
+        for pe_name in set(pe_refs):
+            if frappe.db.exists("Payment Entry", pe_name):
+                self._teardown_payment_entry(frappe.get_doc("Payment Entry", pe_name))
+        if doc.docstatus == 1:
+            doc.cancel()
+        frappe.delete_doc("Sales Invoice", doc.name, force=True, ignore_permissions=True)
+
+    def _teardown_payment_entry(self, doc):
+        if doc.docstatus == 1:
+            doc.cancel()
+        frappe.delete_doc("Payment Entry", doc.name, force=True, ignore_permissions=True)
+
+    def _teardown_customer(self, doc):
+        frappe.db.delete("Repair Vehicle Customer", {"customer": doc.name})
+        if doc.docstatus == 1:
+            doc.cancel()
+        frappe.delete_doc("Customer", doc.name, force=True, ignore_permissions=True)
 
     @classmethod
     def cleanup_residual_data(cls):
-        records = frappe.get_all("Customer", filters=[["name", "like", f"{TEST_PREFIX}%"]], pluck="name")
-        for name in records:
-            try:
-                frappe.delete_doc("Customer", name, force=True, ignore_permissions=True)
-            except Exception:
-                pass
+        # Match test transactions via party/vehicle and purge in reverse order
+        from ism.tests.cleanup import cleanup_all_test_data
+        cleanup_all_test_data(verbose=False)
 ```
 
 ## Unit tests (no database)
