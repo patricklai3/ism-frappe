@@ -849,6 +849,7 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(valid_res.get("repair_order", {}).get("name"), ro.name)
 
 		# 3. Test submit_public_quote_approval alias with list-of-objects payload from web portal
+		# and verify 'cmd' kwarg passed by Frappe execute_cmd RPC handler is accepted cleanly
 		fake_sig = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 		portal_approvals = [{"job_id": ro.services[0].name, "status": "Approved"}]
 
@@ -857,6 +858,7 @@ class TestRepairOrder(ISMTestCase):
 			approvals=portal_approvals,
 			signer_name="Portal Tester",
 			signature_data=fake_sig,
+			cmd="ism.api.approval.submit_public_quote_approval",
 		)
 		self.assertTrue(res.get("success"))
 
@@ -1186,6 +1188,50 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(flt(labor_lines[0].rate), 75.0)
 		self.assertEqual(flt(labor_lines[0].amount), 75.0)
 		self.assertEqual(flt(si.net_total), 225.0)
+
+	def test_quick_create_vehicle_autofills_customer_link(self):
+		"""Verify that Repair Vehicle DocType supports quick entry for customer,
+		and saving a vehicle with customer populated automatically syncs to child table
+		and associates cleanly with Repair Order."""
+		veh_meta = frappe.get_meta("Repair Vehicle")
+		self.assertEqual(veh_meta.quick_entry, 1)
+
+		cust_df = veh_meta.get_field("customer")
+		self.assertIsNotNone(cust_df)
+		self.assertEqual(cust_df.allow_in_quick_entry, 1)
+
+		vin_df = veh_meta.get_field("vin")
+		self.assertIsNotNone(vin_df)
+		self.assertEqual(vin_df.allow_in_quick_entry, 1)
+
+		# Create new vehicle with customer populated (as submitted by quick creation modal)
+		new_veh = frappe.get_doc({
+			"doctype": "Repair Vehicle",
+			"customer": self.customer.name,
+			"vin": "5YJSA1E28CF000099",
+			"license_plate": "RO-QUICK-1",
+		})
+		new_veh.insert()
+		self.track(new_veh)
+
+		# Verify primary customer is set and synced to child table
+		self.assertEqual(new_veh.customer, self.customer.name)
+		self.assertGreaterEqual(len(new_veh.customers), 1)
+		self.assertEqual(new_veh.customers[0].customer, self.customer.name)
+		self.assertEqual(new_veh.customers[0].is_primary, 1)
+
+		# Verify that new vehicle can be assigned to Repair Order
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": new_veh.name,
+			"odometer_in": 15000,
+		})
+		ro.insert()
+		self.track(ro)
+		self.assertEqual(ro.customer, self.customer.name)
+		self.assertEqual(ro.vehicle, new_veh.name)
+
 
 
 

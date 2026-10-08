@@ -1,0 +1,260 @@
+# Copyright (c) 2026, patricklai3 and contributors
+# For license information, please see license.txt
+
+import frappe
+from frappe.utils import flt
+from ism.tests.base import ISMTestCase
+from ism.utils.tesla_manual import (
+	get_category_for_correction_code,
+	parse_tesla_manual_url,
+	parse_vehicle_year_month,
+	is_in_generation_range,
+	get_tesla_manual_url_for_vehicle,
+	validate_vehicle_compatibility,
+	parse_tesla_procedure_html,
+)
+from ism.api.tesla import import_tesla_procedure, get_active_repair_orders, get_vehicle_manual_url
+from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
+
+
+class TestTeslaIntegration(ISMTestCase):
+	def test_category_taxonomy_mapping(self):
+		# 00 -> INSPECTION AND SERVICE
+		cat, subcat = get_category_for_correction_code("00030700")
+		self.assertEqual(cat, "INSPECTION AND SERVICE")
+
+		# 3301 -> BRAKES / Brake Discs and Calipers
+		cat, subcat = get_category_for_correction_code("33010100")
+		self.assertEqual(cat, "BRAKES")
+		self.assertEqual(subcat, "Brake Discs and Calipers")
+
+		# 1001 -> BODY / Bumper/Fascia
+		cat, subcat = get_category_for_correction_code("10010000")
+		self.assertEqual(cat, "BODY")
+		self.assertEqual(subcat, "Bumper/Fascia")
+
+		# 1750 -> ELECTRICAL / Wipers and Washers
+		cat, subcat = get_category_for_correction_code("17500100")
+		self.assertEqual(cat, "ELECTRICAL")
+		self.assertEqual(subcat, "Wipers and Washers")
+
+	def test_generation_url_parsing(self):
+		# Model 3 Classic
+		m3_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+		p1 = parse_tesla_manual_url(m3_url)
+		self.assertEqual(p1["applicable_model"], "Model 3")
+		self.assertEqual(p1["matched_generation"], "Model 3 Jun 2017 - Dec 2023")
+		self.assertEqual(p1["doc_guid"], "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50")
+
+		# Model 3 2024 Highland
+		m3_24_url = "https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/GUID-AAAA-BBBB-CCCC-DDDD.html"
+		p2 = parse_tesla_manual_url(m3_24_url)
+		self.assertEqual(p2["applicable_model"], "Model 3")
+		self.assertEqual(p2["matched_generation"], "Model 3 Jan 2024")
+
+		# Model S Palladium
+		ms_pal_url = "https://service.tesla.com/docs/ModelS/Palladium/ServiceManual/en-us/GUID-1111.html"
+		p3 = parse_tesla_manual_url(ms_pal_url)
+		self.assertEqual(p3["applicable_model"], "Model S")
+		self.assertEqual(p3["matched_generation"], "Model S Feb 2021 - May 2025")
+
+		# Model Y 2025 Juniper
+		my_25_url = "https://service.tesla.com/docs/ModelY/2025/ServiceManual/en-us/GUID-2222.html"
+		p4 = parse_tesla_manual_url(my_25_url)
+		self.assertEqual(p4["applicable_model"], "Model Y")
+		self.assertEqual(p4["matched_generation"], "Model Y Feb 2025")
+
+		# Cybertruck
+		ct_url = "https://service.tesla.com/docs/Cybertruck/ServiceManual/en-us/GUID-3333.html"
+		p5 = parse_tesla_manual_url(ct_url)
+		self.assertEqual(p5["applicable_model"], "Cybertruck")
+
+	def test_vehicle_date_and_url_resolution(self):
+		# Test date parsing
+		self.assertEqual(parse_vehicle_year_month("05/22"), (2022, 5))
+		self.assertEqual(parse_vehicle_year_month("May 2022"), (2022, 5))
+		self.assertEqual(parse_vehicle_year_month(None, 2023), (2023, 6))
+
+		# Create mock vehicle objects
+		v_m3_22 = frappe._dict({
+			"model": "Model 3",
+			"model_year": 2022,
+			"manufactured_month": "05/22",
+		})
+		url1 = get_tesla_manual_url_for_vehicle(v_m3_22)
+		self.assertEqual(url1, "https://service.tesla.com/docs/Model3/ServiceManual/en-us/")
+
+		v_m3_24 = frappe._dict({
+			"model": "Model 3",
+			"model_year": 2024,
+			"manufactured_month": "03/24",
+		})
+		url2 = get_tesla_manual_url_for_vehicle(v_m3_24)
+		self.assertEqual(url2, "https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/")
+
+	def test_generation_compatibility_validation(self):
+		v_m3_20 = frappe._dict({
+			"model": "Model 3",
+			"model_year": 2020,
+			"manufactured_month": "06/20",
+		})
+
+		# Compatible URL (2017-2023 Model 3)
+		compat_good = validate_vehicle_compatibility(
+			v_m3_20,
+			"https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+		)
+		self.assertTrue(compat_good["is_compatible"])
+
+		# Mismatched URL (2024+ Highland on 2020 Model 3)
+		compat_bad = validate_vehicle_compatibility(
+			v_m3_20,
+			"https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+		)
+		self.assertFalse(compat_bad["is_compatible"])
+		self.assertIn("Generation mismatch", compat_bad["warning"])
+
+		# Model Mismatch (Model Y procedure on Model 3 vehicle)
+		compat_model_mismatch = validate_vehicle_compatibility(
+			v_m3_20,
+			"https://service.tesla.com/docs/ModelY/ServiceManual/en-us/GUID-XXXX.html"
+		)
+		self.assertFalse(compat_model_mismatch["is_compatible"])
+		self.assertIn("Model mismatch", compat_model_mismatch["warning"])
+
+	def test_html_procedure_parsing(self):
+		sample_html = """
+		<html>
+		<head><title>Basic Vehicle Inspection (Inspection) | Tesla</title></head>
+		<body>
+			<article>
+				<h1 class="title topictitle1">
+					<span class="ph procedure-title">Basic Vehicle Inspection (Inspection)</span>
+				</h1>
+				<p class="shortdesc">
+					<span class="ph correction-code-title">Correction code</span>
+					<span class="ph correction-code">00030700</span>
+					<span class="ph frt-title">FRT</span>
+					<span class="ph frt">0.90</span>
+					Scope of vehicle check.
+				</p>
+			</article>
+		</body>
+		</html>
+		"""
+		url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+		parsed = parse_tesla_procedure_html(sample_html, url)
+
+		self.assertEqual(parsed["title"], "Basic Vehicle Inspection (Inspection)")
+		self.assertEqual(parsed["correction_code"], "00030700")
+		self.assertEqual(parsed["frt"], 0.90)
+		self.assertEqual(parsed["category"], "INSPECTION AND SERVICE")
+		self.assertEqual(parsed["doc_guid"], "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50")
+
+	def test_import_tesla_procedure_end_to_end(self):
+		cust = self.create_test_customer()
+		veh = self.create_test_vehicle(
+			vin="5YJ3E1EBXNF999999",
+			customer=cust.name,
+			model="Model 3",
+			model_year="2022",
+			manufactured_month="05/22",
+		)
+		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name)
+		self.track(ro)
+
+		proc_payload = {
+			"title": "Basic Vehicle Inspection (Inspection)",
+			"correction_code": "00030700",
+			"frt": 0.90,
+			"applicable_model": "Model 3",
+			"applicable_generation": "Model 3 Jun 2017 - Dec 2023",
+			"doc_guid": "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50",
+			"tesla_manual_url": "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html",
+			"description": "Basic vehicle multi-point inspection."
+		}
+
+		res = import_tesla_procedure(
+			repair_order=ro.name,
+			data=proc_payload
+		)
+		self.assertEqual(res["status"], "success")
+		self.assertEqual(res["correction_code"], "00030700")
+		self.assertEqual(res["frt"], 0.90)
+
+		# Verify Service Package was created and properly populated
+		pkg_name = res["service_package"]
+		pkg = frappe.get_doc("Service Package", pkg_name)
+		self.track(pkg)
+		self.assertEqual(pkg.correction_code, "00030700")
+		self.assertEqual(flt(pkg.frt), 0.90)
+		self.assertEqual(flt(pkg.standard_labor_hours), 0.90)
+		self.assertEqual(pkg.category, "INSPECTION AND SERVICE")
+		self.assertTrue(pkg.package_name.startswith("00030700 -"))
+
+		# Verify Repair Order Service row
+		ro.reload()
+		self.assertEqual(len(ro.services), 1)
+		srv = ro.services[0]
+		self.assertEqual(srv.service_package, pkg.name)
+		self.assertEqual(srv.correction_code, "00030700")
+		self.assertEqual(flt(srv.frt), 0.90)
+		self.assertEqual(flt(srv.labor_hours), 0.90)
+
+		default_rate = _get_default_labor_rate()
+		expected_labor_amt = flt(0.90 * default_rate, 2)
+		self.assertEqual(flt(srv.labor_amount), expected_labor_amt)
+
+		# Re-importing same procedure without duplicate_action should trigger duplicate_warning
+		res2 = import_tesla_procedure(
+			repair_order=ro.name,
+			data=proc_payload
+		)
+		self.assertEqual(res2["status"], "duplicate_warning")
+		self.assertTrue(res2["requires_duplicate_choice"])
+		self.assertEqual(
+			res2["message"],
+			"Correction code 00030700 is already on this Repair Order. Update existing row or Add as additional job?"
+		)
+
+		# Re-importing with duplicate_action="update" should update existing row
+		res_update = import_tesla_procedure(
+			repair_order=ro.name,
+			data=proc_payload,
+			duplicate_action="update"
+		)
+		self.assertEqual(res_update["status"], "success")
+		self.assertEqual(res_update["action"], "updated")
+		self.assertEqual(res_update["service_package"], pkg_name)
+		ro.reload()
+		self.assertEqual(len(ro.services), 1)
+
+		# Re-importing with duplicate_action="add" should append an additional row
+		res_add = import_tesla_procedure(
+			repair_order=ro.name,
+			data=proc_payload,
+			duplicate_action="add"
+		)
+		self.assertEqual(res_add["status"], "success")
+		self.assertEqual(res_add["action"], "added")
+		ro.reload()
+		self.assertEqual(len(ro.services), 2)
+
+		# Test supplement import into an approved order (verifying approval_status = Partially Approved)
+		ro.services[0].status = "Approved"
+		ro.approval_status = "Approved"
+		ro.save(ignore_permissions=True)
+
+		proc_payload2 = {
+			"title": "Garnish - Trunk (Remove and Replace)",
+			"correction_code": "15111102",
+			"frt": 0.06,
+			"applicable_model": "Model 3",
+			"tesla_manual_url": "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-E9564680-EA4B-4815-A239-171679188CA3.html"
+		}
+		res3 = import_tesla_procedure(repair_order=ro.name, data=proc_payload2)
+		self.assertEqual(res3["status"], "success")
+		ro.reload()
+		self.assertEqual(len(ro.services), 3)
+		self.assertEqual(ro.approval_status, "Partially Approved")
+

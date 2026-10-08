@@ -119,6 +119,27 @@ function auto_select_active_tab(frm) {
 	}
 }
 
+frappe.provide("frappe.ui.form");
+
+if (!frappe.ui.form.RepairVehicleQuickEntryForm) {
+	frappe.ui.form.RepairVehicleQuickEntryForm = class RepairVehicleQuickEntryForm extends frappe.ui.form.QuickEntryForm {
+		render_dialog() {
+			if (!this.doc.customer) {
+				const ro_customer =
+					(frappe._from_link?.doc?.doctype === "Repair Order" && frappe._from_link.doc.customer) ||
+					(cur_frm?.doctype === "Repair Order" && cur_frm.doc?.customer);
+				if (ro_customer) {
+					this.doc.customer = ro_customer;
+				}
+			}
+			super.render_dialog();
+			if (this.doc.customer && this.fields_dict?.customer && !this.fields_dict.customer.get_value()) {
+				this.fields_dict.customer.set_input(this.doc.customer);
+			}
+		}
+	};
+}
+
 frappe.ui.form.on("Repair Order", {
 	setup(frm) {
 		if (!frm._ro_nav_bound) {
@@ -196,6 +217,8 @@ frappe.ui.form.on("Repair Order", {
 				},
 			};
 		});
+
+		frm.trigger("set_route_options_for_new_doc");
 	},
 
 	onload(frm) {
@@ -232,6 +255,17 @@ frappe.ui.form.on("Repair Order", {
 				}
 			}
 		}
+
+		frappe.realtime.off("repair_order_updated");
+		frappe.realtime.on("repair_order_updated", (data) => {
+			if (data && frm.doc && data.docname === frm.doc.name) {
+				frappe.show_alert({
+					message: __("Tesla Procedure Imported: {0} ({1} hrs)", [data.service_title, data.frt]),
+					indicator: "green",
+				}, 5);
+				frm.reload_doc();
+			}
+		});
 	},
 
 	on_tab_change(frm) {
@@ -242,6 +276,7 @@ frappe.ui.form.on("Repair Order", {
 		frm.trigger("render_progress_indicator");
 		frm._original_odometer_in = frm.doc.odometer_in;
 		update_tab_visibility(frm);
+		frm.trigger("set_route_options_for_new_doc");
 
 		if (frm._user_clicked_tab) {
 			select_tab(frm, frm._user_clicked_tab);
@@ -250,19 +285,50 @@ frappe.ui.form.on("Repair Order", {
 		}
 
 		if (!frm.is_new() && frm.doc.docstatus !== 2) {
+			try {
+				localStorage.setItem("ism_active_ro", JSON.stringify({
+					name: frm.doc.name,
+					customer: frm.doc.customer,
+					vehicle: frm.doc.vehicle,
+					status: frm.doc.status,
+					timestamp: Date.now()
+				}));
+			} catch (e) {}
+
 			const is_approved = frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved";
 			const is_work_completed = frm.doc.status === "Work Completed" || frm.doc.vehicle_location === "Completed / Parked in Lot";
 			const is_released = !!frm.doc.vehicle_released || frm.doc.status === "Closed / Released";
 
 			// 1. Service Packages & Supplements (available before vehicle is released)
 			if (!is_released) {
+				frm.add_custom_button(__("Tesla Manual"), () => {
+					frm.trigger("open_tesla_manual");
+				});
+
 				frm.add_custom_button(__("Add Service Package"), () => {
 					frm.trigger("open_service_package_dialog");
+				}, __("Jobs & Packages"));
+
+				frm.add_custom_button(__("Tesla Manual"), () => {
+					frm.trigger("open_tesla_manual");
+				}, __("Jobs & Packages"));
+
+				frm.add_custom_button(__("Import Tesla URL"), () => {
+					frm.trigger("open_import_tesla_url_dialog");
 				}, __("Jobs & Packages"));
 
 				frm.add_custom_button(__("Add Supplement"), () => {
 					frm.trigger("open_add_supplement_dialog");
 				}, __("Jobs & Packages"));
+
+				if (frm.fields_dict.services && frm.fields_dict.services.grid) {
+					frm.fields_dict.services.grid.add_custom_button(__("Tesla Manual"), () => {
+						frm.trigger("open_tesla_manual");
+					});
+					frm.fields_dict.services.grid.add_custom_button(__("Import Tesla URL"), () => {
+						frm.trigger("open_import_tesla_url_dialog");
+					});
+				}
 			}
 
 			// 2. Customer Approvals (available before release so authorization can be obtained or updated)
@@ -355,6 +421,32 @@ frappe.ui.form.on("Repair Order", {
 					frm.trigger("open_payment_modal");
 				}).addClass("btn-primary");
 			}
+		}
+	},
+
+	customer(frm) {
+		frm.trigger("set_route_options_for_new_doc");
+	},
+
+	set_route_options_for_new_doc(frm) {
+		const get_options = (control) => {
+			const route_options = {};
+			if (frm.doc && frm.doc.customer) {
+				route_options.customer = frm.doc.customer;
+			}
+			const entered_value = control?.get_label_value?.() || frm.fields_dict?.vehicle?.get_label_value?.();
+			if (entered_value && entered_value !== "create_new__link_option") {
+				route_options.vin = entered_value;
+			}
+			return route_options;
+		};
+
+		const vehicle_docfield = frm.get_docfield("vehicle");
+		if (vehicle_docfield) {
+			vehicle_docfield.get_route_options_for_new_doc = get_options;
+		}
+		if (frm.fields_dict && frm.fields_dict.vehicle && frm.fields_dict.vehicle.df) {
+			frm.fields_dict.vehicle.df.get_route_options_for_new_doc = get_options;
 		}
 	},
 
@@ -565,6 +657,121 @@ frappe.ui.form.on("Repair Order", {
 					frm.reload_doc();
 				});
 			},
+		});
+		dialog.show();
+	},
+
+	open_tesla_manual(frm) {
+		frappe.call({
+			method: "ism.api.tesla.get_vehicle_manual_url",
+			args: {
+				vehicle: frm.doc.vehicle,
+				repair_order: frm.doc.name
+			},
+			callback(r) {
+				let url = (r && r.message) ? r.message : "https://service.tesla.com/docs/";
+				if (frm.doc && frm.doc.name) {
+					const hashParam = `ism_ro=${encodeURIComponent(frm.doc.name)}`;
+					url = url.includes("#") ? `${url}&${hashParam}` : `${url}#${hashParam}`;
+				}
+				try {
+					localStorage.setItem("ism_active_ro", JSON.stringify({
+						name: frm.doc.name,
+						customer: frm.doc.customer,
+						vehicle: frm.doc.vehicle,
+						status: frm.doc.status,
+						manual_url: url,
+						timestamp: Date.now()
+					}));
+				} catch (e) {}
+				window.open(url, "_blank");
+			}
+		});
+	},
+
+	open_import_tesla_url_dialog(frm) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Import Tesla Manual Procedure"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "help_text",
+					options: `<div class="text-muted small mb-2">${__(
+						"Paste the URL of any procedure from the Tesla Service Manual (e.g. https://service.tesla.com/docs/Model3/ServiceManual/.../GUID-XXXX.html). The Title, Correction Code, and Flat Rate Time (FRT) will be extracted and added to this Repair Order."
+					)}</div>`
+				},
+				{
+					fieldname: "tesla_url",
+					fieldtype: "Data",
+					label: __("Tesla Procedure URL"),
+					reqd: 1,
+					placeholder: "https://service.tesla.com/docs/..."
+				}
+			],
+			primary_action_label: __("Fetch & Import"),
+			primary_action(values) {
+				const do_import = (allow_mismatch = 0, duplicate_action = null) => {
+					frappe.call({
+						method: "ism.api.tesla.import_tesla_procedure",
+						args: {
+							repair_order: frm.doc.name,
+							url: values.tesla_url.trim(),
+							allow_generation_mismatch: allow_mismatch,
+							duplicate_action: duplicate_action,
+						},
+						freeze: true,
+						freeze_message: __("Fetching and parsing Tesla manual procedure..."),
+						callback(r) {
+							if (r && r.message) {
+								if (r.message.status === "warning" && r.message.requires_confirmation) {
+									frappe.confirm(
+										`<b>${__("Generation / Model Mismatch")}</b><br><br>${r.message.warning}<br><br>${__("Do you still want to import this procedure?")}`,
+										() => {
+											do_import(1, duplicate_action);
+										}
+									);
+									return;
+								}
+								if (r.message.status === "duplicate_warning" && r.message.requires_duplicate_choice) {
+									const prompt_msg = r.message.message || __("Correction code {0} is already on this Repair Order. Update existing row or Add as additional job?", [r.message.correction_code]);
+									const d = new frappe.ui.Dialog({
+										title: __("Duplicate Procedure"),
+										fields: [
+											{
+												fieldtype: "HTML",
+												fieldname: "msg",
+												options: `<div style="font-size: 13px; line-height: 1.5; padding: 10px 0;">${prompt_msg}</div>`
+											}
+										],
+										primary_action_label: __("Update Existing Row"),
+										primary_action() {
+											d.hide();
+											do_import(allow_mismatch, "update");
+										},
+										secondary_action_label: __("Add as Additional Job"),
+										secondary_action() {
+											d.hide();
+											do_import(allow_mismatch, "add");
+										}
+									});
+									d.show();
+									return;
+								}
+								if (r.message.status === "success") {
+									dialog.hide();
+									const action_text = r.message.action === "updated" ? __("Updated") : __("Imported");
+									frappe.show_alert({
+										message: `${action_text}: ${r.message.service_package} (${r.message.frt} hrs)`,
+										indicator: "green"
+									}, 5);
+									frm.reload_doc();
+								}
+							}
+						}
+					});
+				};
+				do_import(0);
+			}
 		});
 		dialog.show();
 	},
@@ -971,6 +1178,9 @@ frappe.ui.form.on("Repair Order Service", {
 					frappe.model.set_value(cdt, cdn, "is_flat_rate", is_flat);
 					frappe.model.set_value(cdt, cdn, "service_title", pkg.package_name || row.service_package);
 					frappe.model.set_value(cdt, cdn, "category", pkg.category || "Maintenance");
+					if (pkg.correction_code) frappe.model.set_value(cdt, cdn, "correction_code", pkg.correction_code);
+					if (pkg.frt) frappe.model.set_value(cdt, cdn, "frt", flt(pkg.frt));
+					if (pkg.tesla_manual_url) frappe.model.set_value(cdt, cdn, "tesla_manual_url", pkg.tesla_manual_url);
 					frappe.model.set_value(cdt, cdn, "labor_hours", flt(pkg.standard_labor_hours));
 					frappe.model.set_value(cdt, cdn, "labor_rate", flt(pkg.hourly_rate));
 					frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);

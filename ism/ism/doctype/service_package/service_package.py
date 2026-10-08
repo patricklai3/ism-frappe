@@ -4,13 +4,45 @@
 import frappe
 from frappe.model.document import Document
 from frappe.utils import flt
+from ism.utils.tesla_manual import get_category_for_correction_code
 
 
 class ServicePackage(Document):
+	def before_insert(self):
+		self.format_package_name()
+
 	def validate(self):
+		self.format_package_name()
+		self.sync_frt_and_labor_hours()
+		self.populate_tesla_categories()
+
 		if not self.is_flat_rate and flt(self.standard_labor_hours) and flt(self.hourly_rate):
 			self.service_rate = flt(self.standard_labor_hours) * flt(self.hourly_rate)
+
 		self.ensure_service_item()
+
+	def format_package_name(self):
+		"""Ensure package_name is formatted as '[Correction Code] - [Title]' if code is present."""
+		if self.correction_code and self.package_name:
+			code = str(self.correction_code).strip()
+			if not self.package_name.startswith(code):
+				self.package_name = f"{code} - {self.package_name.strip()}"
+
+	def sync_frt_and_labor_hours(self):
+		"""Sync FRT with standard_labor_hours."""
+		if flt(self.frt) > 0 and (not self.standard_labor_hours or flt(self.standard_labor_hours) == 1.0):
+			self.standard_labor_hours = flt(self.frt, 2)
+		elif flt(self.standard_labor_hours) > 0 and not flt(self.frt):
+			self.frt = flt(self.standard_labor_hours, 2)
+
+	def populate_tesla_categories(self):
+		"""Auto-populate category and subcategory from correction code if not set."""
+		if self.correction_code:
+			cat, subcat = get_category_for_correction_code(self.correction_code)
+			if cat and (not self.category or self.category == "Maintenance"):
+				self.category = cat
+			if subcat and not self.subcategory:
+				self.subcategory = subcat
 
 	def ensure_service_item(self):
 		"""Ensure a lightweight non-stock Item exists in ERPNext for billing this service."""
@@ -22,12 +54,10 @@ class ServicePackage(Document):
 		desc = self.description or item_name
 
 		if not frappe.db.exists("Item", item_name):
-			# Pick available service item group
 			item_group = "Services" if frappe.db.exists("Item Group", "Services") else frappe.db.get_value(
 				"Item Group", {"is_group": 0}, "name"
 			) or "All Item Groups"
 
-			# Pick default UOM
 			stock_uom = "Hour" if frappe.db.exists("UOM", "Hour") else (
 				"Unit" if frappe.db.exists("UOM", "Unit") else "Nos"
 			)
@@ -69,5 +99,3 @@ class ServicePackage(Document):
 					frappe.delete_doc("Item", item_code, force=True, ignore_permissions=True)
 				except Exception:
 					pass
-
-

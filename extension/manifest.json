@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "ISM - Tesla Service Manual Importer",
+  "version": "1.0.2",
+  "description": "Quickly import Tesla Service Manual procedures and Flat Rate Times (FRT) directly into your ISM Repair Orders.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "cookies"
+  ],
+  "host_permissions": [
+    "https://service.tesla.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://service.tesla.com/docs/*",
+        "https://service.tesla.com/*/docs/*"
+      ],
+      "js": ["content_tesla.js"],
+      "css": ["content_tesla.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://localhost/*",
+        "*://127.0.0.1/*",
+        "*://*/*desk*",
+        "*://*/*app*"
+      ],
+      "js": ["content_ism.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ISM Tesla Importer"
+  }
+}

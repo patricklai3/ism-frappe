@@ -789,10 +789,12 @@ class RepairOrder(Document):
 
 		self.append("services", {
 			"service_package": pkg.name,
+			"correction_code": getattr(pkg, "correction_code", None),
 			"service_title": pkg.package_name,
 			"category": pkg.category or "Maintenance",
 			"status": "Pending Approval" if is_supp else "Draft",
 			"is_flat_rate": is_flat,
+			"frt": getattr(pkg, "frt", None) or labor_hours,
 			"labor_hours": labor_hours,
 			"labor_rate": labor_rate,
 			"labor_amount": labor_amount,
@@ -801,6 +803,7 @@ class RepairOrder(Document):
 			"total_amount": flt(labor_amount + parts_total, 2),
 			"parts_html": _render_parts_html(parts_list),
 			"is_supplement": is_supp,
+			"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
 			"advisor_notes": pkg.description or "",
 		})
 
@@ -1263,6 +1266,9 @@ def get_service_package_details(service_package):
 
 	return {
 		"package_name": pkg.package_name,
+		"correction_code": getattr(pkg, "correction_code", None),
+		"frt": getattr(pkg, "frt", None) or labor_hours,
+		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
 		"category": pkg.category or "Maintenance",
 		"description": pkg.description or "",
 		"is_flat_rate": is_flat,

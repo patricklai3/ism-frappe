@@ -6,12 +6,14 @@
  "engine": "InnoDB",
  "field_order": [
   "service_package",
+  "correction_code",
   "service_title",
   "category",
   "status",
   "is_completed",
   "col_break_labor",
   "is_flat_rate",
+  "frt",
   "labor_hours",
   "labor_rate",
   "labor_amount",
@@ -30,6 +32,7 @@
   "actual_duration_hours",
   "col_break_notes",
   "is_supplement",
+  "tesla_manual_url",
   "advisor_notes"
  ],
  "fields": [
@@ -41,6 +44,14 @@
    "in_list_view": 1,
    "label": "Service Package",
    "options": "Service Package"
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 1,
+   "fieldname": "correction_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Correction Code"
   },
   {
    "allow_on_submit": 1,
@@ -59,7 +70,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Category",
-   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther"
+   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther\nINSPECTION AND SERVICE\nBODY\nCLOSURE COMPONENTS\nEXTERIOR FITTINGS\nSEATS\nINSTRUMENT PANELS AND PEDALS\nINTERIOR TRIM\nHV BATTERY SYSTEM\nELECTRICAL\nTHERMAL MANAGEMENT\nSAFETY AND RESTRAINT\nINFOTAINMENT\nROOF\nCHASSIS\nSUSPENSION\nSTEERING\nBRAKES\nWHEELS AND TIRES\nFRONT DRIVE UNIT\nREAR DRIVE UNIT\nHIGH VOLTAGE SYSTEM\nEXTERNAL CHARGING CONNECTORS\nACCESSORIES"
   },
   {
    "allow_on_submit": 1,
@@ -92,6 +103,12 @@
    "fieldname": "is_flat_rate",
    "fieldtype": "Check",
    "label": "Flat Rate / Fixed Price"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "frt",
+   "fieldtype": "Float",
+   "label": "FRT (Hours)"
   },
   {
    "allow_on_submit": 1,
@@ -214,6 +231,12 @@
    "fieldname": "is_supplement",
    "fieldtype": "Check",
    "label": "Is Supplement"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "tesla_manual_url",
+   "fieldtype": "Data",
+   "label": "Tesla Manual URL"
   },
   {
    "allow_on_submit": 1,

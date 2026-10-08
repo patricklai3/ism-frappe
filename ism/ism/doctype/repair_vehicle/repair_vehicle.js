@@ -377,3 +377,24 @@ frappe.ui.form.on("Repair Vehicle", {
 		}
 	},
 });
+
+frappe.provide("frappe.ui.form");
+
+if (!frappe.ui.form.RepairVehicleQuickEntryForm) {
+	frappe.ui.form.RepairVehicleQuickEntryForm = class RepairVehicleQuickEntryForm extends frappe.ui.form.QuickEntryForm {
+		render_dialog() {
+			if (!this.doc.customer) {
+				const ro_customer =
+					(frappe._from_link?.doc?.doctype === "Repair Order" && frappe._from_link.doc.customer) ||
+					(cur_frm?.doctype === "Repair Order" && cur_frm.doc?.customer);
+				if (ro_customer) {
+					this.doc.customer = ro_customer;
+				}
+			}
+			super.render_dialog();
+			if (this.doc.customer && this.fields_dict?.customer && !this.fields_dict.customer.get_value()) {
+				this.fields_dict.customer.set_input(this.doc.customer);
+			}
+		}
+	};
+}

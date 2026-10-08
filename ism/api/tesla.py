@@ -1,0 +1,356 @@
+# Copyright (c) 2026, patricklai3 and contributors
+# For license information, please see license.txt
+
+import json
+import urllib.request
+import urllib.error
+import frappe
+from frappe.utils import flt, cint
+from ism.utils.tesla_manual import (
+	parse_tesla_procedure_html,
+	parse_tesla_manual_url,
+	get_tesla_manual_url_for_vehicle,
+	validate_vehicle_compatibility,
+	get_category_for_correction_code,
+)
+from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
+
+
+@frappe.whitelist()
+def get_active_repair_orders():
+	"""Return recent draft/open Repair Orders with vehicle details for the extension and desk UI."""
+	orders = frappe.db.sql(
+		"""
+		SELECT 
+			ro.name, ro.customer, ro.vehicle, ro.status, ro.posting_date, ro.modified,
+			rv.model, rv.model_year, rv.manufactured_month, rv.license_plate, rv.vin
+		FROM `tabRepair Order` ro
+		LEFT JOIN `tabRepair Vehicle` rv ON ro.vehicle = rv.name
+		WHERE ro.docstatus < 2 AND ro.status NOT IN ('Closed', 'Cancelled')
+		ORDER BY ro.modified DESC
+		LIMIT 20
+		""",
+		as_dict=True,
+	)
+
+	result = []
+	for row in orders:
+		manual_url = get_tesla_manual_url_for_vehicle(row)
+		result.append({
+			"name": row.name,
+			"customer": row.customer,
+			"vehicle": row.vehicle,
+			"status": row.status,
+			"model": row.model or "",
+			"model_year": row.model_year or "",
+			"manufactured_month": row.manufactured_month or "",
+			"license_plate": row.license_plate or "",
+			"vin": row.vin or "",
+			"manual_url": manual_url,
+		})
+
+	csrf_token = getattr(frappe.local.session.data, "csrf_token", None) if hasattr(frappe.local, "session") else None
+	if not csrf_token and hasattr(frappe.sessions, "get_csrf_token"):
+		try:
+			csrf_token = frappe.sessions.get_csrf_token()
+		except Exception:
+			pass
+
+	return {
+		"orders": result,
+		"csrf_token": csrf_token or "",
+	}
+
+
+@frappe.whitelist()
+def get_session_info():
+	"""Return active session info and CSRF token for browser extension authorization."""
+	csrf_token = getattr(frappe.local.session.data, "csrf_token", None) if hasattr(frappe.local, "session") else None
+	if not csrf_token and hasattr(frappe.sessions, "get_csrf_token"):
+		try:
+			csrf_token = frappe.sessions.get_csrf_token()
+		except Exception:
+			pass
+
+	return {
+		"csrf_token": csrf_token or "",
+		"user": frappe.session.user,
+	}
+
+
+@frappe.whitelist()
+def get_vehicle_manual_url(vehicle=None, repair_order=None):
+	"""Return the recommended Tesla Service Manual URL for a vehicle or repair order."""
+	if repair_order and not vehicle:
+		vehicle = frappe.db.get_value("Repair Order", repair_order, "vehicle")
+
+	if not vehicle:
+		return "https://service.tesla.com/docs/"
+
+	vdoc = frappe.get_doc("Repair Vehicle", vehicle)
+	return get_tesla_manual_url_for_vehicle(vdoc)
+
+
+@frappe.whitelist()
+def fetch_and_parse_tesla_procedure(url):
+	"""Fetch HTML of a Tesla service manual procedure and parse its metadata server-side."""
+	if not url:
+		frappe.throw("Tesla procedure URL is required.")
+
+	req = urllib.request.Request(
+		url,
+		headers={
+			"User-Agent": (
+				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+				"AppleWebKit/537.36 (KHTML, like Gecko) "
+				"Chrome/124.0.0.0 Safari/537.36"
+			),
+			"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		},
+	)
+
+	try:
+		with urllib.request.urlopen(req, timeout=12) as response:
+			html_content = response.read().decode("utf-8", errors="ignore")
+	except urllib.error.URLError as e:
+		frappe.throw(f"Unable to fetch Tesla service manual page: {e.reason}")
+	except Exception as e:
+		frappe.throw(f"Failed to fetch page: {str(e)}")
+
+	parsed = parse_tesla_procedure_html(html_content, url=url)
+	if not parsed.get("title") and not parsed.get("correction_code"):
+		frappe.throw("Could not find a valid Tesla procedure on this page. Please verify the URL.")
+
+	return parsed
+
+
+@frappe.whitelist()
+def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_mismatch=False, duplicate_action=None):
+	"""Import a Tesla service manual procedure into a Repair Order.
+
+	Accepts either:
+	- data: JSON string or dict containing extracted procedure fields (from extension)
+	- url: Tesla manual URL to fetch and parse server-side
+	- duplicate_action: None (warn if exists), 'update' (update existing row), or 'add' (append additional row)
+	"""
+	if not repair_order:
+		frappe.throw("Repair Order is required.")
+
+	if not frappe.db.exists("Repair Order", repair_order):
+		frappe.throw(f"Repair Order '{repair_order}' does not exist.")
+
+	ro = frappe.get_doc("Repair Order", repair_order)
+
+	# 1. Parse or retrieve procedure data
+	proc_data = {}
+	if data:
+		if isinstance(data, str):
+			try:
+				proc_data = json.loads(data)
+			except Exception:
+				proc_data = {}
+		elif isinstance(data, dict):
+			proc_data = data
+
+	if not proc_data and url:
+		proc_data = fetch_and_parse_tesla_procedure(url)
+
+	if not proc_data or (not proc_data.get("title") and not proc_data.get("correction_code")):
+		frappe.throw("Incomplete procedure data. Title or Correction Code required.")
+
+	proc_url = proc_data.get("tesla_manual_url") or url or ""
+	correction_code = str(proc_data.get("correction_code") or "").strip()
+	title = str(proc_data.get("title") or "Tesla Service Procedure").strip()
+	frt = flt(proc_data.get("frt"), 2)
+
+	# 2. Compatibility check with vehicle
+	v_doc = frappe.get_doc("Repair Vehicle", ro.vehicle) if ro.vehicle else None
+	allow_mismatch = cint(allow_generation_mismatch)
+	compat = validate_vehicle_compatibility(v_doc, proc_url)
+	if not compat.get("is_compatible") and not allow_mismatch:
+		return {
+			"status": "warning",
+			"requires_confirmation": True,
+			"warning": compat.get("warning"),
+			"procedure_data": proc_data,
+			"vehicle_desc": compat.get("vehicle_desc"),
+			"procedure_gen": compat.get("procedure_gen"),
+		}
+
+	# 3. Upsert Service Package in catalog
+	pkg = _upsert_service_package(proc_data, proc_url)
+
+	# 4. Check for duplicate on the current Repair Order
+	existing_service = None
+	if correction_code:
+		for s in ro.services:
+			if str(getattr(s, "correction_code", "") or "").strip() == correction_code:
+				existing_service = s
+				break
+
+	if not existing_service and pkg and pkg.name:
+		for s in ro.services:
+			if s.service_package == pkg.name:
+				existing_service = s
+				break
+
+	if existing_service and not duplicate_action:
+		code_display = correction_code or pkg.name or "this procedure"
+		return {
+			"status": "duplicate_warning",
+			"requires_duplicate_choice": True,
+			"message": f"Correction code {code_display} is already on this Repair Order. Update existing row or Add as additional job?",
+			"correction_code": correction_code,
+			"existing_service_title": existing_service.service_title,
+			"existing_idx": existing_service.idx,
+			"procedure_data": proc_data,
+		}
+
+	# 5. Populate labor rates and append or update
+	is_supp = 1 if (ro.docstatus == 1 or any(s.status == "Approved" for s in ro.services)) else 0
+	hourly_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
+	labor_hours = frt or flt(pkg.standard_labor_hours) or 1.0
+	labor_amount = flt(labor_hours * hourly_rate, 2)
+
+	action_taken = "added"
+	if existing_service and duplicate_action == "update":
+		action_taken = "updated"
+		existing_service.service_title = title
+		existing_service.frt = frt
+		existing_service.labor_hours = labor_hours
+		existing_service.labor_rate = hourly_rate
+		existing_service.labor_amount = labor_amount
+		existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
+		existing_service.tesla_manual_url = proc_url
+		existing_service.category = proc_data.get("category") or pkg.category or existing_service.category
+		if proc_data.get("description"):
+			existing_service.advisor_notes = proc_data.get("description")
+		target_service = existing_service
+	else:
+		target_service = ro.append("services", {
+			"service_package": pkg.name,
+			"correction_code": correction_code,
+			"service_title": title,
+			"category": proc_data.get("category") or pkg.category or "Maintenance",
+			"status": "Pending Approval" if is_supp else "Draft",
+			"is_flat_rate": 0,
+			"frt": frt,
+			"labor_hours": labor_hours,
+			"labor_rate": hourly_rate,
+			"labor_amount": labor_amount,
+			"parts_total": 0.0,
+			"total_amount": labor_amount,
+			"is_supplement": is_supp,
+			"tesla_manual_url": proc_url,
+			"advisor_notes": proc_data.get("description") or pkg.description or "",
+		})
+
+	if is_supp:
+		if any(s.status == "Approved" for s in ro.services):
+			ro.approval_status = "Partially Approved"
+		else:
+			ro.approval_status = "Pending Approval"
+
+	# Save Repair Order
+	ro.flags.ignore_validate_update_after_submit = True
+	ro.save(ignore_permissions=True)
+
+	# Broadcast realtime notification
+	frappe.publish_realtime(
+		"repair_order_updated",
+		{
+			"docname": ro.name,
+			"service_title": title,
+			"correction_code": correction_code,
+			"frt": frt,
+			"action": action_taken,
+		},
+		doctype="Repair Order",
+		docname=ro.name,
+	)
+
+	return {
+		"status": "success",
+		"action": action_taken,
+		"message": f"Successfully {action_taken} '{title}' on {ro.name}",
+		"repair_order": ro.name,
+		"service_package": pkg.name,
+		"correction_code": correction_code,
+		"frt": frt,
+		"labor_amount": labor_amount,
+		"service_row": target_service.as_dict() if hasattr(target_service, "as_dict") else None,
+	}
+
+
+def _upsert_service_package(proc_data, proc_url):
+	"""Upsert Service Package record based on correction code and model."""
+	correction_code = str(proc_data.get("correction_code") or "").strip()
+	title = str(proc_data.get("title") or "Tesla Service Procedure").strip()
+	frt = flt(proc_data.get("frt"), 2)
+	model = proc_data.get("applicable_model") or ""
+
+	# Check for existing Service Package with matching correction_code and model
+	existing_pkg_name = None
+	if correction_code:
+		filters = {"correction_code": correction_code}
+		if model:
+			filters["applicable_model"] = model
+		existing_pkg_name = frappe.db.get_value("Service Package", filters, "name")
+
+		# Fallback to match by correction code alone if no model-specific match
+		if not existing_pkg_name:
+			existing_pkg_name = frappe.db.get_value("Service Package", {"correction_code": correction_code}, "name")
+
+	# If found, update existing
+	if existing_pkg_name:
+		pkg = frappe.get_doc("Service Package", existing_pkg_name)
+		pkg.frt = frt
+		pkg.standard_labor_hours = frt
+		if proc_url:
+			pkg.tesla_manual_url = proc_url
+		if proc_data.get("doc_guid"):
+			pkg.doc_guid = proc_data.get("doc_guid")
+		if proc_data.get("applicable_generation"):
+			pkg.applicable_generation = proc_data.get("applicable_generation")
+		if proc_data.get("gen_start_year_month"):
+			pkg.gen_start_year_month = proc_data.get("gen_start_year_month")
+		if proc_data.get("gen_end_year_month"):
+			pkg.gen_end_year_month = proc_data.get("gen_end_year_month")
+		if proc_data.get("category"):
+			pkg.category = proc_data.get("category")
+		if proc_data.get("subcategory"):
+			pkg.subcategory = proc_data.get("subcategory")
+		pkg.save(ignore_permissions=True)
+		return pkg
+
+	# Otherwise create new package
+	cat = proc_data.get("category") or "Maintenance"
+	subcat = proc_data.get("subcategory") or ""
+	if correction_code and (not cat or cat == "Maintenance"):
+		c, sc = get_category_for_correction_code(correction_code)
+		if c:
+			cat = c
+		if sc:
+			subcat = sc
+
+	pkg_name = f"{correction_code} - {title}" if correction_code and not title.startswith(correction_code) else title
+
+	pkg = frappe.get_doc({
+		"doctype": "Service Package",
+		"package_name": pkg_name,
+		"correction_code": correction_code,
+		"applicable_model": model,
+		"applicable_generation": proc_data.get("applicable_generation") or "",
+		"gen_start_year_month": proc_data.get("gen_start_year_month") or "",
+		"gen_end_year_month": proc_data.get("gen_end_year_month") or "",
+		"category": cat,
+		"subcategory": subcat,
+		"description": proc_data.get("description") or f"Tesla Procedure {correction_code}: {title}",
+		"frt": frt,
+		"standard_labor_hours": frt or 1.0,
+		"is_flat_rate": 0,
+		"tesla_manual_url": proc_url,
+		"doc_guid": proc_data.get("doc_guid") or "",
+	})
+	pkg.insert(ignore_permissions=True)
+	return pkg

@@ -425,9 +425,24 @@ canvas#sig-canvas {
 							alert(r.message?.error || "{{ _('Failed to record authorization. Please try again.') }}");
 						}
 					},
-					error: function() {
+					error: function(err) {
 						submitBtn.disabled = false;
 						submitBtn.innerHTML = '<i class="fa fa-check"></i> {{ _("Submit Authorization") }}';
+						let msg = "{{ _('Failed to record authorization. Please try again.') }}";
+						if (err && err._server_messages) {
+							try {
+								const parsed = JSON.parse(err._server_messages);
+								if (parsed && parsed.length) {
+									const item = JSON.parse(parsed[0]);
+									msg = item.message || msg;
+								}
+							} catch (e) {}
+						} else if (err && err.responseJSON && err.responseJSON.message) {
+							msg = err.responseJSON.message;
+						} else if (err && err.statusText && err.statusText !== "error") {
+							msg = err.statusText;
+						}
+						alert(msg);
 					}
 				});
 			});

@@ -1,19 +1,32 @@
 {
  "actions": [],
  "allow_rename": 1,
- "autoname": "field:package_name",
+ "autoname": "format:{package_name}",
  "creation": "2026-10-06 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
   "package_name",
+  "correction_code",
+  "applicable_model",
+  "applicable_generation",
   "category",
+  "subcategory",
   "description",
   "col_break_rates",
+  "frt",
   "standard_labor_hours",
   "hourly_rate",
   "service_rate",
   "is_flat_rate",
+  "sec_manual_ref",
+  "btn_open_tesla_manual",
+  "btn_import_from_url",
+  "tesla_manual_url",
+  "doc_guid",
+  "col_gen_dates",
+  "gen_start_year_month",
+  "gen_end_year_month",
   "sb_items",
   "items"
  ],
@@ -27,12 +40,36 @@
    "unique": 1
   },
   {
+   "fieldname": "correction_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Correction Code",
+   "search_index": 1
+  },
+  {
+   "fieldname": "applicable_model",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Applicable Model",
+   "options": "Model S\nModel 3\nModel X\nModel Y\nCybertruck\nRoadster\nSemi\nAll Models"
+  },
+  {
+   "fieldname": "applicable_generation",
+   "fieldtype": "Data",
+   "label": "Applicable Generation"
+  },
+  {
    "default": "Maintenance",
    "fieldname": "category",
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Category",
-   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther"
+   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther\nINSPECTION AND SERVICE\nBODY\nCLOSURE COMPONENTS\nEXTERIOR FITTINGS\nSEATS\nINSTRUMENT PANELS AND PEDALS\nINTERIOR TRIM\nHV BATTERY SYSTEM\nELECTRICAL\nTHERMAL MANAGEMENT\nSAFETY AND RESTRAINT\nINFOTAINMENT\nROOF\nCHASSIS\nSUSPENSION\nSTEERING\nBRAKES\nWHEELS AND TIRES\nFRONT DRIVE UNIT\nREAR DRIVE UNIT\nHIGH VOLTAGE SYSTEM\nEXTERNAL CHARGING CONNECTORS\nACCESSORIES"
+  },
+  {
+   "fieldname": "subcategory",
+   "fieldtype": "Data",
+   "label": "Subcategory"
   },
   {
    "fieldname": "description",
@@ -44,10 +81,15 @@
    "fieldtype": "Column Break"
   },
   {
+   "fieldname": "frt",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Flat Rate Time (FRT)"
+  },
+  {
    "default": "1.0",
    "fieldname": "standard_labor_hours",
    "fieldtype": "Float",
-   "in_list_view": 1,
    "label": "Labor Hours"
   },
   {
@@ -70,6 +112,45 @@
    "label": "Flat Rate / Fixed Price"
   },
   {
+   "fieldname": "sec_manual_ref",
+   "fieldtype": "Section Break",
+   "label": "Tesla Service Manual Reference"
+  },
+  {
+   "fieldname": "btn_open_tesla_manual",
+   "fieldtype": "Button",
+   "label": "Open in Tesla Manual"
+  },
+  {
+   "fieldname": "btn_import_from_url",
+   "fieldtype": "Button",
+   "label": "Fetch from Tesla URL"
+  },
+  {
+   "fieldname": "tesla_manual_url",
+   "fieldtype": "Data",
+   "label": "Tesla Manual URL"
+  },
+  {
+   "fieldname": "doc_guid",
+   "fieldtype": "Data",
+   "label": "Doc GUID"
+  },
+  {
+   "fieldname": "col_gen_dates",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "gen_start_year_month",
+   "fieldtype": "Data",
+   "label": "Generation Start"
+  },
+  {
+   "fieldname": "gen_end_year_month",
+   "fieldtype": "Data",
+   "label": "Generation End"
+  },
+  {
    "fieldname": "sb_items",
    "fieldtype": "Section Break",
    "label": "Required Parts & Materials"
@@ -82,11 +163,11 @@
   }
  ],
  "links": [],
- "modified": "2026-10-06 00:00:00.000000",
+ "modified": "2026-10-08 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Package",
- "naming_rule": "By fieldname",
+ "naming_rule": "Expression (old style)",
  "owner": "Administrator",
  "permissions": [
   {
@@ -125,7 +206,7 @@
   }
  ],
  "row_format": "Dynamic",
- "search_fields": "package_name,category",
+ "search_fields": "package_name,correction_code,category",
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": []

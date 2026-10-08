@@ -278,8 +278,10 @@ def submit_customer_approval(
 	signature_data: str,
 	ip_address: str | None = None,
 	user_agent: str | None = None,
+	**kwargs,
 ) -> dict:
 	"""Public guest endpoint to record digital signature and per-job decisions."""
+	kwargs.pop("cmd", None)
 	if not token or not isinstance(token, str) or not token.strip():
 		frappe.throw(_("Missing or invalid approval token."))
 
@@ -323,6 +325,23 @@ def submit_customer_approval(
 
 
 @frappe.whitelist(allow_guest=True)
-def submit_public_quote_approval(*args, **kwargs):
+def submit_public_quote_approval(
+	token: str,
+	approvals: dict | list | str,
+	signer_name: str,
+	signature_data: str,
+	ip_address: str | None = None,
+	user_agent: str | None = None,
+	**kwargs,
+) -> dict:
 	"""Whitelisted alias matching quote_approval.html client caller."""
-	return submit_customer_approval(*args, **kwargs)
+	kwargs.pop("cmd", None)
+	return submit_customer_approval(
+		token=token,
+		approvals=approvals,
+		signer_name=signer_name,
+		signature_data=signature_data,
+		ip_address=ip_address,
+		user_agent=user_agent,
+		**kwargs,
+	)
