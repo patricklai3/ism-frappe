@@ -16,7 +16,6 @@
   "currency",
   "col_info",
   "vehicle",
-  "vehicle_check_in",
   "odometer_in",
   "odometer_out",
   "service_advisor",
@@ -151,14 +150,6 @@
    "search_index": 1
   },
   {
-   "fieldname": "vehicle_check_in",
-   "fieldtype": "Link",
-   "in_standard_filter": 1,
-   "label": "Vehicle Check-in",
-   "options": "Vehicle Check-in",
-   "search_index": 1
-  },
-  {
    "fieldname": "odometer_in",
    "fieldtype": "Int",
    "label": "Odometer In",
@@ -268,7 +259,7 @@
   },
   {
    "allow_on_submit": 1,
-   "default": "0",
+   "default": "13.0",
    "fieldname": "tax_rate",
    "fieldtype": "Percent",
    "label": "Tax Rate (%)"

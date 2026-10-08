@@ -189,15 +189,12 @@ frappe.ui.form.on("Repair Order", {
 			};
 		});
 
-		frm.set_query("vehicle_check_in", () => {
-			const filters = {};
-			if (frm.doc.vehicle) {
-				filters.vehicle = frm.doc.vehicle;
-			}
-			if (frm.doc.customer) {
-				filters.customer = frm.doc.customer;
-			}
-			return { filters: filters };
+		frm.set_query("taxes_and_charges", () => {
+			return {
+				filters: {
+					company: frm.doc.company || frappe.defaults.get_user_default("Company"),
+				},
+			};
 		});
 	},
 
@@ -205,6 +202,19 @@ frappe.ui.form.on("Repair Order", {
 		frm._user_clicked_tab = null;
 		if (frm.active_tab_map && frm.docname) {
 			delete frm.active_tab_map[frm.docname];
+		}
+		if (frm.is_new()) {
+			if (!frm.doc.tax_rate) {
+				frm.set_value("tax_rate", 13.0);
+			}
+			if (!frm.doc.taxes_and_charges) {
+				const comp = frm.doc.company || frappe.defaults.get_user_default("Company");
+				frappe.db.get_value("Sales Taxes and Charges Template", { company: comp, is_default: 1 }, "name", (r) => {
+					if (r && r.name && !frm.doc.taxes_and_charges) {
+						frm.set_value("taxes_and_charges", r.name);
+					}
+				});
+			}
 		}
 		const target = get_status_target_tab(frm);
 		if (target) {
@@ -433,6 +443,23 @@ frappe.ui.form.on("Repair Order", {
 				}
 			});
 		}
+	},
+
+	taxes_and_charges(frm) {
+		if (frm.doc.taxes_and_charges) {
+			frappe.db.get_value("Sales Taxes and Charges", { parent: frm.doc.taxes_and_charges }, "rate", (r) => {
+				if (r && r.rate !== undefined && r.rate !== null) {
+					frm.set_value("tax_rate", flt(r.rate));
+				}
+				recalculate_totals(frm);
+			});
+		} else {
+			recalculate_totals(frm);
+		}
+	},
+
+	tax_rate(frm) {
+		recalculate_totals(frm);
 	},
 
 	update_tab_visibility(frm) {
@@ -937,14 +964,19 @@ frappe.ui.form.on("Repair Order Service", {
 			callback(r) {
 				if (r.message) {
 					const pkg = r.message;
+					const is_flat = cint(pkg.is_flat_rate);
+					const labor_amt = is_flat ? flt(pkg.service_rate) : (flt(pkg.service_rate) || (flt(pkg.standard_labor_hours) * flt(pkg.hourly_rate)));
+					const parts_tot = flt(pkg.parts_total) || 0.0;
+
+					frappe.model.set_value(cdt, cdn, "is_flat_rate", is_flat);
 					frappe.model.set_value(cdt, cdn, "service_title", pkg.package_name || row.service_package);
 					frappe.model.set_value(cdt, cdn, "category", pkg.category || "Maintenance");
-					frappe.model.set_value(cdt, cdn, "labor_hours", pkg.standard_labor_hours || 1.0);
-					frappe.model.set_value(cdt, cdn, "labor_rate", pkg.hourly_rate || 120.0);
-					frappe.model.set_value(cdt, cdn, "labor_amount", pkg.service_rate || (flt(pkg.standard_labor_hours) * flt(pkg.hourly_rate)));
+					frappe.model.set_value(cdt, cdn, "labor_hours", flt(pkg.standard_labor_hours));
+					frappe.model.set_value(cdt, cdn, "labor_rate", flt(pkg.hourly_rate));
+					frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
 					frappe.model.set_value(cdt, cdn, "parts", JSON.stringify(pkg.parts || []));
-					frappe.model.set_value(cdt, cdn, "parts_total", pkg.parts_total || 0.0);
-					frappe.model.set_value(cdt, cdn, "total_amount", flt(pkg.service_rate) + flt(pkg.parts_total));
+					frappe.model.set_value(cdt, cdn, "parts_total", parts_tot);
+					frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + parts_tot);
 					if (pkg.description && !row.advisor_notes) {
 						frappe.model.set_value(cdt, cdn, "advisor_notes", pkg.description);
 					}
@@ -956,8 +988,19 @@ frappe.ui.form.on("Repair Order Service", {
 		});
 	},
 
+	is_flat_rate(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (!row.is_flat_rate) {
+			const labor_amt = flt(row.labor_hours) * flt(row.labor_rate);
+			frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
+			frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + flt(row.parts_total));
+		}
+		recalculate_totals(frm);
+	},
+
 	labor_hours(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
+		if (row.is_flat_rate) return;
 		const labor_amt = flt(row.labor_hours) * flt(row.labor_rate);
 		frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
 		frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + flt(row.parts_total));
@@ -966,9 +1009,16 @@ frappe.ui.form.on("Repair Order Service", {
 
 	labor_rate(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
+		if (row.is_flat_rate) return;
 		const labor_amt = flt(row.labor_hours) * flt(row.labor_rate);
 		frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
 		frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + flt(row.parts_total));
+		recalculate_totals(frm);
+	},
+
+	labor_amount(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		frappe.model.set_value(cdt, cdn, "total_amount", flt(row.labor_amount) + flt(row.parts_total));
 		recalculate_totals(frm);
 	},
 
@@ -1319,7 +1369,9 @@ function open_parts_editor(frm, cdt, cdn) {
 
 			frappe.model.set_value(cdt, cdn, "parts", JSON.stringify(local_parts));
 			frappe.model.set_value(cdt, cdn, "parts_total", total_parts_amt);
-			const labor_amt = flt(row.labor_amount) || (flt(row.labor_hours) * flt(row.labor_rate));
+			const labor_amt = row.is_flat_rate
+				? flt(row.labor_amount)
+				: (flt(row.labor_amount) || (flt(row.labor_hours) * flt(row.labor_rate)));
 			frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + total_parts_amt);
 			frappe.model.set_value(cdt, cdn, "parts_html", render_parts_html(local_parts));
 

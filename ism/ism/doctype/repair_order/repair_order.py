@@ -28,6 +28,88 @@ def _get_default_labor_rate():
 	return 120.0
 
 
+def get_or_create_default_tax_template(company=None):
+	"""
+	Return the default 13% HST template for the company.
+	If not present, create the HST 13% account and 13% HST template and return it.
+	"""
+	company = company or frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company") or "I"
+	abbr = frappe.db.get_value("Company", company, "abbr") or company
+
+	# Look for an existing default template
+	default_tmpl = frappe.db.get_value(
+		"Sales Taxes and Charges Template",
+		{"company": company, "is_default": 1},
+		"name"
+	)
+	if default_tmpl and ("13" in default_tmpl or "HST" in default_tmpl):
+		return default_tmpl
+
+	# Check for any template with 13% or HST in title/name
+	hst_tmpl = frappe.db.get_value(
+		"Sales Taxes and Charges Template",
+		{"company": company, "title": ["like", "%HST%"]},
+		"name"
+	) or frappe.db.get_value(
+		"Sales Taxes and Charges Template",
+		{"company": company, "name": ["like", "%13%HST%"]},
+		"name"
+	)
+	if hst_tmpl:
+		return hst_tmpl
+
+	# Create Account & Template if needed
+	duties_and_taxes = (
+		frappe.db.get_value("Account", {"account_name": "Duties and Taxes", "company": company}, "name")
+		or f"Duties and Taxes - {abbr}"
+	)
+	account_name = f"HST 13% - {abbr}"
+	if not frappe.db.exists("Account", account_name):
+		if frappe.db.exists("Account", duties_and_taxes):
+			try:
+				acc = frappe.get_doc({
+					"doctype": "Account",
+					"account_name": "HST 13%",
+					"company": company,
+					"parent_account": duties_and_taxes,
+					"account_type": "Tax",
+					"currency": frappe.db.get_value("Company", company, "default_currency") or "CAD",
+				})
+				acc.insert(ignore_permissions=True)
+			except Exception:
+				pass
+
+	template_name = f"13% HST - {abbr}"
+	if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
+		tax_head = account_name if frappe.db.exists("Account", account_name) else duties_and_taxes
+		try:
+			tmpl = frappe.get_doc({
+				"doctype": "Sales Taxes and Charges Template",
+				"title": "13% HST",
+				"company": company,
+				"is_default": 1,
+				"taxes": [
+					{
+						"charge_type": "On Net Total",
+						"account_head": tax_head,
+						"rate": 13.0,
+						"description": "HST @ 13.0%",
+					}
+				],
+			})
+			tmpl.insert(ignore_permissions=True)
+			for other in frappe.get_all(
+				"Sales Taxes and Charges Template",
+				filters={"company": company, "is_default": 1, "name": ["!=", template_name]},
+			):
+				frappe.db.set_value("Sales Taxes and Charges Template", other.name, "is_default", 0)
+			return tmpl.name
+		except Exception:
+			pass
+
+	return template_name if frappe.db.exists("Sales Taxes and Charges Template", template_name) else default_tmpl
+
+
 def _render_parts_html(parts):
 	"""Render a compact, styled HTML table of parts nested under a service."""
 	if not parts:
@@ -116,6 +198,10 @@ class RepairOrder(Document):
 			self.company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 		if not self.check_in_date:
 			self.check_in_date = frappe.utils.now_datetime()
+		if not self.taxes_and_charges:
+			self.taxes_and_charges = get_or_create_default_tax_template(self.company)
+		if not flt(self.tax_rate):
+			self.tax_rate = 13.0
 
 	def validate(self):
 		self._validate_check_in()
@@ -216,13 +302,6 @@ class RepairOrder(Document):
 			veh_doc.append("customers", {"customer": self.customer, "is_primary": 1 if not veh_doc.customers else 0})
 			veh_doc.save(ignore_permissions=True)
 
-		if self.vehicle_check_in:
-			check_in_veh = frappe.db.get_value("Vehicle Check-in", self.vehicle_check_in, "vehicle")
-			if check_in_veh and check_in_veh != self.vehicle:
-				frappe.throw(_("Vehicle Check-in {0} belongs to vehicle {1}, not {2}.").format(
-					self.vehicle_check_in, check_in_veh, self.vehicle
-				))
-
 	def _validate_odometer(self):
 		if self.odometer_in is not None and self.odometer_in < 0:
 			frappe.throw(_("Odometer In cannot be negative."))
@@ -245,12 +324,26 @@ class RepairOrder(Document):
 			if not s.service_title and s.service_package:
 				s.service_title = s.service_package
 
-			# Labor calculation
+			# Check if flat rate from service row or linked package
+			is_flat = cint(getattr(s, "is_flat_rate", 0))
+			if not is_flat and s.service_package:
+				pkg_flat = frappe.db.get_value("Service Package", s.service_package, "is_flat_rate")
+				if pkg_flat:
+					is_flat = 1
+					s.is_flat_rate = 1
+
 			labor_hours = flt(s.labor_hours)
-			if labor_hours and (s.labor_rate is None or s.labor_rate == ""):
-				s.labor_rate = _get_default_labor_rate()
-			labor_rate = flt(s.labor_rate)
-			s.labor_amount = flt(labor_hours * labor_rate, 2)
+			if is_flat:
+				if s.labor_amount is None or (flt(s.labor_amount) == 0 and s.service_package):
+					pkg_service_rate = frappe.db.get_value("Service Package", s.service_package, "service_rate")
+					if pkg_service_rate is not None and pkg_service_rate != "":
+						s.labor_amount = flt(pkg_service_rate, 2)
+				s.labor_amount = flt(s.labor_amount, 2)
+			else:
+				if labor_hours and (s.labor_rate is None or s.labor_rate == ""):
+					s.labor_rate = _get_default_labor_rate()
+				labor_rate = flt(s.labor_rate)
+				s.labor_amount = flt(labor_hours * labor_rate, 2)
 
 			# Parse parts list
 			parts = s.parts
@@ -302,6 +395,9 @@ class RepairOrder(Document):
 			net = sum(flt(s.total_amount) for s in self.services if s.status != "Declined")
 
 		self.net_total = flt(net, 2)
+
+		if not self.taxes_and_charges:
+			self.taxes_and_charges = get_or_create_default_tax_template(self.company)
 
 		tax_rate = flt(self.tax_rate)
 		if not tax_rate:
@@ -683,14 +779,20 @@ class RepairOrder(Document):
 			})
 
 		labor_hours = flt(pkg.standard_labor_hours)
-		labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
-		labor_amount = flt(labor_hours * labor_rate, 2)
+		is_flat = cint(pkg.is_flat_rate)
+		if is_flat:
+			labor_rate = flt(pkg.hourly_rate)
+			labor_amount = flt(pkg.service_rate, 2)
+		else:
+			labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
+			labor_amount = flt(labor_hours * labor_rate, 2)
 
 		self.append("services", {
 			"service_package": pkg.name,
 			"service_title": pkg.package_name,
 			"category": pkg.category or "Maintenance",
 			"status": "Pending Approval" if is_supp else "Draft",
+			"is_flat_rate": is_flat,
 			"labor_hours": labor_hours,
 			"labor_rate": labor_rate,
 			"labor_amount": labor_amount,
@@ -809,6 +911,7 @@ class RepairOrder(Document):
 			"package_name": pkg_title,
 			"category": target.category or "Maintenance",
 			"description": target.advisor_notes or f"Saved from Repair Order {self.name}",
+			"is_flat_rate": cint(getattr(target, "is_flat_rate", 0)),
 			"standard_labor_hours": flt(target.labor_hours),
 			"hourly_rate": flt(target.labor_rate),
 			"service_rate": flt(target.labor_amount),
@@ -871,13 +974,17 @@ class RepairOrder(Document):
 			"Stock Settings", "default_warehouse"
 		) or "Stores - I"
 
+		tax_template = self.taxes_and_charges or get_or_create_default_tax_template(self.company)
+		self.taxes_and_charges = tax_template
+
 		si = frappe.new_doc("Sales Invoice")
 		si.customer = self.customer
 		si.company = self.company
 		si.posting_date = today()
 		si.currency = self.currency or "CAD"
 		si.update_stock = 1
-		si.taxes_and_charges = self.taxes_and_charges
+		si.disable_rounded_total = 1
+		si.taxes_and_charges = tax_template
 
 		# Add line items: labor and all nested parts from approved services
 		for s in approved_services:
@@ -896,16 +1003,28 @@ class RepairOrder(Document):
 						"is_stock_item": 0,
 						"stock_uom": "Hour",
 					}).insert(ignore_permissions=True)
-				si.append("items", {
-					"item_code": default_labor,
-					"item_name": f"Labor: {s.service_title}",
-					"description": s.advisor_notes or s.service_title,
-					"qty": flt(s.labor_hours) or 1.0,
-					"uom": "Hour",
-					"rate": flt(s.labor_rate),
-					"income_account": default_income_account,
-					"cost_center": default_cost_center,
-				})
+				if cint(getattr(s, "is_flat_rate", 0)):
+					si.append("items", {
+						"item_code": default_labor,
+						"item_name": f"Labor: {s.service_title}",
+						"description": s.advisor_notes or s.service_title,
+						"qty": 1.0,
+						"uom": "Unit" if frappe.db.exists("UOM", "Unit") else "Nos",
+						"rate": flt(s.labor_amount),
+						"income_account": default_income_account,
+						"cost_center": default_cost_center,
+					})
+				else:
+					si.append("items", {
+						"item_code": default_labor,
+						"item_name": f"Labor: {s.service_title}",
+						"description": s.advisor_notes or s.service_title,
+						"qty": flt(s.labor_hours) or 1.0,
+						"uom": "Hour",
+						"rate": flt(s.labor_rate),
+						"income_account": default_income_account,
+						"cost_center": default_cost_center,
+					})
 
 			# 2. Nested parts
 			parts = s.parts
@@ -931,6 +1050,28 @@ class RepairOrder(Document):
 					})
 
 		si.set_missing_values()
+		if tax_template:
+			si.set_taxes()
+
+		# Guard: Ensure 13% HST tax row is present on Sales Invoice
+		if not si.taxes:
+			abbr = frappe.db.get_value("Company", self.company, "abbr") or "I"
+			duties_and_taxes = (
+				frappe.db.get_value("Account", {"account_name": "Duties and Taxes", "company": self.company}, "name")
+				or f"Duties and Taxes - {abbr}"
+			)
+			account_head = (
+				frappe.db.get_value("Account", {"account_name": ["in", ["HST 13%", "HST"]], "company": self.company}, "name")
+				or (f"HST 13% - {abbr}" if frappe.db.exists("Account", f"HST 13% - {abbr}") else duties_and_taxes)
+			)
+			rate = flt(self.tax_rate) or 13.0
+			si.append("taxes", {
+				"charge_type": "On Net Total",
+				"account_head": account_head,
+				"description": f"HST @ {rate}%",
+				"rate": rate,
+			})
+
 		si.calculate_taxes_and_totals()
 		si.flags.ignore_permissions = True
 		si.insert()
@@ -948,12 +1089,24 @@ class RepairOrder(Document):
 			pe.company = self.company
 			pe.paid_amount = pay_amt
 			pe.received_amount = pay_amt
-			pe.mode_of_payment = payment_method or "Debit / Interac"
-			pe.paid_to = frappe.db.get_value(
-				"Mode of Payment Account",
-				{"parent": pe.mode_of_payment, "company": self.company},
-				"default_account"
-			) or frappe.db.get_value("Company", self.company, "default_bank_account")
+
+			mop = payment_method or "Debit / Interac"
+			if not frappe.db.exists("Mode of Payment", mop):
+				if frappe.db.exists("Mode of Payment", "Cash"):
+					mop = "Cash"
+				else:
+					mop = frappe.db.get_value("Mode of Payment", {}, "name")
+			pe.mode_of_payment = mop
+			pe.paid_to = (
+				frappe.db.get_value(
+					"Mode of Payment Account",
+					{"parent": pe.mode_of_payment, "company": self.company},
+					"default_account",
+				)
+				or frappe.db.get_value("Company", self.company, "default_bank_account")
+				or frappe.db.get_value("Company", self.company, "default_cash_account")
+				or f"Cash - {frappe.db.get_value('Company', self.company, 'abbr') or 'I'}"
+			)
 			pe.append("references", {
 				"reference_doctype": "Sales Invoice",
 				"reference_name": si.name,
@@ -974,13 +1127,6 @@ class RepairOrder(Document):
 		self.vehicle_released = 1
 		self.status = "Closed / Released"
 		self.checkout_date = frappe.utils.now_datetime()
-
-		if self.vehicle_check_in and frappe.db.exists("Vehicle Check-in", self.vehicle_check_in):
-			vci = frappe.get_doc("Vehicle Check-in", self.vehicle_check_in)
-			if vci.status != "Checked Out":
-				vci.status = "Checked Out"
-				vci.checkout_date = self.checkout_date
-				vci.save(ignore_permissions=True)
 
 		# Update vehicle specs
 		if self.vehicle:
@@ -1107,15 +1253,22 @@ def get_service_package_details(service_package):
 		})
 
 	labor_hours = flt(pkg.standard_labor_hours)
-	hourly_rate = flt(pkg.hourly_rate) or default_rate
+	is_flat = cint(pkg.is_flat_rate)
+	if is_flat:
+		hourly_rate = flt(pkg.hourly_rate)
+		service_rate = flt(pkg.service_rate, 2)
+	else:
+		hourly_rate = flt(pkg.hourly_rate) or default_rate
+		service_rate = flt(pkg.service_rate) if flt(pkg.service_rate) else flt(labor_hours * hourly_rate, 2)
 
 	return {
 		"package_name": pkg.package_name,
 		"category": pkg.category or "Maintenance",
 		"description": pkg.description or "",
+		"is_flat_rate": is_flat,
 		"standard_labor_hours": labor_hours,
 		"hourly_rate": hourly_rate,
-		"service_rate": flt(labor_hours * hourly_rate, 2),
+		"service_rate": service_rate,
 		"parts": parts,
 		"parts_total": sum(p["amount"] for p in parts),
 	}
@@ -1214,8 +1367,10 @@ def create_material_request(docname=None, **kwargs):
 
 
 @frappe.whitelist()
-def get_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters):
+def get_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters, as_dict=False, **kwargs):
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
+	if isinstance(filters, str):
+		filters = frappe.parse_json(filters)
 	txt_pattern = f"%{txt}%"
 	start_offset = cint(start)
 	limit_len = cint(page_len) or 20
@@ -1227,36 +1382,39 @@ def get_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters):
 		vc = frappe.qb.DocType("Repair Vehicle Customer")
 		query = (
 			frappe.qb.from_(v)
-			.join(vc)
+			.left_join(vc)
 			.on(vc.parent == v.name)
-			.select(v.name, v.license_plate, v.make, v.model, v.year)
+			.select(v.name, v.license_plate, v.manufacturer, v.model, v.model_year)
+			.distinct()
 			.where(
-				(vc.customer == customer)
+				((v.customer == customer) | (vc.customer == customer))
 				& (
 					(v.name.like(txt_pattern))
 					| (v.license_plate.like(txt_pattern))
 					| (v.vin.like(txt_pattern))
+					| (v.model.like(txt_pattern))
 				)
 			)
 			.orderby(v.name)
 			.offset(start_offset)
 			.limit(limit_len)
 		)
-		return query.run()
+		return query.run(as_dict=as_dict)
 
 	query = (
 		frappe.qb.from_(v)
-		.select(v.name, v.license_plate, v.make, v.model, v.year)
+		.select(v.name, v.license_plate, v.manufacturer, v.model, v.model_year)
 		.where(
 			(v.name.like(txt_pattern))
 			| (v.license_plate.like(txt_pattern))
 			| (v.vin.like(txt_pattern))
+			| (v.model.like(txt_pattern))
 		)
 		.orderby(v.name)
 		.offset(start_offset)
 		.limit(limit_len)
 	)
-	return query.run()
+	return query.run(as_dict=as_dict)
 
 
 @frappe.whitelist()
@@ -1272,53 +1430,54 @@ def get_deferred_services_for_vehicle(vehicle: str):
 
 
 @frappe.whitelist()
-def make_repair_order(source_name: str, target_doc=None):
-	"""Generate a draft Repair Order from a Vehicle Check-in document."""
-	from frappe.model.mapper import get_mapped_doc
-
-	def set_missing_values(source, target):
-		target.status = "Draft Estimate"
-		target.vehicle_location = "In Customer Lot"
-		if getattr(source, "check_in_date", None):
-			target.check_in_date = source.check_in_date
-		if getattr(source, "checkout_date", None):
-			target.checkout_date = source.checkout_date
-		if getattr(source, "inspection_template", None):
-			target.inspection_template = source.inspection_template
-
-	doc = get_mapped_doc(
-		"Vehicle Check-in",
-		source_name,
-		{
-			"Vehicle Check-in": {
-				"doctype": "Repair Order",
-				"field_map": {
-					"customer": "customer",
-					"vehicle": "vehicle",
-					"name": "vehicle_check_in",
-					"intake_mileage": "odometer_in",
-					"customer_concern": "customer_concern",
-					"check_in_date": "check_in_date",
-					"checkout_date": "checkout_date",
-					"inspection_template": "inspection_template",
-				},
-			},
-			"Vehicle Check-in Item": {
-				"doctype": "Vehicle Check-in Item",
-				"field_map": {
-					"inspection_description": "inspection_description",
-					"image": "image",
-				},
-			},
-		},
-		target_doc,
-		set_missing_values,
-	)
-	return doc
-
-
-@frappe.whitelist()
 def get_vehicle_customers(vehicle: str):
 	"""Return list of all customers linked to this vehicle."""
-	from ism.ism.doctype.vehicle_check_in.vehicle_check_in import get_vehicle_customers as _get_veh_cust
-	return _get_veh_cust(vehicle)
+	if not isinstance(vehicle, str) or not vehicle.strip():
+		return []
+
+	frappe.has_permission("Repair Vehicle", "read", throw=True)
+
+	if not frappe.db.exists("Repair Vehicle", vehicle):
+		return []
+
+	vehicle_doc = frappe.get_doc("Repair Vehicle", vehicle)
+	customer_ids = []
+	if vehicle_doc.customer:
+		customer_ids.append(vehicle_doc.customer)
+	for row in (vehicle_doc.customers or []):
+		if row.customer:
+			customer_ids.append(row.customer)
+
+	if not customer_ids:
+		return []
+
+	customer_names = {
+		c.name: c.customer_name
+		for c in frappe.get_all(
+			"Customer",
+			filters={"name": ["in", customer_ids]},
+			fields=["name", "customer_name"],
+		)
+	}
+
+	customers = []
+	seen = set()
+	if vehicle_doc.customer:
+		customers.append({
+			"customer": vehicle_doc.customer,
+			"customer_name": customer_names.get(vehicle_doc.customer, vehicle_doc.customer),
+			"is_primary": 1,
+		})
+		seen.add(vehicle_doc.customer)
+
+	for row in (vehicle_doc.customers or []):
+		if row.customer not in seen:
+			customers.append({
+				"customer": row.customer,
+				"customer_name": row.customer_name or customer_names.get(row.customer, row.customer),
+				"is_primary": row.is_primary,
+				"relationship": row.relationship,
+			})
+			seen.add(row.customer)
+
+	return customers

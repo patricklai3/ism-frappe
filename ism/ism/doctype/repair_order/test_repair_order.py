@@ -7,8 +7,9 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import cint, flt, today
 
 from ism.ism.doctype.repair_order.repair_order import (
+	get_filtered_vehicles,
 	get_service_package_details,
-	make_repair_order,
+	get_vehicle_customers,
 )
 from ism.tests.base import ISMTestCase, TEST_PREFIX
 
@@ -40,7 +41,7 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.odometer_in, 54000)
 
 	def test_user_creation_permission_and_in_create_flag(self):
-		for dt in ["Vehicle Check-in", "Repair Order", "Repair Vehicle", "Service Package"]:
+		for dt in ["Repair Order", "Repair Vehicle", "Service Package"]:
 			meta = frappe.get_meta(dt)
 			self.assertEqual(
 				cint(getattr(meta, "in_create", 0)),
@@ -328,6 +329,13 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(flt(si.outstanding_amount), 0.0)
 		self.assertEqual(si.update_stock, 1)
 
+		# Verify 13% HST sales tax is applied to the sales invoice
+		self.assertEqual(flt(si.net_total), flt(ro.net_total))
+		self.assertEqual(flt(si.total_taxes_and_charges), flt(ro.total_taxes_and_charges))
+		self.assertEqual(flt(si.grand_total), flt(ro.grand_total))
+		self.assertGreater(len(si.taxes), 0)
+		self.assertEqual(flt(si.taxes[0].rate), 13.0)
+
 		# Verify items on Sales Invoice contain both labor and nested parts
 		item_codes = [item.item_code for item in si.items]
 		self.assertIn(part.name, item_codes)
@@ -347,26 +355,25 @@ class TestRepairOrder(ISMTestCase):
 		})
 		self.assertRaises(frappe.ValidationError, ro.insert)
 
-	def test_make_repair_order_from_check_in(self):
-		check_in = frappe.get_doc({
-			"doctype": "Vehicle Check-in",
-			"customer": self.customer.name,
-			"vehicle": self.vehicle.name,
-			"intake_mileage": 54100,
-			"fuel_level": "3/4",
-			"customer_concern": "Engine vibration at idle",
+	def test_get_vehicle_customers(self):
+		"""Verify get_vehicle_customers returns primary and linked customers for a vehicle."""
+		cust2 = self.create_test_customer(customer_name=f"{TEST_PREFIX}Secondary_Cust")
+		veh = frappe.get_doc("Repair Vehicle", self.vehicle.name)
+		veh.append("customers", {
+			"customer": cust2.name,
+			"relationship": "Authorized Driver",
+			"is_primary": 0,
 		})
-		check_in.insert()
-		self.track(check_in)
+		veh.save()
 
-		ro = make_repair_order(check_in.name)
-		self.assertEqual(ro.customer, self.customer.name)
-		self.assertEqual(ro.vehicle, self.vehicle.name)
-		self.assertEqual(ro.vehicle_check_in, check_in.name)
-		self.assertEqual(ro.odometer_in, 54100)
-		self.assertEqual(ro.customer_concern, "Engine vibration at idle")
-		self.assertEqual(ro.status, "Draft Estimate")
-		self.assertEqual(ro.vehicle_location, "In Customer Lot")
+		customers = get_vehicle_customers(self.vehicle.name)
+		self.assertTrue(len(customers) >= 2)
+		cust_ids = [c["customer"] for c in customers]
+		self.assertIn(self.customer.name, cust_ids)
+		self.assertIn(cust2.name, cust_ids)
+
+		primary_entry = next(c for c in customers if c["customer"] == self.customer.name)
+		self.assertEqual(primary_entry["is_primary"], 1)
 
 	def test_submitted_repair_order_dynamic_lifecycle_and_supplements(self):
 		part1 = self.create_test_item("TEST-BRAKE-PAD-X", is_stock_item=0, standard_rate=150)
@@ -1042,30 +1049,143 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.vehicle_released, 1)
 		self.assertIsNotNone(ro.checkout_date)
 
-	def test_make_repair_order_maps_inspection_items_and_dates(self):
-		"""Verify make_repair_order maps check_in_date, checkout_date, inspection template, and inspection items."""
-		check_in = frappe.get_doc({
-			"doctype": "Vehicle Check-in",
+	def test_get_filtered_vehicles(self):
+		"""Verify get_filtered_vehicles query returns correct fields and filters by customer."""
+		results = get_filtered_vehicles(
+			doctype="Repair Vehicle",
+			txt="",
+			searchfield="name",
+			start=0,
+			page_len=10,
+			filters={"customer": self.customer.name},
+		)
+		self.assertTrue(len(results) >= 1)
+		veh_names = [r[0] for r in results]
+		self.assertIn(self.vehicle.name, veh_names)
+
+		# Verify search_link integration invoked from Desk form Link field
+		link_results = frappe.desk.search.search_link(
+			doctype="Repair Vehicle",
+			txt="",
+			reference_doctype="Repair Order",
+			link_fieldname="vehicle",
+			query="ism.ism.doctype.repair_order.repair_order.get_filtered_vehicles",
+			filters={"customer": self.customer.name},
+		)
+		self.assertTrue(len(link_results) >= 1)
+		link_values = [r["value"] for r in link_results]
+		self.assertIn(self.vehicle.name, link_values)
+
+	def test_default_tax_rate_and_hst_sales_invoice(self):
+		"""Verify new Repair Order defaults to 13% tax and bills Sales Invoice with 13% HST."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
 			"customer": self.customer.name,
 			"vehicle": self.vehicle.name,
-			"intake_mileage": 42000,
-			"customer_concern": "Annual inspection and tire rotation",
-			"inspection_items": [
-				{"inspection_description": "Brake pad thickness check"},
-				{"inspection_description": "Wiper blade condition"},
+			"odometer_in": 60000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Transmission Flush",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+				}
 			],
 		})
-		check_in.insert()
-		self.track(check_in)
+		ro.insert()
+		self.track(ro)
 
-		ro = make_repair_order(check_in.name)
-		self.assertEqual(ro.customer, self.customer.name)
-		self.assertEqual(ro.vehicle, self.vehicle.name)
-		self.assertEqual(ro.vehicle_check_in, check_in.name)
-		self.assertEqual(ro.odometer_in, 42000)
-		self.assertEqual(ro.customer_concern, "Annual inspection and tire rotation")
-		self.assertEqual(ro.check_in_date, check_in.check_in_date)
-		self.assertEqual(len(ro.inspection_items), 2)
-		self.assertEqual(ro.inspection_items[0].inspection_description, "Brake pad thickness check")
-		self.assertEqual(ro.inspection_items[1].inspection_description, "Wiper blade condition")
+		self.assertEqual(flt(ro.tax_rate), 13.0)
+		self.assertTrue(bool(ro.taxes_and_charges))
+		self.assertEqual(flt(ro.net_total), 100.0)
+		self.assertEqual(flt(ro.total_taxes_and_charges), 13.0)
+		self.assertEqual(flt(ro.grand_total), 113.0)
+
+		res = ro.process_payment_and_release(payment_method="Cash", odometer_out=60010)
+		self.assertEqual(res.get("status"), "success")
+
+		si = frappe.get_doc("Sales Invoice", ro.sales_invoice)
+		self.assertEqual(flt(si.net_total), 100.0)
+		self.assertEqual(flt(si.total_taxes_and_charges), 13.0)
+		self.assertEqual(flt(si.grand_total), 113.0)
+		self.assertEqual(flt(si.outstanding_amount), 0.0)
+		self.assertEqual(len(si.taxes), 1)
+		self.assertEqual(flt(si.taxes[0].rate), 13.0)
+
+	def test_flat_rate_service_package_population_and_billing(self):
+		"""Verify flat rate / fixed price service package populates correctly with fixed labor amount and bills accurately."""
+		part = self.create_test_item(item_code="BATT-12V-AGM", is_stock_item=0, standard_rate=150.0)
+
+		# 1. Create a flat rate service package (e.g. Battery Replacement)
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": "12V Battery Replacement Flat Rate",
+			"category": "Electrical",
+			"is_flat_rate": 1,
+			"standard_labor_hours": 0.5,
+			"hourly_rate": 0.0,
+			"service_rate": 75.0,
+			"items": [
+				{"item_code": part.name, "qty": 1, "rate": 150.0}
+			],
+		})
+		pkg.insert()
+		self.track(pkg)
+
+		# 2. Verify get_service_package_details returns flat rate flag and fixed service_rate
+		details = get_service_package_details(pkg.name)
+		self.assertEqual(details["is_flat_rate"], 1)
+		self.assertEqual(flt(details["service_rate"]), 75.0)
+		self.assertEqual(flt(details["standard_labor_hours"]), 0.5)
+		self.assertEqual(flt(details["parts_total"]), 150.0)
+
+		# 3. Add to Repair Order
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 54000,
+		})
+		ro.insert()
+		self.track(ro)
+
+		ro.add_service_package(pkg.name)
+		ro.reload()
+
+		self.assertEqual(len(ro.services), 1)
+		srv = ro.services[0]
+		self.assertEqual(srv.service_title, "12V Battery Replacement Flat Rate")
+		self.assertEqual(srv.is_flat_rate, 1)
+		self.assertEqual(flt(srv.labor_hours), 0.5)
+		self.assertEqual(flt(srv.labor_amount), 75.0)
+		self.assertEqual(flt(srv.parts_total), 150.0)
+		self.assertEqual(flt(srv.total_amount), 225.0)
+		self.assertEqual(flt(ro.net_total), 225.0)
+
+		# 4. Save Repair Order again to verify validate() does not overwrite labor_amount
+		ro.save()
+		ro.reload()
+		srv_after_save = ro.services[0]
+		self.assertEqual(srv_after_save.is_flat_rate, 1)
+		self.assertEqual(flt(srv_after_save.labor_amount), 75.0)
+		self.assertEqual(flt(srv_after_save.total_amount), 225.0)
+
+		# 5. Authorize, complete work, and process payment
+		ro.approval_status = "Approved"
+		ro.status = "Work Completed"
+		ro.vehicle_location = "Completed / Parked in Lot"
+		ro.save()
+
+		res = ro.process_payment_and_release(payment_method="Cash", odometer_out=54010)
+		self.assertEqual(res.get("status"), "success")
+
+		si = frappe.get_doc("Sales Invoice", ro.sales_invoice)
+		labor_lines = [it for it in si.items if "Labor:" in it.item_name]
+		self.assertEqual(len(labor_lines), 1)
+		self.assertEqual(flt(labor_lines[0].rate), 75.0)
+		self.assertEqual(flt(labor_lines[0].amount), 75.0)
+		self.assertEqual(flt(si.net_total), 225.0)
+
+
 

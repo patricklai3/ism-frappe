@@ -11,6 +11,7 @@
   "status",
   "is_completed",
   "col_break_labor",
+  "is_flat_rate",
   "labor_hours",
   "labor_rate",
   "labor_amount",
@@ -87,6 +88,13 @@
   },
   {
    "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "is_flat_rate",
+   "fieldtype": "Check",
+   "label": "Flat Rate / Fixed Price"
+  },
+  {
+   "allow_on_submit": 1,
    "default": "1.0",
    "fieldname": "labor_hours",
    "fieldtype": "Float",
@@ -97,7 +105,8 @@
    "default": "0",
    "fieldname": "labor_rate",
    "fieldtype": "Currency",
-   "label": "Labor Rate ($/hr)"
+   "label": "Labor Rate ($/hr)",
+   "read_only_depends_on": "eval:doc.is_flat_rate"
   },
   {
    "allow_on_submit": 1,
@@ -105,7 +114,7 @@
    "fieldname": "labor_amount",
    "fieldtype": "Currency",
    "label": "Labor Amount",
-   "read_only": 1
+   "read_only_depends_on": "eval:!doc.is_flat_rate"
   },
   {
    "fieldname": "col_break_totals",

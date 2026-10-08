@@ -49,25 +49,13 @@ class ISMTestCase(unittest.TestCase):
 		}).insert(ignore_permissions=True)
 		return self.track(doc)
 
-	def create_test_check_in(self, vehicle, customer, intake_mileage=10000, **kwargs):
-		doc = frappe.get_doc({
-			"doctype": "Vehicle Check-in",
-			"vehicle": vehicle,
-			"customer": customer,
-			"intake_mileage": intake_mileage,
-			"check_in_date": frappe.utils.now_datetime(),
-			**kwargs,
-		}).insert(ignore_permissions=True)
-		return self.track(doc)
-
-	def create_test_quotation(self, customer, vehicle=None, check_in=None, items=None, **kwargs):
+	def create_test_quotation(self, customer, vehicle=None, items=None, **kwargs):
 		item_code = self.get_or_create_test_item()
 		doc = frappe.get_doc({
 			"doctype": "Quotation",
 			"quotation_to": "Customer",
 			"party_name": customer,
 			"custom_vehicle": vehicle,
-			"custom_vehicle_check_in": check_in,
 			"items": items or [{"item_code": item_code, "qty": 1, "rate": 100.0}],
 			**kwargs,
 		}).insert(ignore_permissions=True)

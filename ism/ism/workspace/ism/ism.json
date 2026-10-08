@@ -24,16 +24,6 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Vehicle Check-in",
-   "link_count": 0,
-   "link_to": "Vehicle Check-in",
-   "link_type": "DocType",
-   "onboard": 1,
-   "type": "Link"
-  },
-  {
-   "hidden": 0,
-   "is_query_report": 0,
    "label": "Inspection Template",
    "link_count": 0,
    "link_to": "Inspection Template",
@@ -120,15 +110,6 @@
  "roles": [],
  "sequence_id": 1.0,
  "shortcuts": [
-  {
-   "color": "Grey",
-   "doc_view": "List",
-   "format": "{} Checked In",
-   "label": "Active Check-ins",
-   "link_to": "Vehicle Check-in",
-   "stats_filter": "[[\"Vehicle Check-in\",\"status\",\"=\",\"Checked In\"]]",
-   "type": "DocType"
-  },
   {
    "color": "Blue",
    "doc_view": "List",

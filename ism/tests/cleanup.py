@@ -8,9 +8,9 @@ TEST_VINS = ["5YJ3E1EBXNF123456", "1HGCR2F83HA123456", "5YJSA1E26CF000001"]
 
 PRESERVED_CUSTOMERS = {"Prestiga-Biz"}
 PRESERVED_VEHICLES = {"LRW3F7FS2NC5xxxxx", "LRW3F7ET2RC1xxxxx"}
-PRESERVED_REPAIR_ORDERS = {"RO-2026-00067"}
-PRESERVED_SALES_INVOICES = {"ACC-SINV-2026-00046"}
-PRESERVED_PAYMENT_ENTRIES = {"ACC-PAY-2026-00043"}
+PRESERVED_REPAIR_ORDERS = {"RO-2026-00067", "RO-2026-00105"}
+PRESERVED_SALES_INVOICES = {"ACC-SINV-2026-00046", "ACC-SINV-2026-00047"}
+PRESERVED_PAYMENT_ENTRIES = {"ACC-PAY-2026-00043", "ACC-PAY-2026-00044"}
 
 TEST_CUST_PREFIXES = ("_TEST", "_Test", "Test", "_Husband", "_Wife", "_Spouse")
 TEST_ITEM_PREFIXES = ("_TEST", "_Test", "TEST-", "PART-")
@@ -224,6 +224,8 @@ def _cleanup_repair_orders(test_customers, log):
 
 
 def _cleanup_vehicle_checkins(test_customers, log):
+	if not frappe.db.exists("DocType", "Vehicle Check-in"):
+		return
 	all_vcis = frappe.get_all("Vehicle Check-in", fields=["name", "customer", "vehicle"])
 	for vci in all_vcis:
 		if vci.customer in PRESERVED_CUSTOMERS:
