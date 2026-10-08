@@ -1,8 +1,183 @@
 // Copyright (c) 2026, patricklai3 and contributors
 // For license information, please see license.txt
 
+function get_status_target_tab(doc_or_frm) {
+	const doc = doc_or_frm && doc_or_frm.doc ? doc_or_frm.doc : doc_or_frm;
+	if (!doc || doc.__islocal) {
+		return "tab_intake";
+	}
+
+	const status = doc.status;
+	const is_released = !!doc.vehicle_released || status === "Closed / Released";
+	const is_work_completed =
+		status === "Work Completed" || doc.vehicle_location === "Completed / Parked in Lot";
+	const is_in_progress =
+		["Authorized - In Progress", "Waiting on Parts"].includes(status) ||
+		doc.vehicle_location === "In Bay / Being Serviced";
+	const is_approved =
+		doc.approval_status === "Approved" || doc.approval_status === "Partially Approved";
+
+	if (is_released || status === "Billed / Paid" || is_work_completed) {
+		return "tab_billing";
+	} else if (is_in_progress || is_approved) {
+		return "tab_workshop";
+	} else if (doc.services && doc.services.length > 0) {
+		return "tab_estimate";
+	} else {
+		return "tab_intake";
+	}
+}
+
+function update_tab_visibility(frm) {
+	if (!frm || !frm.doc) return;
+
+	const is_approved =
+		frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved";
+	const status = frm.doc.status;
+	const is_in_progress = ["Authorized - In Progress", "Waiting on Parts"].includes(status);
+	const is_work_completed =
+		["Work Completed", "Billed / Paid", "Closed / Released"].includes(status) ||
+		!!frm.doc.vehicle_released;
+	const is_cancelled = status === "Cancelled";
+
+	const show_workshop = is_approved || is_in_progress || is_work_completed || is_cancelled;
+	const show_billing = is_work_completed || is_cancelled;
+
+	if (frm.layout && frm.layout.tabs) {
+		const workshop_tab = frm.layout.tabs.find((t) => t.df && t.df.fieldname === "tab_workshop");
+		if (workshop_tab) {
+			workshop_tab.toggle(show_workshop);
+		}
+		const billing_tab = frm.layout.tabs.find((t) => t.df && t.df.fieldname === "tab_billing");
+		if (billing_tab) {
+			billing_tab.toggle(show_billing);
+		}
+	}
+}
+
+function select_tab(frm, target_tab_name) {
+	if (!frm || !target_tab_name) return;
+
+	const do_select = () => {
+		if (!frm.layout || !frm.layout.tabs || !frm.layout.tabs.length) return;
+
+		const target_tab = frm.layout.tabs.find(
+			(t) => t.df && t.df.fieldname === target_tab_name
+		);
+
+		if (target_tab) {
+			if (target_tab.df.hidden_due_to_dependency) {
+				target_tab.df.hidden_due_to_dependency = false;
+			}
+			if (target_tab.hidden) {
+				target_tab.toggle(true);
+			}
+			target_tab.set_active();
+		} else {
+			frm.layout.select_tab?.(target_tab_name);
+		}
+
+		// Ensure DOM nav link and tab pane classes are active
+		const $tab_btn = frm.$wrapper.find(`.nav-link[data-fieldname="${target_tab_name}"]`);
+		if ($tab_btn.length) {
+			frm.$wrapper.find(".nav-link").removeClass("active");
+			$tab_btn.addClass("active");
+
+			const tab_pane_id =
+				$tab_btn.attr("aria-controls") ||
+				`${frappe.scrub(frm.doctype, "-")}-${target_tab_name}`;
+			if (tab_pane_id) {
+				frm.$wrapper.find(".tab-pane").removeClass("show active");
+				frm.$wrapper.find(`#${tab_pane_id}`).addClass("show active");
+			}
+		}
+
+		// Keep frm.active_tab_map synced
+		if (target_tab && frm.active_tab_map) {
+			frm.active_tab_map[frm.docname] = target_tab;
+		}
+
+		// Sync URL hash
+		if (window.location.hash !== `#${target_tab_name}`) {
+			const url = new URL(window.location.href);
+			url.hash = target_tab_name;
+			history.replaceState(null, null, url);
+		}
+	};
+
+	do_select();
+	setTimeout(do_select, 50);
+	frappe.after_ajax(() => {
+		do_select();
+	});
+}
+
+function auto_select_active_tab(frm) {
+	const target = get_status_target_tab(frm);
+	if (target) {
+		select_tab(frm, target);
+	}
+}
+
 frappe.ui.form.on("Repair Order", {
 	setup(frm) {
+		if (!frm._ro_nav_bound) {
+			frm._ro_nav_bound = true;
+
+			// Track intentional DOM clicks on tab buttons by user
+			frm.$wrapper.on("click", ".nav-link[data-fieldname]", function () {
+				const fieldname = $(this).attr("data-fieldname");
+				if (fieldname) {
+					frm._user_clicked_tab = fieldname;
+				}
+			});
+
+			$(frm.page.wrapper).on("hide", () => {
+				frm._user_clicked_tab = null;
+				if (frm.active_tab_map && frm.docname) {
+					delete frm.active_tab_map[frm.docname];
+				}
+			});
+
+			frappe.router.on("change", () => {
+				const route = frappe.get_route();
+				const is_ro_form =
+					route && route[0] === "Form" && route[1] === "Repair Order" && route[2];
+
+				if (!is_ro_form) {
+					frm._user_clicked_tab = null;
+					if (frm.active_tab_map && frm.docname) {
+						delete frm.active_tab_map[frm.docname];
+					}
+				} else {
+					const target_docname = route[2];
+					if (target_docname !== frm.docname) {
+						frm._user_clicked_tab = null;
+					}
+					if (!frm._user_clicked_tab) {
+						const doc = frappe.get_doc("Repair Order", target_docname);
+						const target = get_status_target_tab(doc);
+						if (target) {
+							const url = new URL(window.location.href);
+							if (url.hash !== `#${target}`) {
+								url.hash = target;
+								history.replaceState(null, null, url);
+							}
+							if (frm.layout?.tabs) {
+								const target_tab = frm.layout.tabs.find(
+									(t) => t.df && t.df.fieldname === target
+								);
+								if (target_tab) {
+									frm.active_tab_map ??= {};
+									frm.active_tab_map[target_docname] = target_tab;
+								}
+							}
+						}
+					}
+				}
+			});
+		}
+
 		frm.set_query("vehicle", () => {
 			const filters = {};
 			if (frm.doc.customer) {
@@ -26,8 +201,43 @@ frappe.ui.form.on("Repair Order", {
 		});
 	},
 
+	onload(frm) {
+		frm._user_clicked_tab = null;
+		if (frm.active_tab_map && frm.docname) {
+			delete frm.active_tab_map[frm.docname];
+		}
+		const target = get_status_target_tab(frm);
+		if (target) {
+			const url = new URL(window.location.href);
+			url.hash = target;
+			history.replaceState(null, null, url);
+
+			if (frm.layout?.tabs) {
+				const target_tab = frm.layout.tabs.find(
+					(t) => t.df && t.df.fieldname === target
+				);
+				if (target_tab) {
+					frm.active_tab_map ??= {};
+					frm.active_tab_map[frm.docname] = target_tab;
+				}
+			}
+		}
+	},
+
+	on_tab_change(frm) {
+		// Native Frappe tab change hook
+	},
+
 	refresh(frm) {
 		frm.trigger("render_progress_indicator");
+		frm._original_odometer_in = frm.doc.odometer_in;
+		update_tab_visibility(frm);
+
+		if (frm._user_clicked_tab) {
+			select_tab(frm, frm._user_clicked_tab);
+		} else {
+			auto_select_active_tab(frm);
+		}
 
 		if (!frm.is_new() && frm.doc.docstatus !== 2) {
 			const is_approved = frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved";
@@ -78,6 +288,7 @@ frappe.ui.form.on("Repair Order", {
 											message: __("All jobs authorized successfully"),
 											indicator: "green",
 										});
+										frm._user_clicked_tab = null;
 										frm.reload_doc();
 									}
 								},
@@ -108,7 +319,10 @@ frappe.ui.form.on("Repair Order", {
 						frm.call({
 							doc: frm.doc,
 							method: "pick_up_vehicle",
-						}).then(() => frm.reload_doc());
+						}).then(() => {
+							frm._user_clicked_tab = null;
+							frm.reload_doc();
+						});
 					}, __("Bay Execution"));
 				}
 
@@ -117,7 +331,10 @@ frappe.ui.form.on("Repair Order", {
 						frm.call({
 							doc: frm.doc,
 							method: "park_vehicle",
-						}).then(() => frm.reload_doc());
+						}).then(() => {
+							frm._user_clicked_tab = null;
+							frm.reload_doc();
+						});
 					}, __("Bay Execution"));
 				}
 			}
@@ -133,11 +350,16 @@ frappe.ui.form.on("Repair Order", {
 
 	vehicle(frm) {
 		if (frm.doc.vehicle) {
-			frappe.db.get_value("Repair Vehicle", frm.doc.vehicle, ["last_odometer"], (r) => {
+			frappe.db.get_value("Repair Vehicle", frm.doc.vehicle, ["last_odometer", "customer"], (r) => {
 				if (r && r.last_odometer && !frm.doc.odometer_in) {
 					frm.set_value("odometer_in", r.last_odometer);
 				}
+				if (r && r.customer && !frm.doc.customer) {
+					frm.set_value("customer", r.customer);
+				}
 			});
+
+			frm.trigger("load_vehicle_customers");
 
 			// Check for previously deferred services
 			frappe.call({
@@ -154,10 +376,90 @@ frappe.ui.form.on("Repair Order", {
 					}
 				},
 			});
+		} else {
+			frm.set_df_property("customer", "description", "");
 		}
 	},
 
+	load_vehicle_customers(frm) {
+		if (!frm.doc.vehicle) return;
+
+		frappe.call({
+			method: "ism.ism.doctype.repair_order.repair_order.get_vehicle_customers",
+			args: { vehicle: frm.doc.vehicle },
+			callback(r) {
+				const customers = (r && r.message) || [];
+				if (customers.length > 0) {
+					const names = customers.map((c) => c.customer_name || c.customer);
+					frm.set_df_property(
+						"customer",
+						"description",
+						__("Known customers for this vehicle: {0}", [names.join(", ")])
+					);
+
+					if (!frm.doc.customer) {
+						const primary = customers.find((c) => c.is_primary) || customers[0];
+						frm.set_value("customer", primary.customer);
+					}
+				}
+			},
+		});
+	},
+
+	odometer_in(frm) {
+		if (!frm.is_new() && frm._original_odometer_in && frm.doc.odometer_in !== frm._original_odometer_in) {
+			frappe.confirm(
+				__("Are you sure the original intake odometer was incorrect? If not, cancel to revert."),
+				() => {
+					frm._original_odometer_in = frm.doc.odometer_in;
+				},
+				() => {
+					frm.set_value("odometer_in", frm._original_odometer_in);
+				}
+			);
+		}
+	},
+
+	inspection_template(frm) {
+		if (frm.doc.inspection_template) {
+			frappe.db.get_doc("Inspection Template", frm.doc.inspection_template).then((doc) => {
+				if (doc && doc.items) {
+					frm.clear_table("inspection_items");
+					doc.items.forEach((item) => {
+						const child = frm.add_child("inspection_items");
+						child.inspection_description = item.inspection_description;
+					});
+					frm.refresh_field("inspection_items");
+				}
+			});
+		}
+	},
+
+	update_tab_visibility(frm) {
+		update_tab_visibility(frm);
+	},
+
+	get_status_target_tab(frm) {
+		return get_status_target_tab(frm);
+	},
+
+	select_tab(frm, target_tab_name) {
+		select_tab(frm, target_tab_name);
+	},
+
+	auto_select_active_tab(frm) {
+		auto_select_active_tab(frm);
+	},
+
+	status(frm) {
+		update_tab_visibility(frm);
+		frm._user_clicked_tab = null;
+		auto_select_active_tab(frm);
+	},
+
 	approval_status(frm) {
+		update_tab_visibility(frm);
+		frm._user_clicked_tab = null;
 		if (frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved") {
 			if (frm.doc.status === "Draft Estimate" || frm.doc.status === "Pending Authorization") {
 				frm.set_value("status", "Authorized - In Progress");
@@ -170,6 +472,17 @@ frappe.ui.form.on("Repair Order", {
 				});
 				frm.refresh_field("services");
 			}
+			select_tab(frm, "tab_workshop");
+		}
+	},
+
+	vehicle_location(frm) {
+		update_tab_visibility(frm);
+		frm._user_clicked_tab = null;
+		if (frm.doc.vehicle_location === "Completed / Parked in Lot") {
+			select_tab(frm, "tab_billing");
+		} else if (frm.doc.vehicle_location === "In Bay / Being Serviced") {
+			select_tab(frm, "tab_workshop");
 		}
 	},
 
@@ -530,6 +843,7 @@ frappe.ui.form.on("Repair Order", {
 								indicator: "green",
 							});
 							d.hide();
+							frm._user_clicked_tab = null;
 							frm.reload_doc();
 						}
 					},

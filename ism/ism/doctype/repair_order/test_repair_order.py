@@ -931,4 +931,141 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.services[0].labor_rate, 0.0)
 		self.assertEqual(ro.services[0].labor_amount, 0.0)
 
+	def test_repair_order_super_doctype_tabs_and_status_visibility(self):
+		"""Verify that Repair Order uses Tab Breaks with status-based visibility for clean stage progression."""
+		meta = frappe.get_meta("Repair Order")
+		tab_fields = [df for df in meta.fields if df.fieldtype == "Tab Break"]
+		tab_names = [df.fieldname for df in tab_fields]
+
+		expected_tabs = ["tab_intake", "tab_estimate", "tab_workshop", "tab_billing"]
+		for tab_name in expected_tabs:
+			self.assertIn(tab_name, tab_names, f"Expected Tab Break {tab_name} in Repair Order DocType")
+
+		# 1. Verify Tab sequence matches workflow progression
+		intake_idx = tab_names.index("tab_intake")
+		estimate_idx = tab_names.index("tab_estimate")
+		workshop_idx = tab_names.index("tab_workshop")
+		billing_idx = tab_names.index("tab_billing")
+
+		self.assertLess(intake_idx, estimate_idx, "Intake tab must precede Estimate tab.")
+		self.assertLess(estimate_idx, workshop_idx, "Estimate tab must precede Workshop Execution tab.")
+		self.assertLess(workshop_idx, billing_idx, "Workshop Execution tab must precede Billing tab.")
+
+		# 2. Verify status-based progressive disclosure rules on Tab Breaks
+		tab_workshop_df = meta.get_field("tab_workshop")
+		self.assertTrue(
+			tab_workshop_df.depends_on,
+			"tab_workshop must have a depends_on expression to hide shop floor execution until approved or in-progress.",
+		)
+		self.assertIn("approval_status", tab_workshop_df.depends_on)
+
+		tab_billing_df = meta.get_field("tab_billing")
+		self.assertTrue(
+			tab_billing_df.depends_on,
+			"tab_billing must have a depends_on expression to reveal settlement only once work is completed or released.",
+		)
+		self.assertIn("Work Completed", tab_billing_df.depends_on)
+
+		# 3. Verify section placement inside tabs
+		field_names = [df.fieldname for df in meta.fields]
+		auth_idx = field_names.index("sec_auth")
+		workshop_tab_idx = field_names.index("tab_workshop")
+		bay_sec_idx = field_names.index("sec_bay")
+		billing_tab_idx = field_names.index("tab_billing")
+		payment_sec_idx = field_names.index("sec_payment")
+
+		# sec_auth must be in tab_estimate (before tab_workshop)
+		self.assertLess(auth_idx, workshop_tab_idx, "Customer authorization must be inside tab_estimate before tab_workshop.")
+		# sec_bay must be inside tab_workshop (before tab_billing)
+		self.assertLess(bay_sec_idx, billing_tab_idx, "Workshop Bay execution must be inside tab_workshop before tab_billing.")
+		# sec_payment must be after tab_billing
+		self.assertGreater(payment_sec_idx, billing_tab_idx, "Payment settlement must be inside tab_billing.")
+
+	def test_vehicle_checking_incorporated_into_repair_order(self):
+		"""Verify that vehicle checking, intake inspection, and customer linking work directly on Repair Order."""
+		# Create an inspection template
+		template = frappe.get_doc({
+			"doctype": "Inspection Template",
+			"template_name": f"{TEST_PREFIX}Intake Checklist",
+			"items": [
+				{"inspection_description": "Check windshield for chips or cracks"},
+				{"inspection_description": "Inspect tire tread depth and pressure"},
+			],
+		})
+		template.insert()
+		self.track(template)
+
+		# Create a new customer for vehicle linking test
+		new_customer = self.create_test_customer(f"{TEST_PREFIX}Intake_Driver")
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": new_customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 35000,
+			"customer_concern": "Vibration during high speed braking",
+			"inspection_template": template.name,
+			"inspection_items": [
+				{"inspection_description": "Check windshield for chips or cracks"},
+				{"inspection_description": "Inspect tire tread depth and pressure"},
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		# 1. Defaults and check-in date
+		self.assertIsNotNone(ro.check_in_date)
+		self.assertIsNone(ro.checkout_date)
+		self.assertEqual(len(ro.inspection_items), 2)
+		self.assertEqual(ro.inspection_template, template.name)
+
+		# 2. Customer should be linked to Repair Vehicle via on_update link_vehicle_to_customer
+		veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle.name)
+		all_customers = [veh_doc.customer] + [row.customer for row in (veh_doc.customers or [])]
+		self.assertIn(new_customer.name, all_customers)
+
+		# 3. Test checkout date set upon payment and release
+		ro.append("services", {
+			"service_title": "Brake Inspection",
+			"status": "Approved",
+			"labor_hours": 1.0,
+			"labor_rate": 100.0,
+		})
+		ro.status = "Work Completed"
+		ro.approval_status = "Approved"
+		ro.save()
+
+		rel_res = ro.process_payment_and_release(paid_amount=0)
+		ro.reload()
+		self.assertEqual(ro.status, "Closed / Released")
+		self.assertEqual(ro.vehicle_location, "Released to Customer")
+		self.assertEqual(ro.vehicle_released, 1)
+		self.assertIsNotNone(ro.checkout_date)
+
+	def test_make_repair_order_maps_inspection_items_and_dates(self):
+		"""Verify make_repair_order maps check_in_date, checkout_date, inspection template, and inspection items."""
+		check_in = frappe.get_doc({
+			"doctype": "Vehicle Check-in",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"intake_mileage": 42000,
+			"customer_concern": "Annual inspection and tire rotation",
+			"inspection_items": [
+				{"inspection_description": "Brake pad thickness check"},
+				{"inspection_description": "Wiper blade condition"},
+			],
+		})
+		check_in.insert()
+		self.track(check_in)
+
+		ro = make_repair_order(check_in.name)
+		self.assertEqual(ro.customer, self.customer.name)
+		self.assertEqual(ro.vehicle, self.vehicle.name)
+		self.assertEqual(ro.vehicle_check_in, check_in.name)
+		self.assertEqual(ro.odometer_in, 42000)
+		self.assertEqual(ro.customer_concern, "Annual inspection and tire rotation")
+		self.assertEqual(ro.check_in_date, check_in.check_in_date)
+		self.assertEqual(len(ro.inspection_items), 2)
+		self.assertEqual(ro.inspection_items[0].inspection_description, "Brake pad thickness check")
+		self.assertEqual(ro.inspection_items[1].inspection_description, "Wiper blade condition")
 

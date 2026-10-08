@@ -114,8 +114,11 @@ class RepairOrder(Document):
 			self.price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list") or "Standard Selling"
 		if not self.company:
 			self.company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
+		if not self.check_in_date:
+			self.check_in_date = frappe.utils.now_datetime()
 
 	def validate(self):
+		self._validate_check_in()
 		self._sync_approval_status_to_services()
 		self._validate_vehicle_and_customer()
 		self._validate_odometer()
@@ -124,6 +127,32 @@ class RepairOrder(Document):
 		self._update_progress_and_job_timing()
 		self._validate_authorization_guards()
 		self._sync_declined_to_deferred_services()
+
+	def on_update(self):
+		self.link_vehicle_to_customer()
+
+	def _validate_check_in(self):
+		if not self.check_in_date:
+			self.check_in_date = self.creation or frappe.utils.now_datetime()
+		if self.vehicle_released and not self.checkout_date:
+			self.checkout_date = frappe.utils.now_datetime()
+
+	def link_vehicle_to_customer(self):
+		"""Link repair order customer to vehicle if not already associated."""
+		if not (self.vehicle and self.customer):
+			return
+
+		# Check primary customer first (fast indexed lookup)
+		if frappe.db.get_value("Repair Vehicle", self.vehicle, "customer") == self.customer:
+			return
+
+		# Check child customers table
+		if frappe.db.exists("Repair Vehicle Customer", {"parent": self.vehicle, "customer": self.customer}):
+			return
+
+		if frappe.db.exists("Repair Vehicle", self.vehicle):
+			vehicle_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
+			vehicle_doc.add_customer(self.customer)
 
 	def _sync_approval_status_to_services(self):
 		"""
@@ -944,6 +973,14 @@ class RepairOrder(Document):
 		self.vehicle_location = "Released to Customer"
 		self.vehicle_released = 1
 		self.status = "Closed / Released"
+		self.checkout_date = frappe.utils.now_datetime()
+
+		if self.vehicle_check_in and frappe.db.exists("Vehicle Check-in", self.vehicle_check_in):
+			vci = frappe.get_doc("Vehicle Check-in", self.vehicle_check_in)
+			if vci.status != "Checked Out":
+				vci.status = "Checked Out"
+				vci.checkout_date = self.checkout_date
+				vci.save(ignore_permissions=True)
 
 		# Update vehicle specs
 		if self.vehicle:
@@ -962,6 +999,7 @@ class RepairOrder(Document):
 			self.db_set("payment_status", self.payment_status)
 			self.db_set("vehicle_location", self.vehicle_location)
 			self.db_set("vehicle_released", 1)
+			self.db_set("checkout_date", self.checkout_date)
 			self.db_set("status", self.status)
 			if self.odometer_out:
 				self.db_set("odometer_out", self.odometer_out)
@@ -971,6 +1009,7 @@ class RepairOrder(Document):
 			"sales_invoice": self.sales_invoice,
 			"payment_status": self.payment_status,
 			"vehicle_released": self.vehicle_released,
+			"checkout_date": self.checkout_date,
 		}
 
 	@frappe.whitelist()
@@ -1240,6 +1279,12 @@ def make_repair_order(source_name: str, target_doc=None):
 	def set_missing_values(source, target):
 		target.status = "Draft Estimate"
 		target.vehicle_location = "In Customer Lot"
+		if getattr(source, "check_in_date", None):
+			target.check_in_date = source.check_in_date
+		if getattr(source, "checkout_date", None):
+			target.checkout_date = source.checkout_date
+		if getattr(source, "inspection_template", None):
+			target.inspection_template = source.inspection_template
 
 	doc = get_mapped_doc(
 		"Vehicle Check-in",
@@ -1253,10 +1298,27 @@ def make_repair_order(source_name: str, target_doc=None):
 					"name": "vehicle_check_in",
 					"intake_mileage": "odometer_in",
 					"customer_concern": "customer_concern",
+					"check_in_date": "check_in_date",
+					"checkout_date": "checkout_date",
+					"inspection_template": "inspection_template",
 				},
-			}
+			},
+			"Vehicle Check-in Item": {
+				"doctype": "Vehicle Check-in Item",
+				"field_map": {
+					"inspection_description": "inspection_description",
+					"image": "image",
+				},
+			},
 		},
 		target_doc,
 		set_missing_values,
 	)
 	return doc
+
+
+@frappe.whitelist()
+def get_vehicle_customers(vehicle: str):
+	"""Return list of all customers linked to this vehicle."""
+	from ism.ism.doctype.vehicle_check_in.vehicle_check_in import get_vehicle_customers as _get_veh_cust
+	return _get_veh_cust(vehicle)
