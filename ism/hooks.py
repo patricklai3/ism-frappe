@@ -43,10 +43,7 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-doctype_js = {
-	"Quotation": "public/js/quotation.js",
-	"Sales Order": "public/js/sales_order.js",
-}
+# doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -144,23 +141,8 @@ website_route_rules = [
 ]
 
 doc_events = {
-	"DocType": {
-		"after_insert": "ism.setup.sync_doctype_to_workspace",
-		"on_trash": "ism.setup.sync_doctype_to_workspace",
-	},
 	"Customer": {
 		"on_trash": "ism.ism.doctype.repair_vehicle.repair_vehicle.on_customer_trash",
-	},
-	"Quotation": {
-		"before_validate": "ism.api.quotation.before_validate_quotation",
-		"validate": "ism.api.quotation.validate_quotation",
-	},
-	"Sales Order": {
-		"validate": "ism.api.sales_order.validate_sales_order",
-	},
-	"Sales Invoice": {
-		"validate": "ism.api.sales_invoice.validate_sales_invoice",
-		"before_submit": "ism.api.sales_invoice.validate_sales_invoice_authorization",
 	},
 }
 
@@ -200,14 +182,10 @@ doc_events = {
 
 # Overriding Methods
 # ------------------------------
-
-website_route_rules = [
-	{"from_route": "/quote-approval", "to_route": "quote_approval"},
-]
-
-override_whitelisted_methods = {
-	"erpnext.selling.doctype.quotation.quotation.make_sales_order": "ism.api.quotation.make_sales_order"
-}
+#
+# override_whitelisted_methods = {
+# 	"frappe.desk.doctype.event.event.get_events": "ism.event.get_events"
+# }
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

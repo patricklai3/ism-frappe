@@ -137,36 +137,3 @@ def make_repair_order(source_name: str, target_doc=None):
 	from ism.ism.doctype.repair_order.repair_order import make_repair_order as _make_ro
 	return _make_ro(source_name, target_doc)
 
-
-@frappe.whitelist()
-def make_quotation(source_name: str, target_doc=None):
-	"""Create a draft Quotation from a Vehicle Check-in document."""
-	def set_missing_values(source, target):
-		target.quotation_to = "Customer"
-		target.party_name = source.customer
-		target.custom_vehicle = source.vehicle
-		target.custom_vehicle_check_in = source.name
-		target.custom_odometer_in = source.intake_mileage
-		target.custom_customer_concern = source.customer_concern
-		target.status = "Draft"
-
-	doc = get_mapped_doc(
-		"Vehicle Check-in",
-		source_name,
-		{
-			"Vehicle Check-in": {
-				"doctype": "Quotation",
-				"field_map": {
-					"customer": "party_name",
-					"vehicle": "custom_vehicle",
-					"name": "custom_vehicle_check_in",
-					"intake_mileage": "custom_odometer_in",
-					"customer_concern": "custom_customer_concern",
-				},
-				"field_no_map": ["status", "naming_series"],
-			}
-		},
-		target_doc,
-		set_missing_values,
-	)
-	return doc

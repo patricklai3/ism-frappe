@@ -8,7 +8,6 @@
   "job_title",
   "decline_date",
   "repair_order",
-  "quotation",
   "estimated_amount",
   "status",
   "safety_hazard",
@@ -36,13 +35,6 @@
    "options": "Repair Order"
   },
   {
-   "fieldname": "quotation",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Quotation",
-   "options": "Quotation"
-  },
-  {
    "default": "0",
    "fieldname": "estimated_amount",
    "fieldtype": "Currency",
@@ -55,7 +47,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Open Recommendation\nApproved in Later Visit\nDeclined Permanently"
+   "options": "Open Recommendation\nCompleted Later\nCancelled"
   },
   {
    "default": "0",
@@ -70,16 +62,16 @@
    "label": "Decline Reason"
   }
  ],
- "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-10-08 00:00:00.000000",
+ "modified": "2026-10-06 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Vehicle Deferred Service",
  "owner": "Administrator",
  "permissions": [],
- "sort_field": "modified",
+ "row_format": "Dynamic",
+ "sort_field": "creation",
  "sort_order": "DESC",
  "states": []
 }

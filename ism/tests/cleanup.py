@@ -190,25 +190,5 @@ def cleanup_all_test_data(verbose: bool = True):
 		except Exception as e:
 			log(f"Failed deleting test File {f}: {e}")
 
-	# 10. Clean test Repair Orders
-	test_ros = frappe.get_all(
-		"Repair Order",
-		filters=[["customer", "like", "_Test%"]],
-		pluck="name",
-	) + frappe.get_all(
-		"Repair Order",
-		filters=[["customer", "like", "_TEST%"]],
-		pluck="name",
-	)
-	for ro in set(test_ros):
-		try:
-			doc = frappe.get_doc("Repair Order", ro)
-			if doc.docstatus == 1:
-				doc.cancel()
-			frappe.delete_doc("Repair Order", ro, force=True, ignore_permissions=True)
-			log(f"Deleted test Repair Order: {ro}")
-		except Exception as e:
-			log(f"Failed deleting test Repair Order {ro}: {e}")
-
 	frappe.db.commit()
 	log("Cleanup of test data completed successfully.")
