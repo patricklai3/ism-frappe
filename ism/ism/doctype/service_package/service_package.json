@@ -8,25 +8,17 @@
  "field_order": [
   "package_name",
   "correction_code",
-  "applicable_model",
-  "applicable_generation",
-  "category",
-  "subcategory",
-  "description",
   "col_break_rates",
-  "frt",
   "standard_labor_hours",
   "hourly_rate",
   "service_rate",
   "is_flat_rate",
+  "is_mobile_capable",
   "sec_manual_ref",
   "btn_open_tesla_manual",
   "btn_import_from_url",
   "tesla_manual_url",
   "doc_guid",
-  "col_gen_dates",
-  "gen_start_year_month",
-  "gen_end_year_month",
   "sb_items",
   "items"
  ],
@@ -47,50 +39,15 @@
    "search_index": 1
   },
   {
-   "fieldname": "applicable_model",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Applicable Model",
-   "options": "Model S\nModel 3\nModel X\nModel Y\nCybertruck\nRoadster\nSemi\nAll Models"
-  },
-  {
-   "fieldname": "applicable_generation",
-   "fieldtype": "Data",
-   "label": "Applicable Generation"
-  },
-  {
-   "default": "Maintenance",
-   "fieldname": "category",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Category",
-   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther\nINSPECTION AND SERVICE\nBODY\nCLOSURE COMPONENTS\nEXTERIOR FITTINGS\nSEATS\nINSTRUMENT PANELS AND PEDALS\nINTERIOR TRIM\nHV BATTERY SYSTEM\nELECTRICAL\nTHERMAL MANAGEMENT\nSAFETY AND RESTRAINT\nINFOTAINMENT\nROOF\nCHASSIS\nSUSPENSION\nSTEERING\nBRAKES\nWHEELS AND TIRES\nFRONT DRIVE UNIT\nREAR DRIVE UNIT\nHIGH VOLTAGE SYSTEM\nEXTERNAL CHARGING CONNECTORS\nACCESSORIES"
-  },
-  {
-   "fieldname": "subcategory",
-   "fieldtype": "Data",
-   "label": "Subcategory"
-  },
-  {
-   "fieldname": "description",
-   "fieldtype": "Small Text",
-   "label": "Scope of Work / Description"
-  },
-  {
    "fieldname": "col_break_rates",
    "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "frt",
-   "fieldtype": "Float",
-   "in_list_view": 1,
-   "label": "Flat Rate Time (FRT)"
   },
   {
    "default": "1.0",
    "fieldname": "standard_labor_hours",
    "fieldtype": "Float",
-   "label": "Labor Hours"
+   "in_list_view": 1,
+   "label": "Flat Rate Time (FRT)"
   },
   {
    "default": "0",
@@ -110,6 +67,13 @@
    "fieldname": "is_flat_rate",
    "fieldtype": "Check",
    "label": "Flat Rate / Fixed Price"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_mobile_capable",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Mobile Service Capable"
   },
   {
    "fieldname": "sec_manual_ref",
@@ -135,20 +99,6 @@
    "fieldname": "doc_guid",
    "fieldtype": "Data",
    "label": "Doc GUID"
-  },
-  {
-   "fieldname": "col_gen_dates",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "gen_start_year_month",
-   "fieldtype": "Data",
-   "label": "Generation Start"
-  },
-  {
-   "fieldname": "gen_end_year_month",
-   "fieldtype": "Data",
-   "label": "Generation End"
   },
   {
    "fieldname": "sb_items",
@@ -206,7 +156,7 @@
   }
  ],
  "row_format": "Dynamic",
- "search_fields": "package_name,correction_code,category",
+ "search_fields": "package_name,correction_code",
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": []

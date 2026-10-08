@@ -32,6 +32,7 @@
   "actual_duration_hours",
   "col_break_notes",
   "is_supplement",
+  "is_mobile_capable",
   "tesla_manual_url",
   "advisor_notes"
  ],
@@ -231,6 +232,13 @@
    "fieldname": "is_supplement",
    "fieldtype": "Check",
    "label": "Is Supplement"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "is_mobile_capable",
+   "fieldtype": "Check",
+   "label": "Mobile Capable"
   },
   {
    "allow_on_submit": 1,

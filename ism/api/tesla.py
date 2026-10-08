@@ -161,6 +161,10 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	proc_url = proc_data.get("tesla_manual_url") or url or ""
 	correction_code = str(proc_data.get("correction_code") or "").strip()
 	title = str(proc_data.get("title") or "Tesla Service Procedure").strip()
+	if correction_code:
+		import re
+		title = re.sub(rf"^{re.escape(correction_code)}\s*[-–—:]?\s*", "", title).strip()
+	title = title or "Tesla Service Procedure"
 	frt = flt(proc_data.get("frt"), 2)
 
 	# 2. Compatibility check with vehicle
@@ -212,6 +216,13 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	labor_hours = frt or flt(pkg.standard_labor_hours) or 1.0
 	labor_amount = flt(labor_hours * hourly_rate, 2)
 
+	service_category = proc_data.get("category") or getattr(pkg, "category", None)
+	if not service_category and correction_code:
+		c, _ = get_category_for_correction_code(correction_code)
+		if c:
+			service_category = c
+	service_category = service_category or "Maintenance"
+
 	action_taken = "added"
 	if existing_service and duplicate_action == "update":
 		action_taken = "updated"
@@ -222,7 +233,8 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 		existing_service.labor_amount = labor_amount
 		existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
 		existing_service.tesla_manual_url = proc_url
-		existing_service.category = proc_data.get("category") or pkg.category or existing_service.category
+		existing_service.category = service_category or existing_service.category
+		existing_service.is_mobile_capable = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
 		if proc_data.get("description"):
 			existing_service.advisor_notes = proc_data.get("description")
 		target_service = existing_service
@@ -231,7 +243,7 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 			"service_package": pkg.name,
 			"correction_code": correction_code,
 			"service_title": title,
-			"category": proc_data.get("category") or pkg.category or "Maintenance",
+			"category": service_category,
 			"status": "Pending Approval" if is_supp else "Draft",
 			"is_flat_rate": 0,
 			"frt": frt,
@@ -241,8 +253,9 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 			"parts_total": 0.0,
 			"total_amount": labor_amount,
 			"is_supplement": is_supp,
+			"is_mobile_capable": cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0))),
 			"tesla_manual_url": proc_url,
-			"advisor_notes": proc_data.get("description") or pkg.description or "",
+			"advisor_notes": proc_data.get("description") or getattr(pkg, "description", "") or "",
 		})
 
 	if is_supp:
@@ -250,6 +263,10 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 			ro.approval_status = "Partially Approved"
 		else:
 			ro.approval_status = "Pending Approval"
+
+	# Update order-level scheduling flags
+	if ro.services:
+		ro.is_mobile_capable = 1 if all(cint(s.is_mobile_capable) for s in ro.services) else 0
 
 	# Save Repair Order
 	ro.flags.ignore_validate_update_after_submit = True
@@ -264,6 +281,7 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 			"correction_code": correction_code,
 			"frt": frt,
 			"action": action_taken,
+			"is_mobile_capable": target_service.is_mobile_capable,
 		},
 		doctype="Repair Order",
 		docname=ro.name,
@@ -278,77 +296,56 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 		"correction_code": correction_code,
 		"frt": frt,
 		"labor_amount": labor_amount,
+		"is_mobile_capable": target_service.is_mobile_capable,
 		"service_row": target_service.as_dict() if hasattr(target_service, "as_dict") else None,
 	}
 
 
 def _upsert_service_package(proc_data, proc_url):
-	"""Upsert Service Package record based on correction code and model."""
+	"""Upsert Service Package record based on correction code or package name."""
 	correction_code = str(proc_data.get("correction_code") or "").strip()
 	title = str(proc_data.get("title") or "Tesla Service Procedure").strip()
-	frt = flt(proc_data.get("frt"), 2)
-	model = proc_data.get("applicable_model") or ""
+	if correction_code:
+		import re
+		title = re.sub(rf"^{re.escape(correction_code)}\s*[-–—:]?\s*", "", title).strip()
+	title = title or "Tesla Service Procedure"
 
-	# Check for existing Service Package with matching correction_code and model
+	frt = flt(proc_data.get("frt"), 2)
+
+	# Check for existing Service Package with matching correction_code
 	existing_pkg_name = None
 	if correction_code:
-		filters = {"correction_code": correction_code}
-		if model:
-			filters["applicable_model"] = model
-		existing_pkg_name = frappe.db.get_value("Service Package", filters, "name")
+		existing_pkg_name = frappe.db.get_value("Service Package", {"correction_code": correction_code}, "name")
 
-		# Fallback to match by correction code alone if no model-specific match
-		if not existing_pkg_name:
-			existing_pkg_name = frappe.db.get_value("Service Package", {"correction_code": correction_code}, "name")
+	pkg_name = title
+
+	if not existing_pkg_name and pkg_name:
+		existing_pkg_name = frappe.db.get_value("Service Package", {"package_name": pkg_name}, "name")
 
 	# If found, update existing
 	if existing_pkg_name:
 		pkg = frappe.get_doc("Service Package", existing_pkg_name)
-		pkg.frt = frt
-		pkg.standard_labor_hours = frt
+		if correction_code and pkg.package_name and pkg.package_name.startswith(correction_code):
+			pkg.package_name = title
+		if frt > 0:
+			pkg.standard_labor_hours = frt
 		if proc_url:
 			pkg.tesla_manual_url = proc_url
 		if proc_data.get("doc_guid"):
 			pkg.doc_guid = proc_data.get("doc_guid")
-		if proc_data.get("applicable_generation"):
-			pkg.applicable_generation = proc_data.get("applicable_generation")
-		if proc_data.get("gen_start_year_month"):
-			pkg.gen_start_year_month = proc_data.get("gen_start_year_month")
-		if proc_data.get("gen_end_year_month"):
-			pkg.gen_end_year_month = proc_data.get("gen_end_year_month")
-		if proc_data.get("category"):
-			pkg.category = proc_data.get("category")
-		if proc_data.get("subcategory"):
-			pkg.subcategory = proc_data.get("subcategory")
+		if "is_mobile_capable" in proc_data:
+			pkg.is_mobile_capable = cint(proc_data.get("is_mobile_capable"))
 		pkg.save(ignore_permissions=True)
 		return pkg
 
 	# Otherwise create new package
-	cat = proc_data.get("category") or "Maintenance"
-	subcat = proc_data.get("subcategory") or ""
-	if correction_code and (not cat or cat == "Maintenance"):
-		c, sc = get_category_for_correction_code(correction_code)
-		if c:
-			cat = c
-		if sc:
-			subcat = sc
-
-	pkg_name = f"{correction_code} - {title}" if correction_code and not title.startswith(correction_code) else title
-
 	pkg = frappe.get_doc({
 		"doctype": "Service Package",
 		"package_name": pkg_name,
 		"correction_code": correction_code,
-		"applicable_model": model,
-		"applicable_generation": proc_data.get("applicable_generation") or "",
-		"gen_start_year_month": proc_data.get("gen_start_year_month") or "",
-		"gen_end_year_month": proc_data.get("gen_end_year_month") or "",
-		"category": cat,
-		"subcategory": subcat,
-		"description": proc_data.get("description") or f"Tesla Procedure {correction_code}: {title}",
-		"frt": frt,
 		"standard_labor_hours": frt or 1.0,
 		"is_flat_rate": 0,
+		"is_mobile_capable": cint(proc_data.get("is_mobile_capable", 0)),
 		"tesla_manual_url": proc_url,
 		"doc_guid": proc_data.get("doc_guid") or "",
 	})

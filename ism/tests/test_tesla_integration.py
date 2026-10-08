@@ -150,6 +150,13 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(parsed["frt"], 0.90)
 		self.assertEqual(parsed["category"], "INSPECTION AND SERVICE")
 		self.assertEqual(parsed["doc_guid"], "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50")
+		self.assertEqual(parsed["is_mobile_capable"], 0)
+
+		# Test mobile-capable procedure
+		mobile_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-000FD8BF-C857-490D-85B1-2DD266887CB3.html"
+		parsed_mobile = parse_tesla_procedure_html(sample_html, mobile_url)
+		self.assertEqual(parsed_mobile["is_mobile_capable"], 1)
+		self.assertIn("Level 1", parsed_mobile["mobile_service_level"])
 
 	def test_import_tesla_procedure_end_to_end(self):
 		cust = self.create_test_customer()
@@ -171,7 +178,9 @@ class TestTeslaIntegration(ISMTestCase):
 			"applicable_generation": "Model 3 Jun 2017 - Dec 2023",
 			"doc_guid": "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50",
 			"tesla_manual_url": "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html",
-			"description": "Basic vehicle multi-point inspection."
+			"description": "Basic vehicle multi-point inspection.",
+			"is_mobile_capable": 0,
+			"mobile_service_level": "No",
 		}
 
 		res = import_tesla_procedure(
@@ -181,6 +190,7 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(res["status"], "success")
 		self.assertEqual(res["correction_code"], "00030700")
 		self.assertEqual(res["frt"], 0.90)
+		self.assertEqual(res["is_mobile_capable"], 0)
 
 		# Verify Service Package was created and properly populated
 		pkg_name = res["service_package"]
@@ -189,17 +199,23 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(pkg.correction_code, "00030700")
 		self.assertEqual(flt(pkg.frt), 0.90)
 		self.assertEqual(flt(pkg.standard_labor_hours), 0.90)
-		self.assertEqual(pkg.category, "INSPECTION AND SERVICE")
-		self.assertTrue(pkg.package_name.startswith("00030700 -"))
+		self.assertEqual(pkg.is_mobile_capable, 0)
+		self.assertEqual(pkg.package_name, "Basic Vehicle Inspection (Inspection)")
+		self.assertFalse(pkg.package_name.startswith("00030700"))
 
-		# Verify Repair Order Service row
+		# Verify Repair Order Service row and RO scheduling flags
 		ro.reload()
 		self.assertEqual(len(ro.services), 1)
 		srv = ro.services[0]
 		self.assertEqual(srv.service_package, pkg.name)
+		self.assertEqual(srv.service_title, "Basic Vehicle Inspection (Inspection)")
+		self.assertFalse(srv.service_title.startswith("00030700"))
 		self.assertEqual(srv.correction_code, "00030700")
+		self.assertEqual(srv.category, "INSPECTION AND SERVICE")
 		self.assertEqual(flt(srv.frt), 0.90)
 		self.assertEqual(flt(srv.labor_hours), 0.90)
+		self.assertEqual(srv.is_mobile_capable, 0)
+		self.assertEqual(ro.is_mobile_capable, 0)
 
 		default_rate = _get_default_labor_rate()
 		expected_labor_amt = flt(0.90 * default_rate, 2)

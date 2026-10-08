@@ -213,6 +213,15 @@ class RepairOrder(Document):
 		self._update_progress_and_job_timing()
 		self._validate_authorization_guards()
 		self._sync_declined_to_deferred_services()
+		self._update_scheduling_capability_flags()
+
+	def _update_scheduling_capability_flags(self):
+		"""Compute is_mobile_capable across all active services for scheduling."""
+		if not self.services:
+			self.is_mobile_capable = 0
+			return
+
+		self.is_mobile_capable = 1 if all(cint(getattr(s, "is_mobile_capable", 0)) for s in self.services) else 0
 
 	def on_update(self):
 		self.link_vehicle_to_customer()
@@ -787,11 +796,23 @@ class RepairOrder(Document):
 			labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
 			labor_amount = flt(labor_hours * labor_rate, 2)
 
+		service_category = "Maintenance"
+		if getattr(pkg, "category", None):
+			service_category = pkg.category
+		elif getattr(pkg, "correction_code", None):
+			try:
+				from ism.utils.tesla_manual import get_category_for_correction_code
+				cat, _ = get_category_for_correction_code(pkg.correction_code)
+				if cat:
+					service_category = cat
+			except Exception:
+				pass
+
 		self.append("services", {
 			"service_package": pkg.name,
 			"correction_code": getattr(pkg, "correction_code", None),
 			"service_title": pkg.package_name,
-			"category": pkg.category or "Maintenance",
+			"category": service_category,
 			"status": "Pending Approval" if is_supp else "Draft",
 			"is_flat_rate": is_flat,
 			"frt": getattr(pkg, "frt", None) or labor_hours,
@@ -803,8 +824,9 @@ class RepairOrder(Document):
 			"total_amount": flt(labor_amount + parts_total, 2),
 			"parts_html": _render_parts_html(parts_list),
 			"is_supplement": is_supp,
+			"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
 			"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
-			"advisor_notes": pkg.description or "",
+			"advisor_notes": getattr(pkg, "description", "") or "",
 		})
 
 		if is_supp:
@@ -912,12 +934,13 @@ class RepairOrder(Document):
 		pkg = frappe.get_doc({
 			"doctype": "Service Package",
 			"package_name": pkg_title,
-			"category": target.category or "Maintenance",
-			"description": target.advisor_notes or f"Saved from Repair Order {self.name}",
+			"correction_code": getattr(target, "correction_code", None),
 			"is_flat_rate": cint(getattr(target, "is_flat_rate", 0)),
+			"is_mobile_capable": cint(getattr(target, "is_mobile_capable", 0)),
 			"standard_labor_hours": flt(target.labor_hours),
 			"hourly_rate": flt(target.labor_rate),
 			"service_rate": flt(target.labor_amount),
+			"tesla_manual_url": getattr(target, "tesla_manual_url", None),
 			"items": [
 				{
 					"item_code": p.get("item_code"),
@@ -1264,14 +1287,25 @@ def get_service_package_details(service_package):
 		hourly_rate = flt(pkg.hourly_rate) or default_rate
 		service_rate = flt(pkg.service_rate) if flt(pkg.service_rate) else flt(labor_hours * hourly_rate, 2)
 
+	pkg_cat = getattr(pkg, "category", None)
+	if not pkg_cat and getattr(pkg, "correction_code", None):
+		try:
+			from ism.utils.tesla_manual import get_category_for_correction_code
+			cat, _ = get_category_for_correction_code(pkg.correction_code)
+			if cat:
+				pkg_cat = cat
+		except Exception:
+			pass
+
 	return {
 		"package_name": pkg.package_name,
 		"correction_code": getattr(pkg, "correction_code", None),
 		"frt": getattr(pkg, "frt", None) or labor_hours,
 		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
-		"category": pkg.category or "Maintenance",
-		"description": pkg.description or "",
+		"category": pkg_cat or "Maintenance",
+		"description": getattr(pkg, "description", "") or "",
 		"is_flat_rate": is_flat,
+		"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
 		"standard_labor_hours": labor_hours,
 		"hourly_rate": hourly_rate,
 		"service_rate": service_rate,

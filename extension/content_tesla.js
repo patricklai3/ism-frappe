@@ -51,18 +51,62 @@
     const guidMatch = window.location.href.match(/(GUID-[0-9A-F-]{36})/i);
     const docGuid = guidMatch ? guidMatch[1].toUpperCase() : "";
 
+    // 6. Mobile Capability
+    let isMobile = 0;
+    let mobileLevel = "No";
+
+    try {
+      const res = await fetch("dependencies.json");
+      if (res.ok) {
+        const data = await res.json();
+        const topics = data?.topics?.topic || [];
+        const filename = window.location.pathname.split("/").pop();
+        const match = topics.find(t =>
+          (filename && t.url === filename) ||
+          (docGuid && t.guid === docGuid) ||
+          (correctionCode && String(t["correction-code"]).trim() === String(correctionCode).trim())
+        );
+        if (match) {
+          const cap = match["mobile-capable"];
+          const isL1 = Array.isArray(cap) ? cap.includes("Level 1") : cap === "Level 1";
+          isMobile = isL1 ? 1 : 0;
+          mobileLevel = Array.isArray(cap) ? cap.join(", ") : (cap || "No");
+        }
+      }
+    } catch (e) {
+      // Fallback below
+    }
+
+    if (mobileLevel === "No" || mobileLevel === "Unknown") {
+      const procTitleEl = document.querySelector(".procedure-title");
+      if (procTitleEl && procTitleEl.className.includes("MobileCapable-Yes")) {
+        isMobile = 1;
+        mobileLevel = "Level 1";
+      } else if (procTitleEl && procTitleEl.className.includes("MobileCapable-No")) {
+        isMobile = 0;
+        mobileLevel = "No";
+      }
+    }
+
+    if (!isMobile && title && title.toLowerCase().includes("mobile only")) {
+      isMobile = 1;
+      mobileLevel = "Mobile Only";
+    }
+
     return {
       title: title,
       correction_code: correctionCode,
       frt: frt,
       description: description,
       doc_guid: docGuid,
-      tesla_manual_url: window.location.href
+      tesla_manual_url: window.location.href,
+      is_mobile_capable: isMobile,
+      mobile_service_level: mobileLevel,
     };
   }
 
-  function initWidget() {
-    const procData = extractProcedureData();
+  async function initWidget() {
+    const procData = await extractProcedureData();
     // Only show if we found at least a title or correction code
     if (!procData.correction_code && !procData.frt && !window.location.href.includes("GUID-")) {
       return;
@@ -76,6 +120,7 @@
         <div class="ism-logo-title">
           <span>⚡ ISM Importer</span>
           ${procData.frt ? `<span class="ism-badge-frt">${procData.frt.toFixed(2)} hrs</span>` : ""}
+          ${procData.is_mobile_capable ? `<span class="ism-badge-mobile" title="Mobile Service Capable">🚐 Mobile</span>` : ""}
         </div>
         <button type="button" class="ism-toggle-btn" id="ism-toggle-btn" title="Minimize/Maximize">_</button>
       </div>
@@ -84,6 +129,7 @@
         <div class="ism-proc-meta">
           <div>Code: <strong>${escapeHtml(procData.correction_code || "N/A")}</strong></div>
           <div>FRT: <strong>${procData.frt ? procData.frt.toFixed(2) + " hrs" : "N/A"}</strong></div>
+          <div>Mobile: <strong>${procData.is_mobile_capable ? "Yes" : "No"}</strong></div>
         </div>
         <div class="ism-ro-selector-container">
           <div class="ism-ro-label">Target Repair Order</div>

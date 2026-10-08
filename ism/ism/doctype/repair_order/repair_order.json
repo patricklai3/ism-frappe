@@ -60,6 +60,7 @@
   "total_bay_hours",
   "total_billed_hours",
   "vehicle_released",
+  "is_mobile_capable",
   "sec_time",
   "time_logs",
   "tab_billing",
@@ -442,6 +443,13 @@
    "fieldname": "vehicle_released",
    "fieldtype": "Check",
    "label": "Vehicle Released",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_mobile_capable",
+   "fieldtype": "Check",
+   "label": "Mobile Capable Order",
    "read_only": 1
   },
   {

@@ -355,6 +355,57 @@ def validate_vehicle_compatibility(vehicle_doc, procedure_url):
 	return {"is_compatible": True, "warning": None}
 
 
+_MANIFEST_CACHE = {}
+
+
+def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None):
+	"""Fetch or retrieve cached dependencies.json to determine mobile capability."""
+	if not url or "/docs/" not in url:
+		return None
+
+	try:
+		import urllib.request
+		clean_url = url.split("?")[0].split("#")[0]
+		base_manifest_url = clean_url.rsplit("/", 1)[0] + "/dependencies.json"
+		filename = clean_url.split("/")[-1]
+
+		topics = _MANIFEST_CACHE.get(base_manifest_url)
+		if topics is None:
+			req = urllib.request.Request(base_manifest_url, headers={"User-Agent": "Mozilla/5.0"})
+			try:
+				res = urllib.request.urlopen(req, timeout=4)
+				manifest_data = json.loads(res.read().decode("utf-8"))
+				topics = manifest_data.get("topics", {}).get("topic", [])
+				_MANIFEST_CACHE[base_manifest_url] = topics
+			except Exception:
+				_MANIFEST_CACHE[base_manifest_url] = []
+				return None
+
+		target = None
+		for t in topics:
+			if filename and t.get("url") == filename:
+				target = t
+				break
+			if doc_guid and t.get("guid") == doc_guid:
+				target = t
+				break
+			if correction_code and str(t.get("correction-code", "")).strip() == str(correction_code).strip():
+				target = t
+				break
+
+		if target:
+			cap = target.get("mobile-capable")
+			is_mobile = 1 if (cap == "Level 1" or (isinstance(cap, list) and "Level 1" in cap)) else 0
+			return {
+				"is_mobile_capable": is_mobile,
+				"mobile_service_level": ", ".join(cap) if isinstance(cap, list) else (str(cap) if cap else "No"),
+			}
+	except Exception:
+		pass
+
+	return None
+
+
 def parse_tesla_procedure_html(html_content, url=""):
 	"""Extract Title, Correction Code, FRT, and metadata from Tesla manual HTML."""
 	if not html_content:
@@ -373,6 +424,8 @@ def parse_tesla_procedure_html(html_content, url=""):
 		"gen_start_year_month": "",
 		"gen_end_year_month": "",
 		"description": "",
+		"is_mobile_capable": 0,
+		"mobile_service_level": "No",
 	}
 
 	# 1. URL Metadata
@@ -431,5 +484,33 @@ def parse_tesla_procedure_html(html_content, url=""):
 		clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
 		# Filter out boilerplate NOTE lines if needed
 		data["description"] = clean_desc[:500]
+
+	# 7. Extract Mobile Capability
+	is_mobile_capable = 0
+	mobile_level = "No"
+
+	# A) Check dependencies.json manifest if URL is provided
+	if url:
+		dep_info = get_mobile_capability_from_manifest(url, data.get("doc_guid"), data.get("correction_code"))
+		if dep_info is not None:
+			is_mobile_capable = dep_info["is_mobile_capable"]
+			mobile_level = dep_info["mobile_service_level"]
+
+	# B) Fallback to HTML classes if manifest was not conclusive
+	if mobile_level in ("No", "Unknown", None):
+		if "MobileCapable-Yes" in html_content:
+			is_mobile_capable = 1
+			mobile_level = "Level 1"
+		elif "MobileCapable-No" in html_content:
+			is_mobile_capable = 0
+			mobile_level = "No"
+
+	# C) Fallback to title keywords (e.g. "Tire Rotation (Mobile Only)")
+	if not is_mobile_capable and data.get("title") and "mobile only" in data["title"].lower():
+		is_mobile_capable = 1
+		mobile_level = "Mobile Only"
+
+	data["is_mobile_capable"] = is_mobile_capable
+	data["mobile_service_level"] = mobile_level
 
 	return data
