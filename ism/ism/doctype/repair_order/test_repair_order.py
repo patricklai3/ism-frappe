@@ -987,6 +987,12 @@ class TestRepairOrder(ISMTestCase):
 		self.assertLess(auth_idx, workshop_tab_idx, "Customer authorization must be inside tab_estimate before tab_workshop.")
 		# sec_bay must be inside tab_workshop (before tab_billing)
 		self.assertLess(bay_sec_idx, billing_tab_idx, "Workshop Bay execution must be inside tab_workshop before tab_billing.")
+		# sec_workshop_tasks must be inside tab_workshop (before tab_billing)
+		self.assertIn("sec_workshop_tasks", field_names)
+		self.assertIn("workshop_tasks_html", field_names)
+		tasks_sec_idx = field_names.index("sec_workshop_tasks")
+		self.assertLess(workshop_tab_idx, tasks_sec_idx, "Workshop tasks section must be inside tab_workshop.")
+		self.assertLess(tasks_sec_idx, billing_tab_idx, "Workshop tasks section must precede billing tab.")
 		# sec_payment must be after tab_billing
 		self.assertGreater(payment_sec_idx, billing_tab_idx, "Payment settlement must be inside tab_billing.")
 

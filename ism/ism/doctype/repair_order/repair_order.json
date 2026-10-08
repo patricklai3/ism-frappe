@@ -61,6 +61,8 @@
   "total_billed_hours",
   "vehicle_released",
   "is_mobile_capable",
+  "sec_workshop_tasks",
+  "workshop_tasks_html",
   "sec_time",
   "time_logs",
   "tab_billing",
@@ -451,6 +453,17 @@
    "fieldtype": "Check",
    "label": "Mobile Capable Order",
    "read_only": 1
+  },
+  {
+   "fieldname": "sec_workshop_tasks",
+   "fieldtype": "Section Break",
+   "label": "Workshop Job Execution & Service Checklist"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "workshop_tasks_html",
+   "fieldtype": "HTML",
+   "label": "Workshop Job Cards"
   },
   {
    "fieldname": "sec_time",

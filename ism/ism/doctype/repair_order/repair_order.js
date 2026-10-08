@@ -274,6 +274,7 @@ frappe.ui.form.on("Repair Order", {
 
 	refresh(frm) {
 		frm.trigger("render_progress_indicator");
+		frm.trigger("render_workshop_tasks");
 		frm._original_odometer_in = frm.doc.odometer_in;
 		update_tab_visibility(frm);
 		frm.trigger("set_route_options_for_new_doc");
@@ -636,6 +637,298 @@ frappe.ui.form.on("Repair Order", {
 			]),
 			color
 		);
+	},
+
+	render_workshop_tasks(frm) {
+		if (!frm.fields_dict.workshop_tasks_html) return;
+		const $wrapper = frm.fields_dict.workshop_tasks_html.$wrapper;
+		if (!$wrapper) return;
+
+		if (frm.is_new()) {
+			$wrapper.html(
+				`<div class="text-muted" style="padding: 18px; text-align: center; border: 1px dashed #cbd5e1; border-radius: 8px; font-size: 13px; background: #f8fafc;">
+					${__("Save the Repair Order to enable workshop task execution and service checklist.")}
+				</div>`
+			);
+			return;
+		}
+
+		const services = frm.doc.services || [];
+		if (services.length === 0) {
+			$wrapper.html(
+				`<div class="text-muted" style="padding: 22px; text-align: center; border: 1px dashed #cbd5e1; border-radius: 8px; font-size: 13px; background: #f8fafc;">
+					${__("No services added to this order. Add services under the Estimate & Authorization tab.")}
+				</div>`
+			);
+			return;
+		}
+
+		const approved = services.filter((s) => s.status === "Approved");
+		const declined = services.filter((s) => s.status === "Declined");
+		const pending = services.filter((s) => ["Draft", "Pending Approval"].includes(s.status));
+		const completed = approved.filter((s) => !!s.is_completed);
+
+		const approved_count = approved.length;
+		const completed_count = completed.length;
+		const progress_pct = approved_count > 0 ? Math.round((completed_count / approved_count) * 100) : 0;
+		const is_all_completed = approved_count > 0 && completed_count === approved_count;
+		const in_bay = frm.doc.vehicle_location === "In Bay / Being Serviced";
+		const is_released = !!frm.doc.vehicle_released || frm.doc.status === "Closed / Released";
+
+		let html = `<div class="workshop-execution-board" style="padding: 4px 0 12px 0;">`;
+
+		// 1. Progress & Summary Bar
+		html += `
+			<div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
+				<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+					<div>
+						<span style="font-size: 14px; font-weight: 700; color: #1e293b;">
+							${__("Shop Floor Execution:")} ${completed_count} ${__("of")} ${approved_count} ${__("Services Completed")}
+						</span>
+						<span class="text-muted small" style="margin-left: 8px;">
+							(${approved_count - completed_count} ${__("remaining")})
+						</span>
+					</div>
+					<div style="font-size: 13px; font-weight: 700; color: ${progress_pct === 100 ? "#16a34a" : "#2563eb"};">
+						${progress_pct}%
+					</div>
+				</div>
+				<div class="progress" style="height: 10px; margin: 0; background: #e2e8f0; border-radius: 5px; overflow: hidden;">
+					<div class="progress-bar ${progress_pct === 100 ? "bg-success" : "bg-primary"}" role="progressbar" style="width: ${progress_pct}%; transition: width 0.3s ease;"></div>
+				</div>
+			</div>
+		`;
+
+		// 2. Action Handoff Banners
+		if (is_all_completed && in_bay && !is_released) {
+			html += `
+				<div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+					<div>
+						<div style="font-weight: 700; color: #166534; font-size: 14px;">
+							✓ ${__("All Approved Bay Services Completed!")}
+						</div>
+						<div style="color: #15803d; font-size: 12px; margin-top: 2px;">
+							${__("All tasks have been signed off. Park vehicle in lot to complete bay execution and advance to billing.")}
+						</div>
+					</div>
+					<button type="button" class="btn btn-sm btn-success btn-board-park-vehicle" style="font-weight: 600; padding: 7px 16px; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+						🅿️ ${__("Park Vehicle (Lot / Ready)")}
+					</button>
+				</div>
+			`;
+		} else if (frm.doc.vehicle_location === "In Customer Lot" && approved_count > 0 && !is_released) {
+			html += `
+				<div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+					<div>
+						<div style="font-weight: 700; color: #92400e; font-size: 14px;">
+							🚗 ${__("Vehicle is in Customer Lot")}
+						</div>
+						<div style="color: #b45309; font-size: 12px; margin-top: 2px;">
+							${__("Jobs are authorized. Move vehicle into the bay to record start time and commence work.")}
+						</div>
+					</div>
+					<button type="button" class="btn btn-sm btn-primary btn-board-pickup-vehicle" style="font-weight: 600; padding: 7px 16px; border-radius: 6px;">
+						${__("Pick Up Vehicle (Into Bay)")}
+					</button>
+				</div>
+			`;
+		}
+
+		// 3. Approved Services Cards List
+		if (approved.length === 0) {
+			html += `
+				<div style="background: #fff7ed; border: 1px solid #ffedd5; border-radius: 8px; padding: 16px; text-align: center; color: #9a3412; font-size: 13px; margin-bottom: 16px;">
+					⚠️ ${__("No approved services found on this repair order. Obtain customer authorization before performing bay work.")}
+				</div>
+			`;
+		} else {
+			approved.forEach((s) => {
+				const is_done = !!s.is_completed;
+				let parts = [];
+				try {
+					parts = typeof s.parts === "string" ? JSON.parse(s.parts) : (s.parts || []);
+				} catch (e) {
+					parts = [];
+				}
+
+				html += `
+					<div class="workshop-task-card" data-service-id="${frappe.utils.escape_html(s.name)}" style="background: ${is_done ? "#f8fdf9" : "#ffffff"}; border: 1.5px solid ${is_done ? "#86efac" : "#e2e8f0"}; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); transition: all 0.15s ease;">
+						<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;">
+							<!-- Left Column: Service Information -->
+							<div style="flex: 1; min-width: 260px;">
+								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px;">
+									<span style="font-size: 15px; font-weight: 700; color: #1e293b; ${is_done ? "text-decoration: line-through; color: #64748b;" : ""}">
+										${frappe.utils.escape_html(s.service_title)}
+									</span>
+									<span class="badge" style="background: #f1f5f9; color: #475569; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #e2e8f0;">
+										${frappe.utils.escape_html(s.category || "Service")}
+									</span>
+									${s.correction_code ? `
+										<span class="badge" style="background: #eef2ff; color: #4338ca; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #c7d2fe;">
+											${__("Code:")} ${frappe.utils.escape_html(s.correction_code)}
+										</span>
+									` : ""}
+									${s.is_supplement ? `
+										<span class="badge" style="background: #fef3c7; color: #92400e; font-size: 11px; padding: 3px 8px; border-radius: 4px;">
+											${__("Supplement")}
+										</span>
+									` : ""}
+									${s.is_flat_rate ? `
+										<span class="badge" style="background: #f0fdf4; color: #166534; font-size: 11px; padding: 3px 8px; border-radius: 4px;">
+											${__("Flat Rate")}
+										</span>
+									` : ""}
+									${s.frt ? `
+										<span style="font-size: 11px; color: #64748b; font-weight: 600;">
+											FRT: ${s.frt} hrs
+										</span>
+									` : ""}
+								</div>
+
+								<!-- Parts Checklist Details -->
+								${parts.length > 0 ? `
+									<div style="margin-top: 8px; font-size: 12px; color: #475569;">
+										<span style="font-weight: 600; color: #334155; margin-right: 4px;">${__("Required Parts:")}</span>
+										${parts.map((p) => `
+											<span class="badge badge-light" style="background: #f8fafc; border: 1px solid #cbd5e1; color: #334155; font-size: 11px; margin-right: 5px; margin-top: 3px; padding: 3px 7px;">
+												📦 ${p.qty || 1}x ${frappe.utils.escape_html(p.item_name || p.item_code)}
+											</span>
+										`).join("")}
+									</div>
+								` : ""}
+
+								<!-- Advisor Instructions / Notes -->
+								${s.advisor_notes ? `
+									<div style="margin-top: 8px; font-size: 12px; color: #334155; background: #f8fafc; border-left: 3px solid #94a3b8; padding: 5px 10px; border-radius: 0 4px 4px 0;">
+										<strong>${__("Advisor Note:")}</strong> ${frappe.utils.escape_html(s.advisor_notes)}
+									</div>
+								` : ""}
+
+								<!-- Execution Metadata -->
+								${is_done ? `
+									<div style="margin-top: 8px; font-size: 12px; color: #166534; font-weight: 600; display: flex; align-items: center; gap: 6px;">
+										<span>✓ ${__("Completed by")} <b>${frappe.utils.escape_html(s.completed_by || frappe.session.user)}</b></span>
+										${s.completed_at ? `<span>${__("at")} ${frappe.datetime.str_to_user(s.completed_at)}</span>` : ""}
+										${s.actual_duration_hours ? `<span>(${s.actual_duration_hours} ${__("bay hrs")})</span>` : ""}
+									</div>
+								` : (s.assigned_technician ? `
+									<div style="margin-top: 6px; font-size: 12px; color: #64748b;">
+										${__("Assigned Technician:")} <b style="color: #334155;">${frappe.utils.escape_html(s.assigned_technician)}</b>
+									</div>
+								` : "")}
+							</div>
+
+							<!-- Right Column: Tactile Toggle and Manual Link -->
+							<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 6px;">
+								<button type="button" class="btn btn-sm ${is_done ? "btn-success" : "btn-outline-success"} btn-board-toggle-completion" data-service-id="${frappe.utils.escape_html(s.name)}" data-action="${is_done ? "reopen" : "complete"}" style="min-width: 145px; height: 38px; font-weight: 600; font-size: 13px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 6px; border-width: 1.5px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);">
+									${is_done ? `
+										<span style="font-size: 14px;">✓</span> ${__("Completed")}
+									` : `
+										<span style="font-size: 14px;">○</span> ${__("Mark Complete")}
+									`}
+								</button>
+								${s.tesla_manual_url ? `
+									<a href="${frappe.utils.escape_html(s.tesla_manual_url)}" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-default" style="width: 145px; font-size: 11px; padding: 4px 6px; text-align: center; color: #475569; border-radius: 4px; border: 1px solid #cbd5e1; text-decoration: none;">
+										📘 ${__("Tesla Manual")}
+									</a>
+								` : ""}
+							</div>
+						</div>
+					</div>
+				`;
+			});
+		}
+
+		// 4. Collapsible Unapproved / Declined Services Drawer (if any)
+		const other_services = [...pending, ...declined];
+		if (other_services.length > 0) {
+			html += `
+				<div style="margin-top: 18px;">
+					<details style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px;">
+						<summary style="font-size: 12px; font-weight: 600; color: #64748b; cursor: pointer; user-select: none;">
+							${__("Unapproved / Declined Services")} (${other_services.length}) — <i>${__("Not authorized for shop floor execution")}</i>
+						</summary>
+						<div style="margin-top: 10px;">
+							${other_services.map((s) => `
+								<div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #edf2f7; font-size: 12px;">
+									<div>
+										<span style="font-weight: 600; color: #475569;">${frappe.utils.escape_html(s.service_title)}</span>
+										<span class="badge ${s.status === "Declined" ? "badge-danger" : "badge-warning"}" style="margin-left: 6px; font-size: 10px;">
+											${frappe.utils.escape_html(s.status)}
+										</span>
+									</div>
+									<span class="text-muted" style="font-size: 11px;">
+										${s.status === "Declined" ? __("Logged to Vehicle Deferred Services") : __("Pending Customer Authorization")}
+									</span>
+								</div>
+							`).join("")}
+						</div>
+					</details>
+				</div>
+			`;
+		}
+
+		html += `</div>`;
+		$wrapper.html(html);
+
+		// Event Bindings
+		$wrapper.find(".btn-board-toggle-completion").on("click", function (e) {
+			e.preventDefault();
+			const $btn = $(this);
+			const service_id = $btn.attr("data-service-id");
+			const action = $btn.attr("data-action");
+			const is_complete = action === "complete" ? 1 : 0;
+
+			frm._user_clicked_tab = "tab_workshop";
+			frm.call({
+				doc: frm.doc,
+				method: "toggle_service_completion",
+				args: {
+					service_row_id: service_id,
+					is_completed: is_complete,
+				},
+				freeze: true,
+				freeze_message: is_complete ? __("Marking service complete...") : __("Re-opening service..."),
+				callback(r) {
+					if (r.message && (r.message.status === "success" || r.message.progress_percent !== undefined)) {
+						frm._user_clicked_tab = "tab_workshop";
+						frm.reload_doc().then(() => {
+							select_tab(frm, "tab_workshop");
+						});
+					}
+				},
+			});
+		});
+
+		$wrapper.find(".btn-board-park-vehicle").on("click", function (e) {
+			e.preventDefault();
+			frm._user_clicked_tab = "tab_workshop";
+			frm.call({
+				doc: frm.doc,
+				method: "park_vehicle",
+				freeze: true,
+				freeze_message: __("Parking vehicle in lot..."),
+				callback() {
+					frm._user_clicked_tab = null;
+					frm.reload_doc();
+				},
+			});
+		});
+
+		$wrapper.find(".btn-board-pickup-vehicle").on("click", function (e) {
+			e.preventDefault();
+			frm._user_clicked_tab = "tab_workshop";
+			frm.call({
+				doc: frm.doc,
+				method: "pick_up_vehicle",
+				freeze: true,
+				freeze_message: __("Picking up vehicle into bay..."),
+				callback() {
+					frm._user_clicked_tab = "tab_workshop";
+					frm.reload_doc();
+				},
+			});
+		});
 	},
 
 	open_service_package_dialog(frm) {
