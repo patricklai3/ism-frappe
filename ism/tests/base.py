@@ -5,6 +5,7 @@ import unittest
 import frappe
 
 TEST_PREFIX = "_TEST_ISM_"
+TEST_VINS = ["5YJ3E1EBXNF123456", "1HGCR2F83HA123456", "5YJSA1E26CF000001"]
 
 
 class ISMTestCase(unittest.TestCase):
@@ -112,14 +113,58 @@ class ISMTestCase(unittest.TestCase):
 		"""Delete tracked documents in reverse dependency order."""
 		while self._tracked_docs:
 			doctype, name = self._tracked_docs.pop()
-			if frappe.db.exists(doctype, name):
-				try:
-					doc = frappe.get_doc(doctype, name)
+			if not frappe.db.exists(doctype, name):
+				continue
+			try:
+				doc = frappe.get_doc(doctype, name)
+				if doctype == "Repair Order":
+					self._teardown_repair_order(doc)
+				elif doctype == "Sales Invoice":
+					self._teardown_sales_invoice(doc)
+				elif doctype == "Payment Entry":
+					self._teardown_payment_entry(doc)
+				elif doctype == "Customer":
+					self._teardown_customer(doc)
+				else:
 					if doc.docstatus == 1:
 						doc.cancel()
 					frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
-				except Exception:
-					pass
+			except Exception:
+				pass
+
+	def _teardown_repair_order(self, doc):
+		si_name = getattr(doc, "sales_invoice", None)
+		if si_name and frappe.db.exists("Sales Invoice", si_name):
+			self._teardown_sales_invoice(frappe.get_doc("Sales Invoice", si_name))
+			doc.db_set("sales_invoice", None)
+			doc.reload()
+		if doc.docstatus == 1:
+			doc.cancel()
+		frappe.delete_doc("Repair Order", doc.name, force=True, ignore_permissions=True)
+
+	def _teardown_sales_invoice(self, doc):
+		pe_refs = frappe.get_all(
+			"Payment Entry Reference",
+			filters={"reference_doctype": "Sales Invoice", "reference_name": doc.name},
+			pluck="parent",
+		)
+		for pe_name in set(pe_refs):
+			if frappe.db.exists("Payment Entry", pe_name):
+				self._teardown_payment_entry(frappe.get_doc("Payment Entry", pe_name))
+		if doc.docstatus == 1:
+			doc.cancel()
+		frappe.delete_doc("Sales Invoice", doc.name, force=True, ignore_permissions=True)
+
+	def _teardown_payment_entry(self, doc):
+		if doc.docstatus == 1:
+			doc.cancel()
+		frappe.delete_doc("Payment Entry", doc.name, force=True, ignore_permissions=True)
+
+	def _teardown_customer(self, doc):
+		frappe.db.delete("Repair Vehicle Customer", {"customer": doc.name})
+		if doc.docstatus == 1:
+			doc.cancel()
+		frappe.delete_doc("Customer", doc.name, force=True, ignore_permissions=True)
 
 	@classmethod
 	def cleanup_residual_test_data(cls):

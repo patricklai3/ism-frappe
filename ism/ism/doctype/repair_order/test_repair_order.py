@@ -10,13 +10,13 @@ from ism.ism.doctype.repair_order.repair_order import (
 	get_service_package_details,
 	make_repair_order,
 )
-from ism.tests.base import ISMTestCase
+from ism.tests.base import ISMTestCase, TEST_PREFIX
 
 
 class TestRepairOrder(ISMTestCase):
 	def setUp(self):
 		super().setUp()
-		self.customer = self.create_test_customer(customer_name="Test Repair Customer")
+		self.customer = self.create_test_customer(customer_name=f"{TEST_PREFIX}Repair_Cust")
 		self.vehicle = self.create_test_vehicle(
 			vin="5YJSA1E26CF000001",
 			license_plate="REPAIR-01",
