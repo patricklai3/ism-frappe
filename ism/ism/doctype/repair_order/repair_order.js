@@ -44,13 +44,27 @@ frappe.ui.form.on("Repair Order", {
 			// 2. Bay Shop Floor Execution Buttons
 			if (frm.doc.vehicle_location !== "In Bay / Being Serviced" && !frm.doc.vehicle_released) {
 				frm.add_custom_button(__("Pick Up Vehicle (Into Bay)"), () => {
-					frm.call("pick_up_vehicle").then(() => frm.reload_doc());
+					if (frm.doc.approval_status !== "Approved" && frm.doc.approval_status !== "Partially Approved") {
+						frappe.msgprint({
+							title: __("Authorization Block"),
+							message: __("Cannot pull vehicle into bay. Customer authorization is strictly required before starting repair work.<br><br>Please obtain authorization via the <b>Customer Approval</b> actions first."),
+							indicator: "orange",
+						});
+						return;
+					}
+					frm.call({
+						doc: frm.doc,
+						method: "pick_up_vehicle",
+					}).then(() => frm.reload_doc());
 				}, __("Bay Execution"));
 			}
 
 			if (frm.doc.vehicle_location === "In Bay / Being Serviced" && !frm.doc.vehicle_released) {
 				frm.add_custom_button(__("Park Vehicle (Lot / Ready)"), () => {
-					frm.call("park_vehicle").then(() => frm.reload_doc());
+					frm.call({
+						doc: frm.doc,
+						method: "park_vehicle",
+					}).then(() => frm.reload_doc());
 				}, __("Bay Execution"));
 			}
 
@@ -66,6 +80,33 @@ frappe.ui.form.on("Repair Order", {
 
 				frm.add_custom_button(__("Log Verbal Approval"), () => {
 					frm.trigger("open_verbal_approval_dialog");
+				}, __("Customer Approval"));
+
+				frm.add_custom_button(__("Quick Authorize (All)"), () => {
+					frappe.confirm(
+						__("Authorize all repair jobs on this order and mark in-progress?"),
+						() => {
+							frm.call({
+								doc: frm.doc,
+								method: "authorize_jobs",
+								args: {
+									channel: "In-Person Signature",
+									signer_name: frm.doc.customer || frappe.session.user_fullname,
+								},
+								freeze: true,
+								freeze_message: __("Recording authorization..."),
+								callback(r) {
+									if (r.message && (r.message.status === "success" || r.message.approval_status)) {
+										frappe.show_alert({
+											message: __("All jobs authorized successfully"),
+											indicator: "green",
+										});
+										frm.reload_doc();
+									}
+								},
+							});
+						}
+					);
 				}, __("Customer Approval"));
 			}
 
@@ -118,19 +159,53 @@ frappe.ui.form.on("Repair Order", {
 		}
 	},
 
-	render_progress_indicator(frm) {
-		if (frm.doc.docstatus === 0 && frm.doc.jobs && frm.doc.jobs.length > 0) {
-			const progress = frm.doc.progress_percent || 0;
-			const color = progress === 100 ? "green" : progress > 0 ? "blue" : "orange";
-			frm.dashboard.set_headline(
-				__("Location: <b>{0}</b> | Work Progress: <b>{1}%</b> | Status: <b>{2}</b>", [
-					frm.doc.vehicle_location || "In Customer Lot",
-					progress,
-					frm.doc.status,
-				]),
-				color
-			);
+	approval_status(frm) {
+		if (frm.doc.approval_status === "Approved") {
+			if (frm.doc.status === "Draft Estimate" || frm.doc.status === "Pending Authorization") {
+				frm.set_value("status", "Authorized - In Progress");
+			}
+			if (frm.doc.services) {
+				frm.doc.services.forEach((s) => {
+					if (s.status !== "Declined") {
+						frappe.model.set_value(s.doctype, s.name, "status", "Approved");
+					}
+				});
+				frm.refresh_field("services");
+			}
 		}
+	},
+
+	render_progress_indicator(frm) {
+		if (frm.is_new()) return;
+
+		frm.dashboard.clear_headline();
+
+		if (frm.doc.approval_status !== "Approved" && frm.doc.approval_status !== "Partially Approved") {
+			if (frm.doc.approval_status === "Declined") {
+				frm.dashboard.set_headline_alert(
+					__("⛔ <b>Estimate Declined:</b> Customer has declined repair jobs. Bay work is blocked."),
+					"red"
+				);
+			} else {
+				frm.dashboard.set_headline_alert(
+					__("⚠️ <b>Awaiting Customer Authorization:</b> Vehicle is blocked from entering bay until repair jobs are approved."),
+					"orange"
+				);
+			}
+			return;
+		}
+
+		const progress = frm.doc.progress_percent || 0;
+		const color = progress === 100 ? "green" : progress > 0 ? "blue" : "purple";
+		frm.dashboard.set_headline_alert(
+			__("Location: <b>{0}</b> | Work Progress: <b>{1}%</b> | Approval: <b>{2}</b> | Status: <b>{3}</b>", [
+				frm.doc.vehicle_location || "In Customer Lot",
+				progress,
+				frm.doc.approval_status,
+				frm.doc.status,
+			]),
+			color
+		);
 	},
 
 	open_service_package_dialog(frm) {
@@ -176,27 +251,42 @@ frappe.ui.form.on("Repair Order", {
 	},
 
 	open_in_person_signature_dialog(frm) {
-		let jobs_html = `<div style="margin-bottom: 15px;">`;
-		frm.doc.jobs.forEach((j) => {
-			jobs_html += `
-				<div style="display:flex; justify-content:space-between; align-items:center; padding: 6px 0; border-bottom: 1px solid #f0f0f0;">
-					<span><b>${j.job_title}</b> ($${j.estimated_total})</span>
-					<select class="job-decision form-control input-sm" data-job-id="${j.job_id}" style="width: 140px;">
-						<option value="Approved" ${j.status === 'Approved' ? 'selected' : ''}>${__("Approve")}</option>
-						<option value="Declined" ${j.status === 'Declined' ? 'selected' : ''}>${__("Decline")}</option>
-					</select>
+		let services_html = `<div style="margin-bottom: 15px;">`;
+		(frm.doc.services || []).forEach((s, idx) => {
+			let parts_summary = "";
+			let parts = [];
+			try {
+				parts = typeof s.parts === "string" ? JSON.parse(s.parts) : (s.parts || []);
+			} catch (e) {
+				parts = [];
+			}
+			if (parts && parts.length > 0) {
+				const part_names = parts.map((p) => `${p.item_name || p.item_code} (${p.qty} ${p.uom || "Nos"})`).join(", ");
+				parts_summary = `<div style="font-size: 11px; color: #666; margin-top: 2px;">Parts: ${part_names}</div>`;
+			}
+
+			services_html += `
+				<div style="padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
+					<div style="display:flex; justify-content:space-between; align-items:center;">
+						<span><b>#${idx + 1}: ${s.service_title}</b> ($${flt(s.total_amount).toFixed(2)})</span>
+						<select class="service-decision form-control input-sm" data-service-name="${s.name || ""}" data-service-idx="${s.idx || idx + 1}" style="width: 140px;">
+							<option value="Approved" ${s.status === "Approved" ? "selected" : ""}>${__("Approve")}</option>
+							<option value="Declined" ${s.status === "Declined" ? "selected" : ""}>${__("Decline")}</option>
+						</select>
+					</div>
+					${parts_summary}
 				</div>
 			`;
 		});
-		jobs_html += `</div>`;
+		services_html += `</div>`;
 
 		const d = new frappe.ui.Dialog({
 			title: __("In-Person Customer Signature"),
 			fields: [
 				{
 					fieldtype: "HTML",
-					fieldname: "jobs_table",
-					options: jobs_html,
+					fieldname: "services_table",
+					options: services_html,
 				},
 				{
 					fieldtype: "Data",
@@ -223,11 +313,16 @@ frappe.ui.form.on("Repair Order", {
 				const sig_image = canvas.toDataURL("image/png");
 
 				const decisions = {};
-				d.$wrapper.find(".job-decision").each(function () {
-					decisions[$(this).attr("data-job-id")] = $(this).val();
+				d.$wrapper.find(".service-decision").each(function () {
+					const val = $(this).val();
+					const sname = $(this).attr("data-service-name");
+					const sidx = $(this).attr("data-service-idx");
+					if (sname) decisions[sname] = val;
+					if (sidx) decisions[sidx] = val;
 				});
 
 				frm.call({
+					doc: frm.doc,
 					method: "authorize_jobs",
 					args: {
 						approvals: decisions,
@@ -235,9 +330,15 @@ frappe.ui.form.on("Repair Order", {
 						signer_name: values.signer_name,
 						signature_image: sig_image,
 					},
+					freeze: true,
+					freeze_message: __("Recording authorization..."),
 					callback(r) {
-						if (r.message && r.message.status === "success") {
-							d.hide();
+						d.hide();
+						if (r.message && (r.message.status === "success" || r.message.approval_status)) {
+							frappe.show_alert({
+								message: __("Customer authorization recorded ({0})", [r.message.approval_status || "Approved"]),
+								indicator: "green",
+							});
 							frm.reload_doc();
 						}
 					},
@@ -298,27 +399,42 @@ frappe.ui.form.on("Repair Order", {
 	},
 
 	open_verbal_approval_dialog(frm) {
-		let jobs_html = `<div style="margin-bottom: 15px;">`;
-		frm.doc.jobs.forEach((j) => {
-			jobs_html += `
-				<div style="display:flex; justify-content:space-between; align-items:center; padding: 6px 0; border-bottom: 1px solid #f0f0f0;">
-					<span><b>${j.job_title}</b> ($${j.estimated_total})</span>
-					<select class="job-decision form-control input-sm" data-job-id="${j.job_id}" style="width: 140px;">
-						<option value="Approved" ${j.status === 'Approved' ? 'selected' : ''}>${__("Approve")}</option>
-						<option value="Declined" ${j.status === 'Declined' ? 'selected' : ''}>${__("Decline")}</option>
-					</select>
+		let services_html = `<div style="margin-bottom: 15px;">`;
+		(frm.doc.services || []).forEach((s, idx) => {
+			let parts_summary = "";
+			let parts = [];
+			try {
+				parts = typeof s.parts === "string" ? JSON.parse(s.parts) : (s.parts || []);
+			} catch (e) {
+				parts = [];
+			}
+			if (parts && parts.length > 0) {
+				const part_names = parts.map((p) => `${p.item_name || p.item_code} (${p.qty} ${p.uom || "Nos"})`).join(", ");
+				parts_summary = `<div style="font-size: 11px; color: #666; margin-top: 2px;">Parts: ${part_names}</div>`;
+			}
+
+			services_html += `
+				<div style="padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
+					<div style="display:flex; justify-content:space-between; align-items:center;">
+						<span><b>#${idx + 1}: ${s.service_title}</b> ($${flt(s.total_amount).toFixed(2)})</span>
+						<select class="service-decision form-control input-sm" data-service-name="${s.name || ""}" data-service-idx="${s.idx || idx + 1}" style="width: 140px;">
+							<option value="Approved" ${s.status === "Approved" ? "selected" : ""}>${__("Approve")}</option>
+							<option value="Declined" ${s.status === "Declined" ? "selected" : ""}>${__("Decline")}</option>
+						</select>
+					</div>
+					${parts_summary}
 				</div>
 			`;
 		});
-		jobs_html += `</div>`;
+		services_html += `</div>`;
 
 		const d = new frappe.ui.Dialog({
 			title: __("Log Verbal Phone Authorization"),
 			fields: [
 				{
 					fieldtype: "HTML",
-					fieldname: "jobs_table",
-					options: jobs_html,
+					fieldname: "services_table",
+					options: services_html,
 				},
 				{
 					fieldtype: "Data",
@@ -337,11 +453,16 @@ frappe.ui.form.on("Repair Order", {
 			primary_action_label: __("Log Authorization"),
 			primary_action(values) {
 				const decisions = {};
-				d.$wrapper.find(".job-decision").each(function () {
-					decisions[$(this).attr("data-job-id")] = $(this).val();
+				d.$wrapper.find(".service-decision").each(function () {
+					const val = $(this).val();
+					const sname = $(this).attr("data-service-name");
+					const sidx = $(this).attr("data-service-idx");
+					if (sname) decisions[sname] = val;
+					if (sidx) decisions[sidx] = val;
 				});
 
 				frm.call({
+					doc: frm.doc,
 					method: "authorize_jobs",
 					args: {
 						approvals: decisions,
@@ -349,9 +470,15 @@ frappe.ui.form.on("Repair Order", {
 						signer_name: values.authorized_by,
 						notes: values.verbal_notes,
 					},
+					freeze: true,
+					freeze_message: __("Recording authorization..."),
 					callback(r) {
-						if (r.message && r.message.status === "success") {
-							d.hide();
+						d.hide();
+						if (r.message && (r.message.status === "success" || r.message.approval_status)) {
+							frappe.show_alert({
+								message: __("Verbal authorization logged ({0})", [r.message.approval_status || "Approved"]),
+								indicator: "green",
+							});
 							frm.reload_doc();
 						}
 					},
@@ -391,6 +518,7 @@ frappe.ui.form.on("Repair Order", {
 			primary_action_label: __("Submit Invoice & Release"),
 			primary_action(values) {
 				frm.call({
+					doc: frm.doc,
 					method: "process_payment_and_release",
 					args: {
 						payment_method: values.payment_method,
@@ -415,17 +543,17 @@ frappe.ui.form.on("Repair Order", {
 
 	open_add_supplement_dialog(frm) {
 		const d = new frappe.ui.Dialog({
-			title: __("Add Supplemental Repair Job"),
+			title: __("Add Supplemental Repair Service"),
 			fields: [
 				{
 					fieldtype: "Data",
-					fieldname: "job_title",
-					label: __("Job Title / Operation"),
+					fieldname: "service_title",
+					label: __("Service Title / Operation"),
 					reqd: 1,
 				},
 				{
 					fieldtype: "Select",
-					fieldname: "job_category",
+					fieldname: "category",
 					label: __("Category"),
 					options: "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther",
 					default: "Mechanical",
@@ -436,7 +564,7 @@ frappe.ui.form.on("Repair Order", {
 				},
 				{
 					fieldtype: "Float",
-					fieldname: "estimated_labor_hours",
+					fieldname: "labor_hours",
 					label: __("Est. Labor Hours"),
 					default: 1.0,
 				},
@@ -460,18 +588,19 @@ frappe.ui.form.on("Repair Order", {
 			primary_action_label: __("Add Supplement"),
 			primary_action(values) {
 				frm.call({
+					doc: frm.doc,
 					method: "add_supplement",
 					args: {
-						job_title: values.job_title,
-						job_category: values.job_category,
-						estimated_labor_hours: values.estimated_labor_hours,
+						service_title: values.service_title,
+						category: values.category,
+						labor_hours: values.labor_hours,
 						labor_rate: values.labor_rate,
 						notes: values.advisor_notes,
 					},
 					callback(r) {
 						if (r.message && r.message.status === "success") {
 							frappe.show_alert({
-								message: __("Supplement {0} added to Repair Order", [r.message.job_id]),
+								message: __("Supplement '{0}' added to Repair Order", [r.message.service_title]),
 								indicator: "green",
 							});
 							d.hide();
@@ -485,36 +614,409 @@ frappe.ui.form.on("Repair Order", {
 	},
 });
 
-frappe.ui.form.on("Repair Order Job", {
+frappe.ui.form.on("Repair Order Service", {
+	service_package(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (!row.service_package) return;
+
+		frappe.call({
+			method: "ism.ism.doctype.repair_order.repair_order.get_service_package_details",
+			args: { service_package: row.service_package },
+			callback(r) {
+				if (r.message) {
+					const pkg = r.message;
+					frappe.model.set_value(cdt, cdn, "service_title", pkg.package_name || row.service_package);
+					frappe.model.set_value(cdt, cdn, "category", pkg.category || "Maintenance");
+					frappe.model.set_value(cdt, cdn, "labor_hours", pkg.standard_labor_hours || 1.0);
+					frappe.model.set_value(cdt, cdn, "labor_rate", pkg.hourly_rate || 120.0);
+					frappe.model.set_value(cdt, cdn, "labor_amount", pkg.service_rate || (flt(pkg.standard_labor_hours) * flt(pkg.hourly_rate)));
+					frappe.model.set_value(cdt, cdn, "parts", JSON.stringify(pkg.parts || []));
+					frappe.model.set_value(cdt, cdn, "parts_total", pkg.parts_total || 0.0);
+					frappe.model.set_value(cdt, cdn, "total_amount", flt(pkg.service_rate) + flt(pkg.parts_total));
+					if (pkg.description && !row.advisor_notes) {
+						frappe.model.set_value(cdt, cdn, "advisor_notes", pkg.description);
+					}
+					frappe.model.set_value(cdt, cdn, "parts_html", render_parts_html(pkg.parts || []));
+					frm.refresh_field("services");
+					recalculate_totals(frm);
+				}
+			},
+		});
+	},
+
+	labor_hours(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		const labor_amt = flt(row.labor_hours) * flt(row.labor_rate);
+		frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
+		frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + flt(row.parts_total));
+		recalculate_totals(frm);
+	},
+
+	labor_rate(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		const labor_amt = flt(row.labor_hours) * flt(row.labor_rate);
+		frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
+		frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + flt(row.parts_total));
+		recalculate_totals(frm);
+	},
+
 	is_completed(frm, cdt, cdn) {
 		const row = locals[cdt][cdn];
-		frm.call("toggle_job_completion", { job_id: row.job_id, is_completed: row.is_completed }).then(() => {
+		if (row.is_completed && row.status !== "Approved") {
+			frappe.model.set_value(cdt, cdn, "is_completed", 0);
+			frappe.msgprint({
+				title: __("Authorization Block"),
+				message: __("Service <b>{0}</b> cannot be marked complete because its status is '<b>{1}</b>'.<br><br>Only <b>Approved</b> services can be completed by technicians.", [row.service_title, row.status]),
+				indicator: "red",
+			});
+			return;
+		}
+		frm.call({
+			doc: frm.doc,
+			method: "toggle_service_completion",
+			args: { service_row_id: row.name, is_completed: row.is_completed },
+		}).then(() => {
 			frm.reload_doc();
 		});
 	},
+
+	btn_manage_parts(frm, cdt, cdn) {
+		open_parts_editor(frm, cdt, cdn);
+	},
+
+	btn_save_as_package(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (!row.service_title) {
+			frappe.msgprint(__("Please enter a Service Title first."));
+			return;
+		}
+
+		frappe.prompt(
+			[
+				{
+					fieldname: "package_name",
+					fieldtype: "Data",
+					label: __("Service Package Name"),
+					default: row.service_title,
+					reqd: 1,
+				},
+			],
+			(values) => {
+				const perform_save = () => {
+					frm.call({
+						doc: frm.doc,
+						method: "save_service_as_package",
+						args: {
+							service_row_id: row.name,
+							package_name: values.package_name,
+						},
+						callback(r) {
+							if (r.message && r.message.status === "success") {
+								frappe.show_alert({
+									message: __("Saved as Service Package '{0}'!", [r.message.package_name]),
+									indicator: "green",
+								});
+								frm.reload_doc();
+							}
+						},
+					});
+				};
+
+				if (frm.is_dirty() || !row.name || String(row.name).startsWith("new-")) {
+					frm.save().then(() => {
+						perform_save();
+					});
+				} else {
+					perform_save();
+				}
+			},
+			__("Save as Reusable Service Package"),
+			__("Create Package")
+		);
+	},
 });
 
-frappe.ui.form.on("Repair Order Item", {
-	qty(frm, cdt, cdn) {
-		const row = locals[cdt][cdn];
-		frappe.model.set_value(cdt, cdn, "amount", flt(row.qty) * flt(row.rate));
-	},
-	rate(frm, cdt, cdn) {
-		const row = locals[cdt][cdn];
-		frappe.model.set_value(cdt, cdn, "amount", flt(row.qty) * flt(row.rate));
-	},
-	item_code(frm, cdt, cdn) {
-		const row = locals[cdt][cdn];
-		if (row.item_code) {
-			frappe.db.get_value("Item", row.item_code, ["item_name", "stock_uom", "standard_rate"], (r) => {
-				if (r) {
-					frappe.model.set_value(cdt, cdn, "item_name", r.item_name || row.item_code);
-					frappe.model.set_value(cdt, cdn, "uom", r.stock_uom);
-					if (!row.rate && r.standard_rate) {
-						frappe.model.set_value(cdt, cdn, "rate", r.standard_rate);
-					}
-				}
-			});
+function render_parts_html(parts) {
+	if (!parts || parts.length === 0) {
+		return '<div class="text-muted" style="padding: 6px 0; font-size: 12px;"><i>No parts required for this service.</i></div>';
+	}
+	let rows = "";
+	parts.forEach((p) => {
+		const code = p.item_code || "";
+		const name = p.item_name || code;
+		const qty = flt(p.qty) || 1.0;
+		const uom = p.uom || "Nos";
+		const rate = flt(p.rate) || 0.0;
+		const amt = flt(p.amount || qty * rate).toFixed(2);
+		rows += `
+			<tr>
+				<td><b>${code}</b></td>
+				<td>${name}</td>
+				<td style="text-align: right;">${qty} ${uom}</td>
+				<td style="text-align: right;">$${flt(rate).toFixed(2)}</td>
+				<td style="text-align: right;"><b>$${amt}</b></td>
+			</tr>
+		`;
+	});
+	return `
+		<table class="table table-bordered table-condensed" style="margin-top: 5px; font-size: 12px; background: #fafbfc;">
+			<thead>
+				<tr style="background: #eef2f7;">
+					<th>Part Code</th>
+					<th>Description</th>
+					<th style="text-align: right;">Qty</th>
+					<th style="text-align: right;">Rate</th>
+					<th style="text-align: right;">Amount</th>
+				</tr>
+			</thead>
+			<tbody>
+				${rows}
+			</tbody>
+		</table>
+	`;
+}
+
+function recalculate_totals(frm) {
+	let net = 0.0;
+	const has_approved = (frm.doc.services || []).some((s) => s.status === "Approved");
+
+	(frm.doc.services || []).forEach((s) => {
+		if (has_approved) {
+			if (s.status === "Approved") net += flt(s.total_amount);
+		} else {
+			if (s.status !== "Declined") net += flt(s.total_amount);
 		}
-	},
-});
+	});
+
+	const tax_rate = flt(frm.doc.tax_rate) || 13.0;
+	const tax = net * (tax_rate / 100.0);
+	const grand = net + tax;
+
+	frm.set_value("net_total", net);
+	frm.set_value("total_taxes_and_charges", tax);
+	frm.set_value("grand_total", grand);
+	frm.set_value("outstanding_amount", grand - flt(frm.doc.paid_amount));
+}
+
+function open_parts_editor(frm, cdt, cdn) {
+	const row = locals[cdt][cdn];
+	let parts = [];
+	try {
+		parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+	} catch (e) {
+		parts = [];
+	}
+
+	let local_parts = JSON.parse(JSON.stringify(parts));
+
+	function render_modal_parts_table(d) {
+		let total = 0.0;
+		let rows_html = "";
+		local_parts.forEach((p, idx) => {
+			const qty = flt(p.qty) || 1.0;
+			const rate = flt(p.rate) || 0.0;
+			const amt = flt(p.amount || qty * rate);
+			total += amt;
+			rows_html += `
+				<tr data-part-idx="${idx}">
+					<td style="vertical-align: middle;"><b>${p.item_code}</b></td>
+					<td style="vertical-align: middle;">${p.item_name || p.item_code}</td>
+					<td style="width: 100px;">
+						<input type="number" step="any" class="form-control input-sm part-qty" value="${qty}" style="text-align: right;" />
+					</td>
+					<td style="width: 110px;">
+						<input type="number" step="0.01" class="form-control input-sm part-rate" value="${rate.toFixed(2)}" style="text-align: right;" />
+					</td>
+					<td style="vertical-align: middle; text-align: right;" class="part-amount"><b>$${amt.toFixed(2)}</b></td>
+					<td style="text-align: center; vertical-align: middle; width: 50px;">
+						<button class="btn btn-default btn-xs text-danger btn-remove-part" title="${__("Remove")}">&times;</button>
+					</td>
+				</tr>
+			`;
+		});
+
+		if (local_parts.length === 0) {
+			rows_html = `<tr><td colspan="6" class="text-center text-muted" style="padding: 15px;"><i>${__("No parts added yet. Use the fields above to add parts.")}</i></td></tr>`;
+		}
+
+		const html = `
+			<table class="table table-bordered table-hover" style="margin-top: 10px; font-size: 13px;">
+				<thead>
+					<tr style="background: #f7fafc;">
+						<th>${__("Part Code")}</th>
+						<th>${__("Description")}</th>
+						<th style="text-align: right;">${__("Qty")}</th>
+						<th style="text-align: right;">${__("Rate ($)")}</th>
+						<th style="text-align: right;">${__("Amount")}</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody id="parts-table-body">
+					${rows_html}
+				</tbody>
+				<tfoot>
+					<tr style="background: #f7fafc; font-weight: bold;">
+						<td colspan="4" style="text-align: right;">${__("Total Parts:")}</td>
+						<td style="text-align: right;" id="parts-modal-total">$${total.toFixed(2)}</td>
+						<td></td>
+					</tr>
+				</tfoot>
+			</table>
+		`;
+
+		d.fields_dict.parts_html_display.$wrapper.html(html);
+
+		// Event handlers for Qty / Rate inline changes
+		d.fields_dict.parts_html_display.$wrapper.find("input.part-qty, input.part-rate").on("input change", function () {
+			const tr = $(this).closest("tr");
+			const pidx = parseInt(tr.attr("data-part-idx"), 10);
+			const new_qty = flt(tr.find(".part-qty").val());
+			const new_rate = flt(tr.find(".part-rate").val());
+			const new_amt = new_qty * new_rate;
+			local_parts[pidx].qty = new_qty;
+			local_parts[pidx].rate = new_rate;
+			local_parts[pidx].amount = new_amt;
+			tr.find(".part-amount").html(`<b>$${new_amt.toFixed(2)}</b>`);
+
+			let new_total = 0;
+			local_parts.forEach((p) => { new_total += flt(p.amount); });
+			d.fields_dict.parts_html_display.$wrapper.find("#parts-modal-total").text(`$${new_total.toFixed(2)}`);
+		});
+
+		// Event handler for delete
+		d.fields_dict.parts_html_display.$wrapper.find(".btn-remove-part").on("click", function (e) {
+			e.preventDefault();
+			const tr = $(this).closest("tr");
+			const pidx = parseInt(tr.attr("data-part-idx"), 10);
+			local_parts.splice(pidx, 1);
+			render_modal_parts_table(d);
+		});
+	}
+
+	const d = new frappe.ui.Dialog({
+		title: __("Manage Parts: {0}", [row.service_title || "Service"]),
+		fields: [
+			{
+				fieldtype: "Section Break",
+				label: __("Add Part to Service"),
+			},
+			{
+				fieldname: "item_code",
+				fieldtype: "Link",
+				label: __("Select Item / Part"),
+				options: "Item",
+				get_query: () => {
+					return {
+						filters: { is_stock_item: 1 }
+					};
+				},
+				onchange() {
+					const ic = d.get_value("item_code");
+					if (ic) {
+						frappe.db.get_value("Item", ic, ["item_name", "stock_uom", "standard_rate"], (r) => {
+							if (r) {
+								d.set_value("item_name", r.item_name || ic);
+								d.set_value("uom", r.stock_uom || "Nos");
+								d.set_value("rate", r.standard_rate || 0.0);
+							}
+						});
+					}
+				},
+			},
+			{
+				fieldname: "item_name",
+				fieldtype: "Data",
+				label: __("Part Description"),
+			},
+			{
+				fieldtype: "Column Break",
+			},
+			{
+				fieldname: "qty",
+				fieldtype: "Float",
+				label: __("Quantity"),
+				default: 1.0,
+			},
+			{
+				fieldname: "uom",
+				fieldtype: "Data",
+				label: __("UOM"),
+				default: "Nos",
+			},
+			{
+				fieldname: "rate",
+				fieldtype: "Currency",
+				label: __("Unit Rate ($)"),
+				default: 0.0,
+			},
+			{
+				fieldtype: "Section Break",
+			},
+			{
+				fieldname: "btn_add_part",
+				fieldtype: "Button",
+				label: __("+ Add Part to List"),
+				click() {
+					const ic = d.get_value("item_code");
+					const iname = d.get_value("item_name") || ic;
+					const qty = flt(d.get_value("qty")) || 1.0;
+					const uom = d.get_value("uom") || "Nos";
+					const rate = flt(d.get_value("rate")) || 0.0;
+
+					if (!ic && !iname) {
+						frappe.msgprint(__("Please select an Item Code or enter a Part Description."));
+						return;
+					}
+
+					local_parts.push({
+						item_code: ic || iname,
+						item_name: iname,
+						qty: qty,
+						uom: uom,
+						rate: rate,
+						amount: flt(qty * rate),
+						warehouse: "Stores - ISM",
+					});
+
+					d.set_value("item_code", "");
+					d.set_value("item_name", "");
+					d.set_value("qty", 1.0);
+					d.set_value("rate", 0.0);
+
+					render_modal_parts_table(d);
+				},
+			},
+			{
+				fieldtype: "Section Break",
+				label: __("Parts on this Service"),
+			},
+			{
+				fieldname: "parts_html_display",
+				fieldtype: "HTML",
+			},
+		],
+		primary_action_label: __("Save Parts to Service"),
+		primary_action() {
+			let total_parts_amt = 0;
+			local_parts.forEach((p) => {
+				const q = flt(p.qty) || 1.0;
+				const r = flt(p.rate) || 0.0;
+				p.amount = flt(q * r);
+				total_parts_amt += p.amount;
+			});
+
+			frappe.model.set_value(cdt, cdn, "parts", JSON.stringify(local_parts));
+			frappe.model.set_value(cdt, cdn, "parts_total", total_parts_amt);
+			const labor_amt = flt(row.labor_amount) || (flt(row.labor_hours) * flt(row.labor_rate));
+			frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + total_parts_amt);
+			frappe.model.set_value(cdt, cdn, "parts_html", render_parts_html(local_parts));
+
+			frm.refresh_field("services");
+			recalculate_totals(frm);
+			d.hide();
+		},
+	});
+
+	d.show();
+	render_modal_parts_table(d);
+}

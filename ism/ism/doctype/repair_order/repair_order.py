@@ -18,6 +18,95 @@ from frappe.utils import (
 )
 
 
+def _get_default_labor_rate():
+	try:
+		if frappe.db.has_column("ISM Settings", "default_labor_rate"):
+			return flt(frappe.db.get_single_value("ISM Settings", "default_labor_rate")) or 120.0
+	except Exception:
+		pass
+	return 120.0
+
+
+def _render_parts_html(parts):
+	"""Render a compact, styled HTML table of parts nested under a service."""
+	if not parts:
+		return '<div class="text-muted" style="padding: 6px 0; font-size: 12px;"><i>No parts required for this service.</i></div>'
+
+	rows = ""
+	for p in parts:
+		item_code = p.get("item_code", "")
+		item_name = p.get("item_name", item_code)
+		qty = flt(p.get("qty", 1.0))
+		uom = p.get("uom", "Nos")
+		rate = flt(p.get("rate", 0.0))
+		amt = flt(p.get("amount", qty * rate), 2)
+		rows += f"""
+		<tr>
+			<td><b>{item_code}</b></td>
+			<td>{item_name}</td>
+			<td style="text-align: right;">{qty} {uom}</td>
+			<td style="text-align: right;">${rate:.2f}</td>
+			<td style="text-align: right;"><b>${amt:.2f}</b></td>
+		</tr>
+		"""
+
+	return f"""
+	<table class="table table-bordered table-condensed" style="margin-top: 5px; font-size: 12px; background: #fafbfc;">
+		<thead>
+			<tr style="background: #eef2f7;">
+				<th>Part Code</th>
+				<th>Description</th>
+				<th style="text-align: right;">Qty</th>
+				<th style="text-align: right;">Rate</th>
+				<th style="text-align: right;">Amount</th>
+			</tr>
+		</thead>
+		<tbody>
+			{rows}
+		</tbody>
+	</table>
+	"""
+
+
+def _match_service_decision(service, approvals):
+	"""
+	Match customer approval decision from approvals dict against a service by:
+	- service.name (child row name, e.g. '0t4pqp90cs')
+	- service.idx (1, 2, ...)
+	- str(service.idx)
+	- service.service_title
+	- service.service_package
+	"""
+	if not approvals or not isinstance(approvals, dict):
+		return None
+
+	idx_str = str(service.idx or "")
+	name_str = str(service.name or "")
+	title_str = str(service.service_title or "").strip()
+	pkg_str = str(service.service_package or "").strip()
+
+	keys = [
+		name_str,
+		idx_str,
+		title_str,
+		title_str.lower(),
+		pkg_str,
+		pkg_str.lower(),
+		f"Service {idx_str}",
+		f"service-{idx_str}",
+		f"JOB-{idx_str}",
+	]
+
+	for k in keys:
+		if k:
+			if k in approvals:
+				return approvals[k]
+			if str(k) in approvals:
+				return approvals[str(k)]
+
+	return None
+
+
 class RepairOrder(Document):
 	def before_insert(self):
 		if not self.price_list:
@@ -26,12 +115,39 @@ class RepairOrder(Document):
 			self.company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
 
 	def validate(self):
+		self._sync_approval_status_to_services()
 		self._validate_vehicle_and_customer()
 		self._validate_odometer()
-		self._calculate_job_and_item_totals()
+		self._calculate_service_totals()
 		self._calculate_taxes_and_totals()
 		self._update_progress_and_job_timing()
+		self._validate_authorization_guards()
 		self._sync_declined_to_deferred_services()
+
+	def _sync_approval_status_to_services(self):
+		"""
+		If approval_status is set to Approved or Partially Approved (e.g. manually by advisor),
+		synchronize non-declined services so they become Approved.
+		"""
+		has_approved = any(s.status == "Approved" for s in self.services)
+		has_pending = any(s.status in ["Draft", "Pending Approval"] for s in self.services)
+
+		# If there are pending services (e.g. newly added supplement), approval_status cannot be "Approved"
+		# unless the user explicitly changed approval_status to "Approved" on the form
+		if has_approved and has_pending and not self.has_value_changed("approval_status"):
+			self.approval_status = "Partially Approved"
+			return
+
+		if self.approval_status == "Approved":
+			for s in self.services:
+				if s.status != "Declined":
+					s.status = "Approved"
+		elif self.approval_status == "Partially Approved":
+			if not has_approved and self.services:
+				for s in self.services:
+					if s.status != "Declined":
+						s.status = "Approved"
+						break
 
 	def before_update_after_submit(self):
 		self.validate()
@@ -82,42 +198,77 @@ class RepairOrder(Document):
 					self.odometer_out, self.odometer_in
 				))
 
-	def _calculate_job_and_item_totals(self):
-		# Auto-assign job_id if missing
-		for idx, job in enumerate(self.jobs, 1):
-			if not job.job_id:
-				job.job_id = f"JOB-{idx}"
-
-		# Calculate item amounts and group by job_id
-		job_totals = {j.job_id: 0.0 for j in self.jobs}
+	def _calculate_service_totals(self):
+		"""
+		Calculate labor amounts, parts totals, and combined service total for each service row.
+		"""
 		total_billed_hours = 0.0
 
-		for item in self.items:
-			item.amount = flt(item.qty) * flt(item.rate)
-			if item.job_id in job_totals:
-				job_totals[item.job_id] += flt(item.amount)
+		for s in self.services:
+			# Auto-assign service title if missing but service_package is set
+			if not s.service_title and s.service_package:
+				s.service_title = s.service_package
 
-		for job in self.jobs:
-			job.estimated_total = job_totals.get(job.job_id, 0.0)
-			if job.status == "Approved":
-				job.authorized_amount = job.estimated_total
-				total_billed_hours += flt(job.estimated_labor_hours)
-			elif job.status == "Declined":
-				job.authorized_amount = 0.0
+			# Labor calculation
+			labor_hours = flt(s.labor_hours)
+			labor_rate = flt(s.labor_rate)
+			if labor_hours and not labor_rate:
+				labor_rate = _get_default_labor_rate()
+				s.labor_rate = labor_rate
+
+			s.labor_amount = flt(labor_hours * labor_rate, 2)
+
+			# Parse parts list
+			parts = s.parts
+			if isinstance(parts, str):
+				try:
+					parts = json.loads(parts) if parts else []
+				except Exception:
+					parts = []
+			elif not isinstance(parts, list):
+				parts = []
+
+			# Calculate parts totals and format items
+			parts_total = 0.0
+			cleaned_parts = []
+			for p in parts:
+				if not isinstance(p, dict):
+					continue
+				qty = flt(p.get("qty", 1.0)) or 1.0
+				rate = flt(p.get("rate", 0.0))
+				amt = flt(p.get("amount", qty * rate), 2)
+				parts_total += amt
+				cleaned_parts.append({
+					"item_code": p.get("item_code", ""),
+					"item_name": p.get("item_name", p.get("item_code", "")),
+					"qty": qty,
+					"uom": p.get("uom", "Nos"),
+					"rate": rate,
+					"amount": amt,
+					"warehouse": p.get("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+				})
+
+			s.parts = json.dumps(cleaned_parts)
+			s.parts_total = flt(parts_total, 2)
+			s.total_amount = flt(s.labor_amount + s.parts_total, 2)
+
+			# Render clean HTML preview of parts inside service row
+			s.parts_html = _render_parts_html(cleaned_parts)
+
+			if s.status == "Approved":
+				total_billed_hours += labor_hours
 
 		self.total_billed_hours = total_billed_hours
 
 	def _calculate_taxes_and_totals(self):
-		# Calculate net total from approved jobs, or all active jobs if draft
-		has_approved = any(j.status == "Approved" for j in self.jobs)
+		has_approved = any(s.status == "Approved" for s in self.services)
 		if has_approved:
-			net = sum(flt(j.authorized_amount) for j in self.jobs if j.status == "Approved")
+			net = sum(flt(s.total_amount) for s in self.services if s.status == "Approved")
 		else:
-			net = sum(flt(j.estimated_total) for j in self.jobs if j.status != "Declined")
+			net = sum(flt(s.total_amount) for s in self.services if s.status != "Declined")
 
-		self.net_total = net
+		self.net_total = flt(net, 2)
 
-		# Tax template calculation
 		tax_rate = flt(self.tax_rate)
 		if not tax_rate:
 			if self.taxes_and_charges:
@@ -127,7 +278,7 @@ class RepairOrder(Document):
 					"rate"
 				) or 13.0)
 			else:
-				tax_rate = 13.0  # Standard Ontario HST default
+				tax_rate = 13.0
 			self.tax_rate = tax_rate
 
 		self.total_taxes_and_charges = flt(net * (tax_rate / 100.0), 2)
@@ -135,59 +286,144 @@ class RepairOrder(Document):
 		self.outstanding_amount = flt(self.grand_total - flt(self.paid_amount), 2)
 
 	def _update_progress_and_job_timing(self):
-		approved_jobs = [j for j in self.jobs if j.status == "Approved"]
-		if approved_jobs:
-			completed_jobs = [j for j in approved_jobs if j.is_completed]
-			self.progress_percent = flt((len(completed_jobs) / len(approved_jobs)) * 100.0, 1)
+		approved_services = [s for s in self.services if s.status == "Approved"]
+		if approved_services:
+			completed_services = [s for s in approved_services if s.is_completed]
+			self.progress_percent = flt((len(completed_services) / len(approved_services)) * 100.0, 1)
 		else:
 			self.progress_percent = 0.0
 
-		for job in self.jobs:
-			if job.is_completed and not job.completed_at:
-				job.completed_at = now_datetime()
-				job.completed_by = frappe.session.user
+		for s in self.services:
+			if s.is_completed and not s.completed_at:
+				s.completed_at = now_datetime()
+				s.completed_by = frappe.session.user
 				if self.picked_up_at:
-					job.actual_duration_hours = flt(time_diff_in_hours(job.completed_at, self.picked_up_at), 2)
+					s.actual_duration_hours = flt(time_diff_in_hours(s.completed_at, self.picked_up_at), 2)
 
 	def _sync_declined_to_deferred_services(self):
-		"""Log declined jobs into Vehicle Deferred Service for future follow-up."""
+		"""Log declined services into Vehicle Deferred Service for future follow-up."""
 		if not self.vehicle:
 			return
 
-		for job in self.jobs:
-			if job.status == "Declined":
+		for s in self.services:
+			if s.status == "Declined":
 				exists = frappe.db.exists(
 					"Vehicle Deferred Service",
 					{
 						"parent": self.vehicle,
 						"repair_order": self.name,
-						"job_title": job.job_title,
+						"job_title": s.service_title,
 					},
 				)
 				if not exists:
 					veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
 					veh_doc.append("deferred_services", {
-						"job_title": job.job_title,
+						"job_title": s.service_title,
 						"decline_date": today(),
-						"estimated_amount": job.estimated_total,
+						"estimated_amount": s.total_amount,
 						"repair_order": self.name,
-						"decline_reason": job.advisor_notes or _("Declined during customer authorization"),
+						"decline_reason": s.advisor_notes or _("Declined during customer authorization"),
 					})
 					veh_doc.save(ignore_permissions=True)
 
+	def _validate_authorization_guards(self):
+		"""
+		Enforce strict authorization blocks:
+		1. Status progression: cannot advance beyond draft/pending without customer approval.
+		2. Vehicle location: cannot enter bay or be released without customer approval.
+		3. Service completion: individual services cannot be marked completed unless approved.
+		"""
+		has_approved = any(s.status == "Approved" for s in self.services)
+
+		# Auto-cascade if approval_status is Approved
+		if self.approval_status == "Approved":
+			if not self.services:
+				has_approved = True
+			else:
+				for s in self.services:
+					if s.status != "Declined":
+						s.status = "Approved"
+						has_approved = True
+		elif self.approval_status == "Partially Approved":
+			if not has_approved and self.services:
+				for s in self.services:
+					if s.status != "Declined":
+						s.status = "Approved"
+						has_approved = True
+						break
+
+		# Guard 1: Status progression block
+		restricted_statuses = [
+			"Authorized - In Progress",
+			"Waiting on Parts",
+			"Work Completed",
+			"Billed / Paid",
+			"Closed / Released",
+		]
+		if self.status in restricted_statuses:
+			if self.approval_status not in ["Approved", "Partially Approved"] or not has_approved:
+				frappe.throw(
+					_(
+						"Cannot advance Repair Order to '{0}' without customer authorization. "
+						"Please obtain customer approval before proceeding with repair work."
+					).format(self.status)
+				)
+
+		# Guard 2: Vehicle movement / bay location block
+		restricted_locations = [
+			"In Bay / Being Serviced",
+			"Completed / Parked in Lot",
+			"Released to Customer",
+		]
+		if self.vehicle_location in restricted_locations:
+			if self.approval_status not in ["Approved", "Partially Approved"] or not has_approved:
+				frappe.throw(
+					_(
+						"Vehicle cannot be moved to '{0}' without customer authorization on file. "
+						"Please obtain customer approval first."
+					).format(self.vehicle_location)
+				)
+
+		# Guard 3: Service completion block
+		for s in self.services:
+			if cint(s.is_completed) and s.status != "Approved":
+				frappe.throw(
+					_(
+						"Service '{0}' cannot be completed because its status is '{1}'. "
+						"Only Approved services can be completed by technicians."
+					).format(s.service_title, s.status)
+				)
+
 	@frappe.whitelist()
-	def pick_up_vehicle(self):
+	def pick_up_vehicle(self, *args, **kwargs):
 		"""Technician pulls vehicle from lot into service bay."""
+		has_approved = any(s.status == "Approved" for s in self.services)
+		if self.approval_status == "Approved":
+			has_approved = True
+		if self.approval_status not in ["Approved", "Partially Approved"] or not has_approved:
+			frappe.throw(
+				_(
+					"Vehicle cannot be picked up into the bay without customer authorization on file. "
+					"Please obtain customer approval first."
+				)
+			)
 		self.picked_up_at = now_datetime()
 		self.picked_up_by = frappe.session.user
 		self.vehicle_location = "In Bay / Being Serviced"
 		if self.status in ["Draft Estimate", "Pending Authorization"]:
 			self.status = "Authorized - In Progress"
+
+		if self.docstatus == 1:
+			self.db_set("vehicle_location", self.vehicle_location)
+			self.db_set("picked_up_at", self.picked_up_at)
+			self.db_set("picked_up_by", self.picked_up_by)
+			self.db_set("status", self.status)
+
 		self.save(ignore_permissions=True)
 		return {"status": "success", "vehicle_location": self.vehicle_location, "picked_up_at": self.picked_up_at}
 
 	@frappe.whitelist()
-	def park_vehicle(self):
+	def park_vehicle(self, *args, **kwargs):
 		"""Technician parks vehicle back in lot after completing work."""
 		self.parked_at = now_datetime()
 		self.parked_by = frappe.session.user
@@ -195,30 +431,70 @@ class RepairOrder(Document):
 		self.status = "Work Completed"
 		if self.picked_up_at:
 			self.total_bay_hours = flt(time_diff_in_hours(self.parked_at, self.picked_up_at), 2)
+
+		if self.docstatus == 1:
+			self.db_set("vehicle_location", self.vehicle_location)
+			self.db_set("parked_at", self.parked_at)
+			self.db_set("parked_by", self.parked_by)
+			self.db_set("status", self.status)
+			self.db_set("total_bay_hours", self.total_bay_hours)
+
 		self.save(ignore_permissions=True)
 		return {"status": "success", "vehicle_location": self.vehicle_location, "total_bay_hours": self.total_bay_hours}
 
 	@frappe.whitelist()
-	def toggle_job_completion(self, job_id, is_completed):
-		"""Toggle individual job completion with timestamping."""
-		for job in self.jobs:
-			if job.job_id == job_id:
-				job.is_completed = 1 if cint(is_completed) else 0
-				if job.is_completed:
-					job.completed_at = now_datetime()
-					job.completed_by = frappe.session.user
-					if self.picked_up_at:
-						job.actual_duration_hours = flt(time_diff_in_hours(job.completed_at, self.picked_up_at), 2)
-				else:
-					job.completed_at = None
-					job.completed_by = None
-					job.actual_duration_hours = 0.0
+	def toggle_service_completion(self, service_row_id, is_completed, *args, **kwargs):
+		"""Toggle individual service completion with timestamping."""
+		target_service = None
+		for s in self.services:
+			if str(s.name) == str(service_row_id) or str(s.idx) == str(service_row_id) or str(s.service_title) == str(service_row_id):
+				target_service = s
 				break
+
+		if not target_service:
+			frappe.throw(_("Service {0} not found.").format(service_row_id))
+
+		if cint(is_completed) and target_service.status != "Approved":
+			frappe.throw(
+				_(
+					"Service '{0}' cannot be completed because its status is '{1}'. "
+					"Only Approved services can be completed by technicians."
+				).format(target_service.service_title, target_service.status)
+			)
+
+		target_service.is_completed = 1 if cint(is_completed) else 0
+		if target_service.is_completed:
+			target_service.completed_at = now_datetime()
+			target_service.completed_by = frappe.session.user
+			if self.picked_up_at:
+				target_service.actual_duration_hours = flt(time_diff_in_hours(target_service.completed_at, self.picked_up_at), 2)
+		else:
+			target_service.completed_at = None
+			target_service.completed_by = None
+			target_service.actual_duration_hours = 0.0
+
+		if target_service.name and not str(target_service.name).startswith("new-"):
+			frappe.db.set_value("Repair Order Service", target_service.name, {
+				"is_completed": target_service.is_completed,
+				"completed_at": target_service.completed_at,
+				"completed_by": target_service.completed_by,
+				"actual_duration_hours": target_service.actual_duration_hours,
+			}, update_modified=False)
+
+		self._update_progress_and_job_timing()
+		if self.docstatus == 1:
+			self.db_set("progress_percent", self.progress_percent)
+
 		self.save(ignore_permissions=True)
 		return {"status": "success", "progress_percent": self.progress_percent}
 
+	# Backward compatibility alias
 	@frappe.whitelist()
-	def generate_approval_token(self):
+	def toggle_job_completion(self, job_id, is_completed, *args, **kwargs):
+		return self.toggle_service_completion(job_id, is_completed, *args, **kwargs)
+
+	@frappe.whitelist()
+	def generate_approval_token(self, *args, **kwargs):
 		"""Generate token for remote customer signature portal."""
 		self.approval_token = secrets.token_urlsafe(32)
 		self.approval_token_expiry = add_days(now_datetime(), 2)
@@ -227,122 +503,165 @@ class RepairOrder(Document):
 		return {"approval_token": self.approval_token, "expiry": self.approval_token_expiry}
 
 	@frappe.whitelist()
-	def authorize_jobs(self, approvals: dict, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None):
+	def authorize_jobs(self, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, *args, **kwargs):
 		"""
-		Apply per-job customer decisions (Approved/Declined) and audit evidence.
-		approvals: {"JOB-1": "Approved", "JOB-2": "Declined"}
+		Apply per-service customer decisions (Approved/Declined) and audit evidence.
+		approvals: {"1": "Approved", "Brake Service": "Declined"}
 		"""
 		if isinstance(approvals, str):
-			approvals = json.loads(approvals)
+			try:
+				approvals = json.loads(approvals)
+			except Exception:
+				approvals = {}
 
-		all_approved = True
-		any_approved = False
-
-		for job in self.jobs:
-			decision = approvals.get(job.job_id)
-			if decision in ["Approved", "Declined"]:
-				job.status = decision
-				job.approval_channel = channel
-				if decision == "Approved":
-					any_approved = True
-				else:
-					all_approved = False
-
-		if all_approved and any_approved:
-			self.approval_status = "Approved"
-			self.status = "Authorized - In Progress"
-		elif any_approved:
-			self.approval_status = "Partially Approved"
-			self.status = "Authorized - In Progress"
+		if not approvals:
+			for s in self.services:
+				if s.status != "Declined":
+					s.status = "Approved"
 		else:
+			for s in self.services:
+				decision = _match_service_decision(s, approvals)
+				if decision is None and len(self.services) == 1 and len(approvals) == 1:
+					decision = list(approvals.values())[0]
+
+				if decision in ["Approved", "Declined"]:
+					s.status = decision
+					if decision == "Declined":
+						s.is_completed = 0
+						s.completed_at = None
+						s.completed_by = None
+
+		approved = [s for s in self.services if s.status == "Approved"]
+		declined = [s for s in self.services if s.status == "Declined"]
+		pending = [s for s in self.services if s.status in ["Draft", "Pending Approval"]]
+
+		if approved and not pending and not declined:
+			self.approval_status = "Approved"
+		elif approved:
+			self.approval_status = "Partially Approved"
+		elif declined and not pending:
 			self.approval_status = "Declined"
+		else:
+			self.approval_status = "Pending Approval"
+
+		if self.approval_status in ["Approved", "Partially Approved"]:
+			if self.status in ["Draft Estimate", "Pending Authorization", "", None]:
+				self.status = "Authorized - In Progress"
 
 		self.authorized_by = signer_name or frappe.session.user
 		self.authorized_at = now_datetime()
+
 		if signature_image:
-			self.signature_image = signature_image
+			if signature_image.startswith("data:image"):
+				from frappe.utils.file_manager import save_file
+
+				file_doc = save_file(
+					fname=f"sig_{self.name}.png",
+					content=signature_image,
+					dt=self.doctype,
+					dn=self.name,
+					decode=True,
+					is_private=1,
+					df="signature_image",
+				)
+				self.signature_image = file_doc.file_url
+			else:
+				self.signature_image = signature_image
+
 		if notes:
 			self.verbal_notes = notes
 
-		# Build SHA-256 audit hash
-		audit_payload = f"{self.name}|{self.authorized_by}|{self.authorized_at}|{json.dumps(approvals, sort_keys=True)}"
+		audit_payload = f"{self.name}|{self.authorized_by}|{self.authorized_at}|{json.dumps(approvals or {}, sort_keys=True)}"
 		self.audit_hash = hashlib.sha256(audit_payload.encode()).hexdigest()
 
+		for s in self.services:
+			if s.name and not str(s.name).startswith("new-"):
+				frappe.db.set_value("Repair Order Service", s.name, {
+					"status": s.status,
+					"is_completed": s.is_completed,
+				}, update_modified=False)
+
+		if self.docstatus == 1:
+			self.db_set("approval_status", self.approval_status)
+			self.db_set("status", self.status)
+			self.db_set("authorized_by", self.authorized_by)
+			self.db_set("authorized_at", self.authorized_at)
+			self.db_set("audit_hash", self.audit_hash)
+			if self.signature_image:
+				self.db_set("signature_image", self.signature_image)
+			if self.verbal_notes:
+				self.db_set("verbal_notes", self.verbal_notes)
+
 		self.save(ignore_permissions=True)
-		return {"status": "success", "approval_status": self.approval_status}
+		return {
+			"status": "success",
+			"approval_status": self.approval_status,
+			"order_status": self.status,
+		}
 
 	@frappe.whitelist()
-	def add_service_package(self, service_package):
-		"""Expand canned service package into a new Job and child Items."""
+	def add_service_package(self, service_package, *args, **kwargs):
+		"""Expand canned service package into a new Service row with nested Parts."""
 		pkg = frappe.get_doc("Service Package", service_package)
-		new_job_id = f"JOB-{len(self.jobs) + 1}"
-		is_supp = 1 if (self.docstatus == 1 or any(j.status == "Approved" for j in self.jobs)) else 0
+		is_supp = 1 if (self.docstatus == 1 or any(s.status == "Approved" for s in self.services)) else 0
 
-		self.append("jobs", {
-			"job_id": new_job_id,
-			"job_title": pkg.package_name,
-			"job_category": pkg.category or "Maintenance",
+		parts_list = []
+		parts_total = 0.0
+		for row in pkg.items:
+			item_doc = frappe.get_cached_doc("Item", row.item_code)
+			qty = flt(row.qty) or 1.0
+			rate = flt(row.rate)
+			amt = flt(qty * rate, 2)
+			parts_total += amt
+			parts_list.append({
+				"item_code": row.item_code,
+				"item_name": row.item_name or item_doc.item_name,
+				"qty": qty,
+				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+				"rate": rate,
+				"amount": amt,
+				"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+			})
+
+		labor_hours = flt(pkg.standard_labor_hours)
+		labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
+		labor_amount = flt(labor_hours * labor_rate, 2)
+
+		self.append("services", {
 			"service_package": pkg.name,
-			"estimated_labor_hours": flt(pkg.standard_labor_hours),
+			"service_title": pkg.package_name,
+			"category": pkg.category or "Maintenance",
 			"status": "Pending Approval" if is_supp else "Draft",
+			"labor_hours": labor_hours,
+			"labor_rate": labor_rate,
+			"labor_amount": labor_amount,
+			"parts": json.dumps(parts_list),
+			"parts_total": parts_total,
+			"total_amount": flt(labor_amount + parts_total, 2),
+			"parts_html": _render_parts_html(parts_list),
 			"is_supplement": is_supp,
 			"advisor_notes": pkg.description or "",
 		})
 
-		for row in pkg.items:
-			item_doc = frappe.get_cached_doc("Item", row.item_code)
-			self.append("items", {
-				"job_id": new_job_id,
-				"job_title": pkg.package_name,
-				"item_type": "Labor" if row.is_labor else "Part",
-				"item_code": row.item_code,
-				"item_name": row.item_name or item_doc.item_name,
-				"qty": flt(row.qty) or 1.0,
-				"uom": getattr(row, "uom", None) or item_doc.stock_uom,
-				"rate": flt(row.rate),
-				"amount": flt(row.qty or 1.0) * flt(row.rate),
-				"status": "Pending Approval" if is_supp else "Draft",
-			})
+		if is_supp:
+			if any(s.status == "Approved" for s in self.services):
+				self.approval_status = "Partially Approved"
+			else:
+				self.approval_status = "Pending Approval"
 
 		self.save(ignore_permissions=True)
-		return {"status": "success", "job_id": new_job_id}
+		return {"status": "success", "service": pkg.package_name}
 
 	@frappe.whitelist()
-	def add_supplement(self, job_title, job_category="Maintenance", estimated_labor_hours=0, labor_rate=0, parts=None, notes=None):
-		"""Add a supplemental repair job to an existing Repair Order."""
-		new_job_id = f"JOB-{len(self.jobs) + 1}"
-		self.append("jobs", {
-			"job_id": new_job_id,
-			"job_title": job_title,
-			"job_category": job_category,
-			"estimated_labor_hours": flt(estimated_labor_hours),
-			"status": "Pending Approval",
-			"is_supplement": 1,
-			"advisor_notes": notes or _("Discovered during teardown / inspection"),
-		})
-
+	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, parts=None, notes=None, job_title=None, *args, **kwargs):
+		"""Add a supplemental repair service to an existing Repair Order."""
+		title = service_title or job_title or "Supplemental Service"
+		hours = flt(labor_hours)
 		rate = flt(labor_rate) or 120.0
-		hours = flt(estimated_labor_hours)
-		if hours > 0:
-			default_labor = "LABOR-STD"
-			if not frappe.db.exists("Item", default_labor):
-				fallback = frappe.db.get_value("Item", {"is_stock_item": 0}, "name")
-				if fallback:
-					default_labor = fallback
+		labor_amount = flt(hours * rate, 2)
 
-			self.append("items", {
-				"job_id": new_job_id,
-				"job_title": job_title,
-				"item_type": "Labor",
-				"item_code": default_labor,
-				"item_name": f"Labor: {job_title}",
-				"qty": hours,
-				"uom": "Hour",
-				"rate": rate,
-				"amount": hours * rate,
-				"status": "Pending Approval",
-			})
-
+		parts_list = []
+		parts_total = 0.0
 		if parts:
 			if isinstance(parts, str):
 				parts = json.loads(parts)
@@ -350,26 +669,101 @@ class RepairOrder(Document):
 				item_code = p.get("item_code")
 				if item_code and frappe.db.exists("Item", item_code):
 					item_doc = frappe.get_cached_doc("Item", item_code)
-					qty = flt(p.get("qty", 1.0))
+					qty = flt(p.get("qty", 1.0)) or 1.0
 					part_rate = flt(p.get("rate", item_doc.standard_rate or 0.0))
-					self.append("items", {
-						"job_id": new_job_id,
-						"job_title": job_title,
-						"item_type": "Part",
+					amt = flt(qty * part_rate, 2)
+					parts_total += amt
+					parts_list.append({
 						"item_code": item_code,
 						"item_name": item_doc.item_name,
 						"qty": qty,
 						"uom": getattr(item_doc, "stock_uom", "Nos"),
 						"rate": part_rate,
-						"amount": qty * part_rate,
-						"status": "Pending Approval",
+						"amount": amt,
+						"warehouse": p.get("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
 					})
 
+		self.append("services", {
+			"service_title": title,
+			"category": category or "Maintenance",
+			"status": "Pending Approval",
+			"labor_hours": hours,
+			"labor_rate": rate,
+			"labor_amount": labor_amount,
+			"parts": json.dumps(parts_list),
+			"parts_total": parts_total,
+			"total_amount": flt(labor_amount + parts_total, 2),
+			"parts_html": _render_parts_html(parts_list),
+			"is_supplement": 1,
+			"advisor_notes": notes or _("Discovered during teardown / inspection"),
+		})
+
+		if any(s.status == "Approved" for s in self.services):
+			self.approval_status = "Partially Approved"
+		else:
+			self.approval_status = "Pending Approval"
+
 		self.save(ignore_permissions=True)
-		return {"status": "success", "job_id": new_job_id}
+		return {"status": "success", "service_title": title}
 
 	@frappe.whitelist()
-	def process_payment_and_release(self, payment_method="Debit / Interac", paid_amount=None, odometer_out=None):
+	def save_service_as_package(self, service_row_id, package_name=None, *args, **kwargs):
+		"""
+		Save a one-off repair service and its nested parts as a reusable Service Package.
+		"""
+		target = None
+		for s in self.services:
+			if str(s.name) == str(service_row_id) or str(s.idx) == str(service_row_id) or str(s.service_title) == str(service_row_id):
+				target = s
+				break
+
+		if not target:
+			frappe.throw(_("Service row {0} not found.").format(service_row_id))
+
+		pkg_title = package_name or target.service_title
+		if frappe.db.exists("Service Package", pkg_title):
+			frappe.throw(_("A Service Package named '{0}' already exists.").format(pkg_title))
+
+		parts = target.parts
+		if isinstance(parts, str):
+			try:
+				parts = json.loads(parts) if parts else []
+			except Exception:
+				parts = []
+
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": pkg_title,
+			"category": target.category or "Maintenance",
+			"description": target.advisor_notes or f"Saved from Repair Order {self.name}",
+			"standard_labor_hours": flt(target.labor_hours),
+			"hourly_rate": flt(target.labor_rate),
+			"service_rate": flt(target.labor_amount),
+			"items": [
+				{
+					"item_code": p.get("item_code"),
+					"item_name": p.get("item_name"),
+					"qty": flt(p.get("qty", 1.0)),
+					"rate": flt(p.get("rate", 0.0)),
+				}
+				for p in parts
+				if p.get("item_code")
+			]
+		})
+		pkg.insert(ignore_permissions=True)
+
+		target.service_package = pkg.name
+		if target.name and not str(target.name).startswith("new-"):
+			frappe.db.set_value("Repair Order Service", target.name, "service_package", pkg.name, update_modified=False)
+
+		return {
+			"status": "success",
+			"package_name": pkg.name,
+			"message": _("Service Package '{0}' created successfully!").format(pkg.name)
+		}
+
+	@frappe.whitelist()
+	def process_payment_and_release(self, payment_method="Debit / Interac", paid_amount=None, odometer_out=None, *args, **kwargs):
 		"""
 		Finalize billing audit:
 		1. Validates odometer out
@@ -379,167 +773,353 @@ class RepairOrder(Document):
 		"""
 		if odometer_out is not None:
 			self.odometer_out = cint(odometer_out)
+		self._validate_odometer()
 
-		if not self.odometer_out:
-			frappe.throw(_("Odometer Out is mandatory to complete and release the vehicle."))
+		approved_services = [s for s in self.services if s.status == "Approved"]
+		if not approved_services:
+			frappe.throw(_("Cannot process payment without approved services."))
 
-		if self.odometer_in and self.odometer_out < self.odometer_in:
-			frappe.throw(_("Odometer Out ({0}) cannot be less than Odometer In ({1}).").format(
-				self.odometer_out, self.odometer_in
-			))
+		default_income_account = frappe.db.get_value(
+			"Company", self.company, "default_income_account"
+		) or "Sales - I"
+		default_cost_center = frappe.db.get_value(
+			"Company", self.company, "cost_center"
+		) or "Main - I"
+		default_warehouse = frappe.db.get_single_value(
+			"Stock Settings", "default_warehouse"
+		) or "Stores - I"
 
-		approved_items = [
-			item for item in self.items
-			if any(j.job_id == item.job_id and j.status == "Approved" for j in self.jobs)
-		]
-
-		if not approved_items:
-			frappe.throw(_("Cannot process billing without any approved jobs and items."))
-
-		amount_to_pay = flt(paid_amount) if paid_amount else flt(self.grand_total)
-
-		# 1. Create and submit background Sales Invoice
 		si = frappe.new_doc("Sales Invoice")
 		si.customer = self.customer
 		si.company = self.company
 		si.posting_date = today()
-		si.due_date = today()
-		si.currency = self.currency
-		si.update_stock = 1  # Deduct stock items from warehouse
+		si.currency = self.currency or "CAD"
+		si.update_stock = 1
+		si.taxes_and_charges = self.taxes_and_charges
 
-		for row in approved_items:
-			si.append("items", {
-				"item_code": row.item_code,
-				"item_name": row.item_name,
-				"description": row.description or row.item_name,
-				"qty": row.qty,
-				"uom": row.uom,
-				"rate": row.rate,
-				"amount": row.amount,
-				"warehouse": row.warehouse or frappe.db.get_single_value("Stock Settings", "default_warehouse"),
-			})
+		# Add line items: labor and all nested parts from approved services
+		for s in approved_services:
+			# 1. Labor line
+			if flt(s.labor_hours) > 0 or flt(s.labor_amount) > 0:
+				default_labor = "LABOR-STD"
+				if not frappe.db.exists("Item", default_labor):
+					if not frappe.db.exists("UOM", "Hour"):
+						frappe.get_doc({"doctype": "UOM", "uom_name": "Hour", "must_be_whole_number": 0}).insert(ignore_permissions=True)
+					labor_group = frappe.db.get_value("Item Group", {"is_group": 0}, "name") or "Services"
+					frappe.get_doc({
+						"doctype": "Item",
+						"item_code": default_labor,
+						"item_name": "Standard Labor",
+						"item_group": labor_group,
+						"is_stock_item": 0,
+						"stock_uom": "Hour",
+					}).insert(ignore_permissions=True)
+				si.append("items", {
+					"item_code": default_labor,
+					"item_name": f"Labor: {s.service_title}",
+					"description": s.advisor_notes or s.service_title,
+					"qty": flt(s.labor_hours) or 1.0,
+					"uom": "Hour",
+					"rate": flt(s.labor_rate),
+					"income_account": default_income_account,
+					"cost_center": default_cost_center,
+				})
 
-		if self.taxes_and_charges:
-			si.taxes_and_charges = self.taxes_and_charges
-			si.set_taxes()
+			# 2. Nested parts
+			parts = s.parts
+			if isinstance(parts, str):
+				try:
+					parts = json.loads(parts) if parts else []
+				except Exception:
+					parts = []
+			for p in parts:
+				item_code = p.get("item_code")
+				if item_code and frappe.db.exists("Item", item_code):
+					item_doc = frappe.get_cached_doc("Item", item_code)
+					si.append("items", {
+						"item_code": item_code,
+						"item_name": p.get("item_name") or item_doc.item_name,
+						"description": p.get("item_name") or item_doc.item_name,
+						"qty": flt(p.get("qty", 1.0)),
+						"uom": p.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
+						"rate": flt(p.get("rate", 0.0)),
+						"warehouse": p.get("warehouse") or default_warehouse,
+						"income_account": default_income_account,
+						"cost_center": default_cost_center,
+					})
 
+		si.set_missing_values()
+		si.calculate_taxes_and_totals()
 		si.flags.ignore_permissions = True
 		si.insert()
 		si.submit()
 
 		self.sales_invoice = si.name
 
-		target_pay = flt(paid_amount) if paid_amount is not None else flt(si.outstanding_amount)
-		allocated_amount = min(target_pay, flt(si.outstanding_amount))
-
-		# 2. Create Payment Entry if amount paid > 0
-		if allocated_amount > 0:
-			mode_of_payment = payment_method
-			# Ensure mode of payment exists or fallback to Cash
-			if not frappe.db.exists("Mode of Payment", mode_of_payment):
-				mode_of_payment = frappe.db.get_value("Mode of Payment", {}, "name") or "Cash"
-
+		# Process Payment Entry
+		pay_amt = flt(paid_amount) if paid_amount is not None else flt(self.grand_total)
+		if pay_amt > 0:
 			pe = frappe.new_doc("Payment Entry")
 			pe.payment_type = "Receive"
 			pe.party_type = "Customer"
 			pe.party = self.customer
 			pe.company = self.company
-			pe.posting_date = today()
-			pe.mode_of_payment = mode_of_payment
-			pe.paid_amount = allocated_amount
-			pe.received_amount = allocated_amount
-			pe.reference_no = self.name
-			pe.reference_date = today()
-
-			# Determine debit/credit accounts
-			paid_to_account = frappe.db.get_value(
+			pe.paid_amount = pay_amt
+			pe.received_amount = pay_amt
+			pe.mode_of_payment = payment_method or "Debit / Interac"
+			pe.paid_to = frappe.db.get_value(
 				"Mode of Payment Account",
-				{"parent": mode_of_payment, "company": self.company},
+				{"parent": pe.mode_of_payment, "company": self.company},
 				"default_account"
-			) or frappe.get_cached_value("Company", self.company, "default_cash_account")
-
-			pe.paid_to = paid_to_account
-			pe.paid_from = si.debit_to
-
+			) or frappe.db.get_value("Company", self.company, "default_bank_account")
 			pe.append("references", {
 				"reference_doctype": "Sales Invoice",
 				"reference_name": si.name,
 				"total_amount": si.grand_total,
 				"outstanding_amount": si.outstanding_amount,
-				"allocated_amount": allocated_amount,
+				"allocated_amount": min(pay_amt, si.outstanding_amount),
 			})
-
 			pe.flags.ignore_permissions = True
 			pe.insert()
 			pe.submit()
 
-			self.paid_amount = allocated_amount
-			self.payment_status = "Paid" if allocated_amount >= flt(si.grand_total) else "Partially Paid"
-			self.outstanding_amount = max(0.0, flt(self.grand_total - allocated_amount))
-		else:
-			self.paid_amount = 0.0
-			self.payment_status = "Unpaid"
-			self.outstanding_amount = self.grand_total
+			self.paid_amount = pay_amt
+			self.outstanding_amount = flt(self.grand_total - pay_amt, 2)
+			self.payment_status = "Paid" if self.outstanding_amount <= 0 else "Partially Paid"
 
-		# 3. Mark vehicle released and update vehicle specs
-		self.vehicle_released = 1
+		# Complete vehicle handover
 		self.vehicle_location = "Released to Customer"
-		self.status = "Billed / Paid"
+		self.vehicle_released = 1
+		self.status = "Closed / Released"
 
-		# Update vehicle odometer and last service
+		# Update vehicle specs
 		if self.vehicle:
-			frappe.db.set_value(
-				"Repair Vehicle",
-				self.vehicle,
-				{
-					"last_odometer": self.odometer_out,
-					"last_service_date": today(),
-				},
-			)
+			veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
+			veh_doc.last_odometer = self.odometer_out or self.odometer_in
+			veh_doc.last_service_date = today()
+			veh_doc.last_repair_order = self.name
+			veh_doc.save(ignore_permissions=True)
 
 		if self.docstatus == 0:
 			self.submit()
-		else:
+		elif self.docstatus == 1:
+			self.db_set("sales_invoice", self.sales_invoice)
+			self.db_set("paid_amount", self.paid_amount)
+			self.db_set("outstanding_amount", self.outstanding_amount)
+			self.db_set("payment_status", self.payment_status)
+			self.db_set("vehicle_location", self.vehicle_location)
+			self.db_set("vehicle_released", 1)
+			self.db_set("status", self.status)
+			if self.odometer_out:
+				self.db_set("odometer_out", self.odometer_out)
 			self.save(ignore_permissions=True)
-
 		return {
 			"status": "success",
 			"sales_invoice": self.sales_invoice,
-			"paid_amount": self.paid_amount,
-			"outstanding_amount": self.outstanding_amount,
+			"payment_status": self.payment_status,
 			"vehicle_released": self.vehicle_released,
 		}
 
 	@frappe.whitelist()
-	def create_material_request(self):
-		"""Generate Material Request for parts from approved jobs."""
-		parts = [
-			item for item in self.items
-			if item.item_type == "Part" and any(j.job_id == item.job_id and j.status == "Approved" for j in self.jobs)
-		]
+	def create_material_request(self, *args, **kwargs):
+		"""Create background ERPNext Material Request for all parts in approved services."""
+		approved_services = [s for s in self.services if s.status == "Approved"]
+		if not approved_services:
+			frappe.throw(_("No approved services found on this order."))
 
-		if not parts:
-			frappe.throw(_("No approved part lines found on this Repair Order."))
+		parts_to_order = []
+		for s in approved_services:
+			parts = s.parts
+			if isinstance(parts, str):
+				try:
+					parts = json.loads(parts) if parts else []
+				except Exception:
+					parts = []
+			for p in parts:
+				item_code = p.get("item_code")
+				if item_code and frappe.db.exists("Item", item_code):
+					parts_to_order.append(p)
+
+		if not parts_to_order:
+			frappe.throw(_("No inventory parts found in approved services."))
 
 		mr = frappe.new_doc("Material Request")
-		mr.material_request_type = "Purchase"
+		mr.material_request_type = "Material Transfer"
 		mr.company = self.company
+		mr.transaction_date = today()
 		mr.schedule_date = today()
 
-		for part in parts:
+		for part in parts_to_order:
+			item_doc = frappe.get_cached_doc("Item", part.get("item_code"))
 			mr.append("items", {
-				"item_code": part.item_code,
-				"item_name": part.item_name,
-				"description": part.description or part.item_name,
-				"qty": part.qty,
-				"uom": part.uom,
-				"warehouse": part.warehouse or frappe.db.get_single_value("Stock Settings", "default_warehouse"),
+				"item_code": part.get("item_code"),
+				"item_name": part.get("item_name") or item_doc.item_name,
+				"description": part.get("item_name") or item_doc.item_name,
+				"qty": flt(part.get("qty", 1.0)),
+				"uom": part.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
+				"warehouse": part.get("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse"),
 				"schedule_date": today(),
 			})
 
 		mr.flags.ignore_permissions = True
 		mr.insert()
 		return {"material_request": mr.name}
+
+
+# -------------------------------------------------------------
+# Module-level Whitelisted RPC Wrappers
+# -------------------------------------------------------------
+
+def _extract_docname_from_request():
+	if frappe.form_dict.get("docname"):
+		return frappe.form_dict.get("docname")
+	if frappe.form_dict.get("doc"):
+		doc_data = frappe.form_dict.get("doc")
+		if isinstance(doc_data, str):
+			doc_data = json.loads(doc_data)
+		return doc_data.get("name") if isinstance(doc_data, dict) else getattr(doc_data, "name", None)
+	if frappe.form_dict.get("docs"):
+		docs_data = frappe.form_dict.get("docs")
+		if isinstance(docs_data, str):
+			docs_data = json.loads(docs_data)
+		if isinstance(docs_data, dict):
+			return docs_data.get("name")
+		elif isinstance(docs_data, list) and docs_data:
+			return docs_data[0].get("name")
+	frappe.throw(_("Repair Order name is required."))
+
+
+@frappe.whitelist()
+def get_service_package_details(service_package):
+	"""Return package info and its parts list so the client can automatically populate."""
+	if not service_package:
+		return {}
+
+	pkg = frappe.get_doc("Service Package", service_package)
+	default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
+	default_rate = _get_default_labor_rate()
+
+	parts = []
+	for row in pkg.items:
+		item_doc = frappe.get_cached_doc("Item", row.item_code)
+		qty = flt(row.qty) or 1.0
+		rate = flt(row.rate)
+		parts.append({
+			"item_code": row.item_code,
+			"item_name": row.item_name or item_doc.item_name,
+			"qty": qty,
+			"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+			"rate": rate,
+			"amount": flt(qty * rate, 2),
+			"warehouse": default_wh,
+		})
+
+	labor_hours = flt(pkg.standard_labor_hours)
+	hourly_rate = flt(pkg.hourly_rate) or default_rate
+
+	return {
+		"package_name": pkg.package_name,
+		"category": pkg.category or "Maintenance",
+		"description": pkg.description or "",
+		"standard_labor_hours": labor_hours,
+		"hourly_rate": hourly_rate,
+		"service_rate": flt(labor_hours * hourly_rate, 2),
+		"parts": parts,
+		"parts_total": sum(p["amount"] for p in parts),
+	}
+
+
+@frappe.whitelist()
+def save_service_as_package(service_row_id, package_name=None, docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.save_service_as_package(service_row_id, package_name, *args, **kwargs)
+
+
+@frappe.whitelist()
+def toggle_service_completion(service_row_id, is_completed, docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.toggle_service_completion(service_row_id, is_completed, *args, **kwargs)
+
+
+@frappe.whitelist()
+def toggle_job_completion(job_id, is_completed, docname=None, *args, **kwargs):
+	return toggle_service_completion(job_id, is_completed, docname, *args, **kwargs)
+
+
+@frappe.whitelist()
+def authorize_jobs(docname=None, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.authorize_jobs(
+		approvals=approvals,
+		channel=channel,
+		signer_name=signer_name,
+		signature_image=signature_image,
+		notes=notes,
+		*args,
+		**kwargs,
+	)
+
+
+@frappe.whitelist()
+def pick_up_vehicle(docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.pick_up_vehicle(*args, **kwargs)
+
+
+@frappe.whitelist()
+def park_vehicle(docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.park_vehicle(*args, **kwargs)
+
+
+@frappe.whitelist()
+def add_service_package(service_package, docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.add_service_package(service_package, *args, **kwargs)
+
+
+@frappe.whitelist()
+def add_supplement(service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, notes=None, parts=None, docname=None, job_title=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.add_supplement(service_title or job_title, category, labor_hours, labor_rate, parts, notes, *args, **kwargs)
+
+
+@frappe.whitelist()
+def process_payment_and_release(payment_method="Debit / Interac", paid_amount=None, odometer_out=None, docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.process_payment_and_release(payment_method, paid_amount, odometer_out, *args, **kwargs)
+
+
+@frappe.whitelist()
+def generate_approval_token(docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.generate_approval_token(*args, **kwargs)
+
+
+@frappe.whitelist()
+def create_material_request(docname=None, *args, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.create_material_request(*args, **kwargs)
 
 
 @frappe.whitelist()
@@ -590,13 +1170,6 @@ def make_repair_order(source_name: str, target_doc=None):
 	def set_missing_values(source, target):
 		target.status = "Draft Estimate"
 		target.vehicle_location = "In Customer Lot"
-		target.odometer_in = source.intake_mileage
-		target.customer_concern = source.customer_concern
-		target.posting_date = today()
-		if not target.company:
-			target.company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company")
-		if not target.currency:
-			target.currency = "CAD"
 
 	doc = get_mapped_doc(
 		"Vehicle Check-in",

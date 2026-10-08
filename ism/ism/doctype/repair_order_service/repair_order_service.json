@@ -1,0 +1,228 @@
+{
+ "actions": [],
+ "creation": "2026-10-08 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "service_package",
+  "service_title",
+  "category",
+  "status",
+  "is_completed",
+  "col_break_labor",
+  "labor_hours",
+  "labor_rate",
+  "labor_amount",
+  "col_break_totals",
+  "parts_total",
+  "total_amount",
+  "sec_parts",
+  "parts_html",
+  "btn_manage_parts",
+  "btn_save_as_package",
+  "parts",
+  "sec_execution",
+  "assigned_technician",
+  "completed_at",
+  "completed_by",
+  "actual_duration_hours",
+  "col_break_notes",
+  "is_supplement",
+  "advisor_notes"
+ ],
+ "fields": [
+  {
+   "allow_on_submit": 1,
+   "columns": 2,
+   "fieldname": "service_package",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Service Package",
+   "options": "Service Package"
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 3,
+   "fieldname": "service_title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Service Title",
+   "reqd": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 2,
+   "default": "Maintenance",
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Category",
+   "options": "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther"
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 1,
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nPending Approval\nApproved\nDeclined",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 1,
+   "default": "0",
+   "fieldname": "is_completed",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Completed"
+  },
+  {
+   "fieldname": "col_break_labor",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "1.0",
+   "fieldname": "labor_hours",
+   "fieldtype": "Float",
+   "label": "Labor Hours"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "labor_rate",
+   "fieldtype": "Currency",
+   "label": "Labor Rate ($/hr)"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "labor_amount",
+   "fieldtype": "Currency",
+   "label": "Labor Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "col_break_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "parts_total",
+   "fieldtype": "Currency",
+   "label": "Parts Total",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 2,
+   "default": "0",
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Total Amount",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_parts",
+   "fieldtype": "Section Break",
+   "label": "Nested Parts & Materials"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "parts_html",
+   "fieldtype": "HTML",
+   "label": "Parts Summary",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "btn_manage_parts",
+   "fieldtype": "Button",
+   "label": "Add / Edit Parts"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "btn_save_as_package",
+   "fieldtype": "Button",
+   "label": "Save as Service Package"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "parts",
+   "fieldtype": "JSON",
+   "hidden": 1,
+   "label": "Parts JSON Data"
+  },
+  {
+   "fieldname": "sec_execution",
+   "fieldtype": "Section Break",
+   "label": "Bay Execution & Technician"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "assigned_technician",
+   "fieldtype": "Link",
+   "label": "Assigned Technician",
+   "options": "User"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed At",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "completed_by",
+   "fieldtype": "Link",
+   "label": "Completed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "actual_duration_hours",
+   "fieldtype": "Float",
+   "label": "Actual Duration (Hours)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "col_break_notes",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "is_supplement",
+   "fieldtype": "Check",
+   "label": "Is Supplement"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "advisor_notes",
+   "fieldtype": "Small Text",
+   "label": "Advisor Notes / Instructions"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-08 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Repair Order Service",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

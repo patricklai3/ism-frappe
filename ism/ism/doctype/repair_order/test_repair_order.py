@@ -1,11 +1,15 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import json
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_days, cint, flt, today
+from frappe.utils import cint, flt, today
 
-from ism.ism.doctype.repair_order.repair_order import make_repair_order
+from ism.ism.doctype.repair_order.repair_order import (
+	get_service_package_details,
+	make_repair_order,
+)
 from ism.tests.base import ISMTestCase
 
 
@@ -49,18 +53,19 @@ class TestRepairOrder(ISMTestCase):
 			)
 
 	def test_service_package_expansion_and_totals(self):
-		# Create test items
-		labor_item = self.create_test_item(item_code="LABOR-BRAKE", is_stock_item=0, standard_rate=120)
-		part_item = self.create_test_item(item_code="PART-PADS", is_stock_item=0, standard_rate=80)
+		# Create test part items
+		part1 = self.create_test_item(item_code="PART-PADS-1", is_stock_item=0, standard_rate=80)
+		part2 = self.create_test_item(item_code="PART-FLUID-1", is_stock_item=0, standard_rate=20)
 
-		# Create service package
+		# Create service package with labor hours, rate, and nested parts
 		pkg = frappe.get_doc({
 			"doctype": "Service Package",
 			"package_name": "Front Brake Renewal",
 			"standard_labor_hours": 1.5,
+			"hourly_rate": 120.0,
 			"items": [
-				{"item_code": labor_item.name, "is_labor": 1, "qty": 1.5, "rate": 120},
-				{"item_code": part_item.name, "is_labor": 0, "qty": 1, "rate": 80},
+				{"item_code": part1.name, "qty": 1, "rate": 80},
+				{"item_code": part2.name, "qty": 2, "rate": 20},
 			],
 		})
 		pkg.insert()
@@ -75,48 +80,129 @@ class TestRepairOrder(ISMTestCase):
 		ro.insert()
 		self.track(ro)
 
-		# Add service package
+		# Add service package to Repair Order
 		ro.add_service_package(pkg.name)
 		ro.reload()
 
-		self.assertEqual(len(ro.jobs), 1)
-		self.assertEqual(ro.jobs[0].job_title, "Front Brake Renewal")
-		self.assertEqual(len(ro.items), 2)
+		self.assertEqual(len(ro.services), 1)
+		service = ro.services[0]
+		self.assertEqual(service.service_title, "Front Brake Renewal")
+		self.assertEqual(service.service_package, pkg.name)
+		self.assertEqual(flt(service.labor_hours), 1.5)
+		self.assertEqual(flt(service.labor_rate), 120.0)
+		self.assertEqual(flt(service.labor_amount), 180.0)
 
-		# 1.5 * 120 = 180 (labor) + 80 (part) = 260
-		expected_net = 260.0
-		self.assertEqual(flt(ro.jobs[0].estimated_total), expected_net)
-		self.assertEqual(flt(ro.net_total), expected_net)
+		# Parts: 1 * 80 + 2 * 20 = 120.0
+		self.assertEqual(flt(service.parts_total), 120.0)
+		parts_data = json.loads(service.parts)
+		self.assertEqual(len(parts_data), 2)
+		self.assertEqual(parts_data[0]["item_code"], part1.name)
+		self.assertEqual(flt(parts_data[0]["amount"]), 80.0)
+		self.assertEqual(parts_data[1]["item_code"], part2.name)
+		self.assertEqual(flt(parts_data[1]["amount"]), 40.0)
 
-		# Tax calculation: 13% Ontario HST -> 260 * 0.13 = 33.80, grand_total = 293.80
-		expected_tax = flt(expected_net * 0.13, 2)
-		expected_grand = flt(expected_net + expected_tax, 2)
+		# Service total: 180 (labor) + 120 (parts) = 300.0
+		self.assertEqual(flt(service.total_amount), 300.0)
+		self.assertEqual(flt(ro.net_total), 300.0)
+
+		# Tax calculation: 13% Ontario HST -> 300 * 0.13 = 39.00, grand_total = 339.00
+		expected_tax = flt(300.0 * 0.13, 2)
+		expected_grand = flt(300.0 + expected_tax, 2)
 		self.assertEqual(flt(ro.total_taxes_and_charges), expected_tax)
 		self.assertEqual(flt(ro.grand_total), expected_grand)
 
-	def test_bay_pickup_parking_and_job_completion(self):
+	def test_get_service_package_details_rpc(self):
+		part = self.create_test_item(item_code="PART-FILT-1", is_stock_item=0, standard_rate=35)
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": "Engine Oil & Filter Change",
+			"category": "Maintenance",
+			"standard_labor_hours": 0.5,
+			"hourly_rate": 120.0,
+			"items": [
+				{"item_code": part.name, "qty": 1, "rate": 35},
+			],
+		})
+		pkg.insert()
+		self.track(pkg)
+
+		details = get_service_package_details(pkg.name)
+		self.assertEqual(details["package_name"], "Engine Oil & Filter Change")
+		self.assertEqual(details["category"], "Maintenance")
+		self.assertEqual(flt(details["standard_labor_hours"]), 0.5)
+		self.assertEqual(flt(details["hourly_rate"]), 120.0)
+		self.assertEqual(flt(details["service_rate"]), 60.0)
+		self.assertEqual(len(details["parts"]), 1)
+		self.assertEqual(flt(details["parts_total"]), 35.0)
+
+	def test_save_service_as_package(self):
+		"""Advisors can create a custom one-off service with nested parts and save it as a reusable Service Package."""
+		part1 = self.create_test_item("TEST-PLUG-1", is_stock_item=0, standard_rate=25)
+		part2 = self.create_test_item("TEST-COIL-1", is_stock_item=0, standard_rate=85)
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 75000,
+			"services": [
+				{
+					"service_title": "Custom Ignition Tune-Up",
+					"category": "Mechanical",
+					"labor_hours": 2.0,
+					"labor_rate": 120.0,
+					"parts": json.dumps([
+						{"item_code": part1.name, "item_name": "Spark Plug", "qty": 4, "rate": 25, "amount": 100},
+						{"item_code": part2.name, "item_name": "Ignition Coil", "qty": 1, "rate": 85, "amount": 85},
+					]),
+					"advisor_notes": "Replaces plugs and cylinder 3 coil pack",
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		service_row = ro.services[0]
+		res = ro.save_service_as_package(
+			service_row_id=service_row.name,
+			package_name="Ignition Overhaul Package",
+		)
+		self.assertEqual(res.get("status"), "success")
+		self.assertEqual(res.get("package_name"), "Ignition Overhaul Package")
+
+		# Verify Service Package created in DB
+		self.assertTrue(frappe.db.exists("Service Package", "Ignition Overhaul Package"))
+		pkg_doc = frappe.get_doc("Service Package", "Ignition Overhaul Package")
+		self.track(pkg_doc)
+		self.assertEqual(flt(pkg_doc.standard_labor_hours), 2.0)
+		self.assertEqual(flt(pkg_doc.hourly_rate), 120.0)
+		self.assertEqual(len(pkg_doc.items), 2)
+		self.assertEqual(pkg_doc.items[0].item_code, part1.name)
+		self.assertEqual(flt(pkg_doc.items[0].qty), 4)
+		self.assertEqual(flt(pkg_doc.items[1].rate), 85)
+
+		# Verify service row updated with linked package
+		ro.reload()
+		self.assertEqual(ro.services[0].service_package, "Ignition Overhaul Package")
+
+	def test_bay_pickup_parking_and_service_completion(self):
+		part = self.create_test_item("TEST-PART-BRAKE", is_stock_item=0, standard_rate=200)
+
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
 			"customer": self.customer.name,
 			"vehicle": self.vehicle.name,
 			"odometer_in": 54000,
-			"jobs": [
+			"approval_status": "Approved",
+			"services": [
 				{
-					"job_id": "JOB-1",
-					"job_title": "Brake Service",
+					"service_title": "Brake Service",
 					"status": "Approved",
-					"estimated_total": 200,
-					"authorized_amount": 200,
-				}
-			],
-			"items": [
-				{
-					"job_id": "JOB-1",
-					"item_code": self.create_test_item("TEST-PART-1", is_stock_item=0, standard_rate=200).name,
-					"item_name": "Test Part 1",
-					"qty": 1,
-					"rate": 200,
-					"amount": 200,
+					"labor_hours": 1.0,
+					"labor_rate": 120.0,
+					"parts": json.dumps([
+						{"item_code": part.name, "item_name": "Brake Rotor", "qty": 1, "rate": 200, "amount": 200}
+					]),
 				}
 			],
 		})
@@ -131,11 +217,12 @@ class TestRepairOrder(ISMTestCase):
 		self.assertIsNotNone(ro.picked_up_at)
 		self.assertEqual(ro.progress_percent, 0.0)
 
-		# 2. Complete Job
-		ro.toggle_job_completion("JOB-1", 1)
+		# 2. Complete Service
+		service_row = ro.services[0]
+		ro.toggle_service_completion(service_row.name, 1)
 		ro.reload()
-		self.assertEqual(ro.jobs[0].is_completed, 1)
-		self.assertIsNotNone(ro.jobs[0].completed_at)
+		self.assertEqual(ro.services[0].is_completed, 1)
+		self.assertIsNotNone(ro.services[0].completed_at)
 		self.assertEqual(ro.progress_percent, 100.0)
 
 		# 3. Park Vehicle back in Lot
@@ -146,41 +233,50 @@ class TestRepairOrder(ISMTestCase):
 		self.assertIsNotNone(ro.parked_at)
 
 	def test_customer_authorization_and_deferred_services(self):
-		part1 = self.create_test_item("TEST-BRAKES", is_stock_item=0, standard_rate=300)
-		part2 = self.create_test_item("TEST-TRANS", is_stock_item=0, standard_rate=250)
+		part1 = self.create_test_item("TEST-BRAKES-SVC", is_stock_item=0, standard_rate=300)
+		part2 = self.create_test_item("TEST-TRANS-FLUID", is_stock_item=0, standard_rate=250)
 
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
 			"customer": self.customer.name,
 			"vehicle": self.vehicle.name,
 			"odometer_in": 54000,
-			"jobs": [
-				{"job_id": "JOB-1", "job_title": "Brake Replacement", "status": "Draft"},
-				{"job_id": "JOB-2", "job_title": "Transmission Flush", "status": "Draft"},
-			],
-			"items": [
-				{"job_id": "JOB-1", "item_code": part1.name, "item_name": "Brakes", "qty": 1, "rate": 300, "amount": 300},
-				{"job_id": "JOB-2", "item_code": part2.name, "item_name": "Flush", "qty": 1, "rate": 250, "amount": 250},
+			"services": [
+				{
+					"service_title": "Brake Replacement",
+					"status": "Draft",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": part1.name, "item_name": "Brakes", "qty": 1, "rate": 300, "amount": 300}]),
+				},
+				{
+					"service_title": "Transmission Flush",
+					"status": "Draft",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": part2.name, "item_name": "Flush Fluid", "qty": 1, "rate": 250, "amount": 250}]),
+				},
 			],
 		})
 		ro.insert()
 		self.track(ro)
 
-		# Approve Job 1, Decline Job 2
+		# Approve Service 1, Decline Service 2
 		ro.authorize_jobs(
-			approvals={"JOB-1": "Approved", "JOB-2": "Declined"},
+			approvals={"1": "Approved", "2": "Declined"},
 			channel="Remote Web Link",
 			signer_name="John Customer",
 		)
 		ro.reload()
 
 		self.assertEqual(ro.approval_status, "Partially Approved")
-		self.assertEqual(ro.jobs[0].status, "Approved")
-		self.assertEqual(ro.jobs[1].status, "Declined")
-		self.assertEqual(flt(ro.net_total), 300.0)
+		self.assertEqual(ro.services[0].status, "Approved")
+		self.assertEqual(ro.services[1].status, "Declined")
+		# Approved service total: 100 labor + 300 part = 400.0
+		self.assertEqual(flt(ro.net_total), 400.0)
 		self.assertIsNotNone(ro.audit_hash)
 
-		# Verify declined job logged into Vehicle Deferred Service
+		# Verify declined service logged into Vehicle Deferred Service
 		deferred = frappe.get_all(
 			"Vehicle Deferred Service",
 			filters={"parent": self.vehicle.name, "job_title": "Transmission Flush"},
@@ -188,18 +284,24 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(len(deferred), 1)
 
 	def test_process_payment_and_release(self):
-		part = self.create_test_item("TEST-OIL-PKG", is_stock_item=0, standard_rate=100)
+		part = self.create_test_item("TEST-OIL-FILTER", is_stock_item=0, standard_rate=50)
 
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
 			"customer": self.customer.name,
 			"vehicle": self.vehicle.name,
 			"odometer_in": 54000,
-			"jobs": [
-				{"job_id": "JOB-1", "job_title": "Oil Service", "status": "Approved"}
-			],
-			"items": [
-				{"job_id": "JOB-1", "item_code": part.name, "item_name": "Oil Service", "qty": 1, "rate": 100, "amount": 100}
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Oil Service",
+					"status": "Approved",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+					"parts": json.dumps([
+						{"item_code": part.name, "item_name": "Oil Filter", "qty": 1, "rate": 50, "amount": 50}
+					]),
+				}
 			],
 		})
 		ro.insert()
@@ -214,7 +316,7 @@ class TestRepairOrder(ISMTestCase):
 
 		self.assertEqual(res.get("status"), "success")
 		self.assertEqual(ro.docstatus, 1)  # Submitted
-		self.assertEqual(ro.status, "Billed / Paid")
+		self.assertEqual(ro.status, "Closed / Released")
 		self.assertEqual(ro.payment_status, "Paid")
 		self.assertEqual(ro.vehicle_released, 1)
 		self.assertEqual(ro.vehicle_location, "Released to Customer")
@@ -225,6 +327,10 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(si.docstatus, 1)
 		self.assertEqual(flt(si.outstanding_amount), 0.0)
 		self.assertEqual(si.update_stock, 1)
+
+		# Verify items on Sales Invoice contain both labor and nested parts
+		item_codes = [item.item_code for item in si.items]
+		self.assertIn(part.name, item_codes)
 
 		# Verify vehicle specs updated
 		veh = frappe.get_doc("Repair Vehicle", self.vehicle.name)
@@ -263,18 +369,26 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.vehicle_location, "In Customer Lot")
 
 	def test_submitted_repair_order_dynamic_lifecycle_and_supplements(self):
-		part1 = self.create_test_item("TEST-BRAKE-PAD", is_stock_item=0, standard_rate=150)
+		part1 = self.create_test_item("TEST-BRAKE-PAD-X", is_stock_item=0, standard_rate=150)
+		part2 = self.create_test_item("TEST-ROTOR-X", is_stock_item=0, standard_rate=200)
+
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
 			"customer": self.customer.name,
 			"vehicle": self.vehicle.name,
 			"odometer_in": 60000,
 			"customer_concern": "Brake grind and inspection",
-			"jobs": [
-				{"job_id": "JOB-1", "job_title": "Brake Service", "status": "Approved", "estimated_labor_hours": 2.0}
-			],
-			"items": [
-				{"job_id": "JOB-1", "item_code": part1.name, "item_name": "Brake Pad", "qty": 1, "rate": 150, "amount": 150}
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Brake Service",
+					"status": "Approved",
+					"labor_hours": 2.0,
+					"labor_rate": 120.0,
+					"parts": json.dumps([
+						{"item_code": part1.name, "item_name": "Brake Pad", "qty": 1, "rate": 150, "amount": 150}
+					]),
+				}
 			],
 		})
 		ro.insert()
@@ -292,40 +406,42 @@ class TestRepairOrder(ISMTestCase):
 		self.assertIsNotNone(ro.picked_up_at)
 
 		# 3. Technician toggles completion on submitted document
-		ro.toggle_job_completion(job_id="JOB-1", is_completed=1)
+		service_row = ro.services[0]
+		ro.toggle_service_completion(service_row_id=service_row.name, is_completed=1)
 		ro.reload()
-		self.assertEqual(ro.jobs[0].is_completed, 1)
-		self.assertIsNotNone(ro.jobs[0].completed_at)
+		self.assertEqual(ro.services[0].is_completed, 1)
+		self.assertIsNotNone(ro.services[0].completed_at)
 		self.assertEqual(ro.progress_percent, 100.0)
 
 		# 4. Discovered teardown issue -> Add supplement on submitted document
 		supp_res = ro.add_supplement(
-			job_title="Replace Warped Rotor",
-			job_category="Mechanical",
-			estimated_labor_hours=1.0,
+			service_title="Replace Warped Rotor",
+			category="Mechanical",
+			labor_hours=1.0,
 			labor_rate=120.0,
+			parts=[{"item_code": part2.name, "qty": 1, "rate": 200}],
 			notes="Rotor thickness below discard spec",
 		)
 		ro.reload()
-		self.assertEqual(len(ro.jobs), 2)
-		self.assertEqual(ro.jobs[1].is_supplement, 1)
-		self.assertEqual(ro.jobs[1].status, "Pending Approval")
-		# Only JOB-1 is approved so far, so 1 of 1 approved jobs is completed = 100%
+		self.assertEqual(len(ro.services), 2)
+		self.assertEqual(ro.services[1].is_supplement, 1)
+		self.assertEqual(ro.services[1].status, "Pending Approval")
+		# Only service 0 is approved so far, so 1 of 1 approved services is completed = 100%
 		self.assertEqual(ro.progress_percent, 100.0)
 
 		# 5. Authorize supplement
 		ro.authorize_jobs(
-			approvals={"JOB-1": "Approved", "JOB-2": "Approved"},
+			approvals={"1": "Approved", "2": "Approved"},
 			channel="In-Person Signature",
 			signer_name="Test Customer",
 		)
 		ro.reload()
-		self.assertEqual(ro.jobs[1].status, "Approved")
-		# Now 1 of 2 approved jobs is completed = 50%
+		self.assertEqual(ro.services[1].status, "Approved")
+		# Now 1 of 2 approved services is completed = 50%
 		self.assertEqual(ro.progress_percent, 50.0)
 
-		# Complete supplement job
-		ro.toggle_job_completion(job_id="JOB-2", is_completed=1)
+		# Complete supplement service
+		ro.toggle_service_completion(service_row_id=ro.services[1].name, is_completed=1)
 		ro.reload()
 		self.assertEqual(ro.progress_percent, 100.0)
 
@@ -342,7 +458,216 @@ class TestRepairOrder(ISMTestCase):
 		)
 		ro.reload()
 		self.assertEqual(release_res.get("status"), "success")
-		self.assertEqual(ro.status, "Billed / Paid")
+		self.assertEqual(ro.status, "Closed / Released")
 		self.assertEqual(ro.vehicle_released, 1)
 		self.assertEqual(ro.vehicle_location, "Released to Customer")
 		self.assertIsNotNone(ro.sales_invoice)
+
+	def test_unapproved_pickup_and_status_progression_blocked(self):
+		"""Verify that starting work, pulling car into bay, or advancing status without authorization is strictly blocked."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 70000,
+			"customer_concern": "Check engine light",
+			"services": [
+				{
+					"service_title": "Diagnostic Scan",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 150.0,
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		# 1. Calling pick_up_vehicle without customer approval must throw ValidationError
+		with self.assertRaises(frappe.ValidationError):
+			ro.pick_up_vehicle()
+
+		# 2. Directly setting vehicle_location to In Bay without customer approval must throw ValidationError
+		ro.vehicle_location = "In Bay / Being Serviced"
+		with self.assertRaises(frappe.ValidationError):
+			ro.save()
+		ro.reload()
+
+		# 3. Directly advancing status to Authorized - In Progress without customer approval must throw ValidationError
+		ro.status = "Authorized - In Progress"
+		with self.assertRaises(frappe.ValidationError):
+			ro.save()
+		ro.reload()
+
+	def test_unapproved_service_completion_blocked(self):
+		"""Verify that services cannot be marked completed unless customer has approved them."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 72000,
+			"customer_concern": "Suspension noise",
+			"services": [
+				{
+					"service_title": "Strut Replacement",
+					"status": "Pending Approval",
+					"labor_hours": 2.0,
+					"labor_rate": 120.0,
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		# 1. toggle_service_completion must throw ValidationError on unapproved service
+		service_row = ro.services[0]
+		with self.assertRaises(frappe.ValidationError):
+			ro.toggle_service_completion(service_row.name, 1)
+
+		# 2. Saving doc with is_completed=1 on unapproved service must throw ValidationError
+		ro.services[0].is_completed = 1
+		with self.assertRaises(frappe.ValidationError):
+			ro.save()
+
+	def test_module_level_authorize_jobs_and_guards(self):
+		"""Verify module-level authorize_jobs endpoint works, syncs services, and unblocks execution."""
+		from ism.ism.doctype.repair_order.repair_order import authorize_jobs
+
+		item = self.create_test_item("TEST-ALIGN-P", is_stock_item=0, standard_rate=120)
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 80000,
+			"services": [
+				{
+					"service_title": "Wheel Alignment",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 120.0,
+					"parts": json.dumps([{"item_code": item.name, "item_name": "Alignment Shim", "qty": 1, "rate": 20}]),
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		fake_signature = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+		res = authorize_jobs(
+			docname=ro.name,
+			approvals={"1": "Approved"},
+			channel="In-Person Signature",
+			signer_name="Alice Smith",
+			signature_image=fake_signature,
+		)
+		self.assertEqual(res.get("status"), "success")
+		self.assertEqual(res.get("approval_status"), "Approved")
+
+		ro.reload()
+		self.assertEqual(ro.approval_status, "Approved")
+		self.assertEqual(ro.services[0].status, "Approved")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+		self.assertEqual(ro.authorized_by, "Alice Smith")
+		self.assertIsNotNone(ro.audit_hash)
+		self.assertTrue(ro.signature_image.startswith("/files/sig_") or ro.signature_image.startswith("/private/files/sig_"))
+
+		# Bay pickup and service completion should now succeed
+		pickup_res = ro.pick_up_vehicle()
+		self.assertEqual(pickup_res.get("status"), "success")
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+
+		comp_res = ro.toggle_service_completion(ro.services[0].name, 1)
+		self.assertEqual(comp_res.get("status"), "success")
+		self.assertEqual(ro.progress_percent, 100.0)
+
+	def test_run_doc_method_authorize_jobs_with_extra_kwargs(self):
+		"""Verify that run_method works with extra keyword arguments like docname and numeric string IDs."""
+		item1 = self.create_test_item("TEST-P1-X", is_stock_item=0, standard_rate=50)
+		item2 = self.create_test_item("TEST-P2-X", is_stock_item=0, standard_rate=75)
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 85000,
+			"services": [
+				{
+					"service_title": "Brake Job",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": item1.name, "qty": 1, "rate": 50}]),
+				},
+				{
+					"service_title": "Tire Rotation",
+					"status": "Pending Approval",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": item2.name, "qty": 1, "rate": 75}]),
+				},
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		fake_sig = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+		# Call via ro.run_method with docname in kwargs (simulating Frappe's run_doc_method handler)
+		res = ro.run_method(
+			"authorize_jobs",
+			docname=ro.name,
+			approvals={"1": "Approved", "2": "Approved"},
+			channel="In-Person Signature",
+			signer_name="Prestiga-Biz",
+			signature_image=fake_sig,
+		)
+		self.assertEqual(res.get("status"), "success")
+		self.assertEqual(res.get("approval_status"), "Approved")
+
+		ro.reload()
+		self.assertEqual(ro.approval_status, "Approved")
+		self.assertEqual(ro.services[0].status, "Approved")
+		self.assertEqual(ro.services[1].status, "Approved")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+		self.assertEqual(ro.authorized_by, "Prestiga-Biz")
+		self.assertIsNotNone(ro.audit_hash)
+
+	def test_manual_advisor_approval_and_cascade(self):
+		"""Verify that advisor manually setting approval_status to 'Approved' on submitted doc cascades to services."""
+		item = self.create_test_item("TEST-P5-X", is_stock_item=0, standard_rate=120)
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 30000,
+			"status": "Pending Authorization",
+			"approval_status": "Draft",
+			"services": [
+				{
+					"service_title": "Engine Diagnostics",
+					"status": "Draft",
+					"labor_hours": 1.0,
+					"labor_rate": 120.0,
+					"parts": json.dumps([{"item_code": item.name, "qty": 1, "rate": 120}]),
+				},
+			],
+		})
+		ro.insert()
+		ro.submit()
+		self.track(ro)
+
+		# Advisor manually updates header approval_status to Approved and status to Authorized - In Progress
+		ro.approval_status = "Approved"
+		ro.status = "Authorized - In Progress"
+		ro.save(ignore_permissions=True)
+
+		ro.reload()
+		self.assertEqual(ro.status, "Authorized - In Progress")
+		self.assertEqual(ro.approval_status, "Approved")
+		self.assertEqual(ro.services[0].status, "Approved")
+
+		# Technician can work and pick up vehicle
+		ro.pick_up_vehicle()
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")

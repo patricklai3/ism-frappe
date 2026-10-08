@@ -33,10 +33,8 @@
   "total_bay_hours",
   "total_billed_hours",
   "vehicle_released",
-  "sec_jobs",
-  "jobs",
-  "sec_items",
-  "items",
+  "sec_services",
+  "services",
   "sec_time",
   "time_logs",
   "sec_totals",
@@ -261,28 +259,16 @@
    "read_only": 1
   },
   {
-   "fieldname": "sec_jobs",
+   "fieldname": "sec_services",
    "fieldtype": "Section Break",
-   "label": "Authorized Repair Jobs"
+   "label": "Services & Nested Parts"
   },
   {
    "allow_on_submit": 1,
-   "fieldname": "jobs",
+   "fieldname": "services",
    "fieldtype": "Table",
-   "label": "Repair Jobs",
-   "options": "Repair Order Job"
-  },
-  {
-   "fieldname": "sec_items",
-   "fieldtype": "Section Break",
-   "label": "Line Items (Parts, Labor & Sublet)"
-  },
-  {
-   "allow_on_submit": 1,
-   "fieldname": "items",
-   "fieldtype": "Table",
-   "label": "Line Items",
-   "options": "Repair Order Item"
+   "label": "Services",
+   "options": "Repair Order Service"
   },
   {
    "fieldname": "sec_time",

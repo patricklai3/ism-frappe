@@ -160,33 +160,81 @@ def get_public_quote_approval(token: str) -> dict:
 		if c:
 			company_data = c
 
-	# Build job hierarchy
-	jobs_list = []
-	for job in doc.jobs:
+	# Build service list from Repair Order services with nested parts
+	services_list = []
+	for s in getattr(doc, "services", []):
+		parts = getattr(s, "parts", [])
+		if isinstance(parts, str):
+			try:
+				parts = json.loads(parts) if parts else []
+			except Exception:
+				parts = []
+		elif not isinstance(parts, list):
+			parts = []
+
 		linked_items = [
 			{
-				"item_code": it.item_code,
-				"item_name": it.item_name,
-				"item_type": it.item_type,
-				"qty": flt(it.qty),
-				"rate": flt(it.rate),
-				"amount": flt(it.amount),
+				"item_code": p.get("item_code", ""),
+				"item_name": p.get("item_name", p.get("item_code", "")),
+				"item_type": "Stock Item",
+				"qty": flt(p.get("qty", 1.0)),
+				"rate": flt(p.get("rate", 0.0)),
+				"amount": flt(p.get("amount", 0.0)),
 			}
-			for it in doc.items
-			if it.job_id == job.job_id
+			for p in parts
 		]
 
-		jobs_list.append({
-			"name": job.name,
-			"job_id": job.job_id,
-			"job_title": job.job_title,
-			"job_category": job.job_category,
-			"estimated_total": flt(job.estimated_total),
-			"authorized_amount": flt(job.authorized_amount),
-			"status": job.status,
-			"is_supplement": cint(job.is_supplement),
+		services_list.append({
+			"name": s.name,
+			"idx": s.idx,
+			"job_id": s.name,
+			"job_title": s.service_title,
+			"service_title": s.service_title,
+			"job_category": s.category,
+			"category": s.category,
+			"estimated_total": flt(s.total_amount),
+			"authorized_amount": flt(s.total_amount) if s.status == "Approved" else 0.0,
+			"labor_hours": flt(s.labor_hours),
+			"labor_rate": flt(s.labor_rate),
+			"labor_amount": flt(s.labor_amount),
+			"parts": parts,
+			"parts_total": flt(s.parts_total),
+			"total_amount": flt(s.total_amount),
+			"status": s.status,
+			"is_supplement": cint(s.is_supplement),
 			"items": linked_items,
 		})
+
+	# Backward compatibility fallback if legacy jobs still exist
+	if not services_list and hasattr(doc, "jobs") and doc.jobs:
+		for job in doc.jobs:
+			linked_items = [
+				{
+					"item_code": it.item_code,
+					"item_name": it.item_name,
+					"item_type": getattr(it, "item_type", "Stock Item"),
+					"qty": flt(it.qty),
+					"rate": flt(it.rate),
+					"amount": flt(it.amount),
+				}
+				for it in getattr(doc, "items", [])
+				if getattr(it, "job_id", None) == job.job_id
+			]
+			services_list.append({
+				"name": job.name,
+				"idx": getattr(job, "idx", 1),
+				"job_id": getattr(job, "job_id", job.name),
+				"job_title": job.job_title,
+				"service_title": job.job_title,
+				"job_category": getattr(job, "job_category", "Mechanical"),
+				"category": getattr(job, "job_category", "Mechanical"),
+				"estimated_total": flt(job.estimated_total),
+				"authorized_amount": flt(getattr(job, "authorized_amount", 0.0)),
+				"status": job.status,
+				"is_supplement": cint(getattr(job, "is_supplement", 0)),
+				"items": linked_items,
+			})
+
 
 	settings = frappe.get_single("ISM Settings")
 	disclaimer = settings.disclaimer_text or _(
@@ -210,7 +258,8 @@ def get_public_quote_approval(token: str) -> dict:
 		},
 		"vehicle": vehicle_data,
 		"company": company_data,
-		"jobs": jobs_list,
+		"services": services_list,
+		"jobs": services_list,
 		"net_total": flt(doc.net_total),
 		"tax_total": flt(doc.total_taxes_and_charges),
 		"grand_total": flt(doc.grand_total),
