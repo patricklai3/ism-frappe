@@ -30,8 +30,12 @@ frappe.ui.form.on("Repair Order", {
 		frm.trigger("render_progress_indicator");
 
 		if (!frm.is_new() && frm.doc.docstatus !== 2) {
-			// 1. Service Packages & Supplements
-			if (!frm.doc.vehicle_released) {
+			const is_approved = frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved";
+			const is_work_completed = frm.doc.status === "Work Completed" || frm.doc.vehicle_location === "Completed / Parked in Lot";
+			const is_released = !!frm.doc.vehicle_released || frm.doc.status === "Closed / Released";
+
+			// 1. Service Packages & Supplements (available before vehicle is released)
+			if (!is_released) {
 				frm.add_custom_button(__("Add Service Package"), () => {
 					frm.trigger("open_service_package_dialog");
 				}, __("Jobs & Packages"));
@@ -41,35 +45,8 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Jobs & Packages"));
 			}
 
-			// 2. Bay Shop Floor Execution Buttons
-			if (frm.doc.vehicle_location !== "In Bay / Being Serviced" && !frm.doc.vehicle_released) {
-				frm.add_custom_button(__("Pick Up Vehicle (Into Bay)"), () => {
-					if (frm.doc.approval_status !== "Approved" && frm.doc.approval_status !== "Partially Approved") {
-						frappe.msgprint({
-							title: __("Authorization Block"),
-							message: __("Cannot pull vehicle into bay. Customer authorization is strictly required before starting repair work.<br><br>Please obtain authorization via the <b>Customer Approval</b> actions first."),
-							indicator: "orange",
-						});
-						return;
-					}
-					frm.call({
-						doc: frm.doc,
-						method: "pick_up_vehicle",
-					}).then(() => frm.reload_doc());
-				}, __("Bay Execution"));
-			}
-
-			if (frm.doc.vehicle_location === "In Bay / Being Serviced" && !frm.doc.vehicle_released) {
-				frm.add_custom_button(__("Park Vehicle (Lot / Ready)"), () => {
-					frm.call({
-						doc: frm.doc,
-						method: "park_vehicle",
-					}).then(() => frm.reload_doc());
-				}, __("Bay Execution"));
-			}
-
-			// 3. Customer Approvals
-			if (!frm.doc.vehicle_released) {
+			// 2. Customer Approvals (available before release so authorization can be obtained or updated)
+			if (!is_released) {
 				frm.add_custom_button(__("Send Approval Link"), () => {
 					frm.trigger("open_send_approval_dialog");
 				}, __("Customer Approval"));
@@ -110,8 +87,8 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Customer Approval"));
 			}
 
-			// 4. Procurement & Material Request
-			if (!frm.doc.vehicle_released) {
+			// 3. Procurement & Material Request (Gradual disclosure: only once customer authorization is on file)
+			if (is_approved && !is_released) {
 				frm.add_custom_button(__("Create Material Request"), () => {
 					frm.call("create_material_request").then((r) => {
 						if (r && r.message && r.message.material_request) {
@@ -124,8 +101,29 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Inventory"));
 			}
 
-			// 5. Billing & Release Action
-			if (!frm.doc.vehicle_released && frm.doc.status !== "Closed / Released") {
+			// 4. Bay Shop Floor Execution Buttons (Gradual disclosure: strictly only when customer approved)
+			if (is_approved && !is_released) {
+				if (frm.doc.vehicle_location !== "In Bay / Being Serviced") {
+					frm.add_custom_button(__("Pick Up Vehicle (Into Bay)"), () => {
+						frm.call({
+							doc: frm.doc,
+							method: "pick_up_vehicle",
+						}).then(() => frm.reload_doc());
+					}, __("Bay Execution"));
+				}
+
+				if (frm.doc.vehicle_location === "In Bay / Being Serviced") {
+					frm.add_custom_button(__("Park Vehicle (Lot / Ready)"), () => {
+						frm.call({
+							doc: frm.doc,
+							method: "park_vehicle",
+						}).then(() => frm.reload_doc());
+					}, __("Bay Execution"));
+				}
+			}
+
+			// 5. Billing & Release Action (Gradual disclosure: strictly only when approved AND work completed)
+			if (is_approved && is_work_completed && !is_released) {
 				frm.add_custom_button(__("Process Payment & Release"), () => {
 					frm.trigger("open_payment_modal");
 				}).addClass("btn-primary");
@@ -160,11 +158,11 @@ frappe.ui.form.on("Repair Order", {
 	},
 
 	approval_status(frm) {
-		if (frm.doc.approval_status === "Approved") {
+		if (frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved") {
 			if (frm.doc.status === "Draft Estimate" || frm.doc.status === "Pending Authorization") {
 				frm.set_value("status", "Authorized - In Progress");
 			}
-			if (frm.doc.services) {
+			if (frm.doc.approval_status === "Approved" && frm.doc.services) {
 				frm.doc.services.forEach((s) => {
 					if (s.status !== "Declined") {
 						frappe.model.set_value(s.doctype, s.name, "status", "Approved");

@@ -149,6 +149,10 @@ class RepairOrder(Document):
 						s.status = "Approved"
 						break
 
+		if self.approval_status in ["Approved", "Partially Approved"]:
+			if self.status in ["Draft Estimate", "Pending Authorization", "", None]:
+				self.status = "Authorized - In Progress"
+
 	def before_update_after_submit(self):
 		self.validate()
 
@@ -395,7 +399,7 @@ class RepairOrder(Document):
 				)
 
 	@frappe.whitelist()
-	def pick_up_vehicle(self, *args, **kwargs):
+	def pick_up_vehicle(self, **kwargs):
 		"""Technician pulls vehicle from lot into service bay."""
 		has_approved = any(s.status == "Approved" for s in self.services)
 		if self.approval_status == "Approved":
@@ -423,7 +427,7 @@ class RepairOrder(Document):
 		return {"status": "success", "vehicle_location": self.vehicle_location, "picked_up_at": self.picked_up_at}
 
 	@frappe.whitelist()
-	def park_vehicle(self, *args, **kwargs):
+	def park_vehicle(self, **kwargs):
 		"""Technician parks vehicle back in lot after completing work."""
 		self.parked_at = now_datetime()
 		self.parked_by = frappe.session.user
@@ -443,8 +447,12 @@ class RepairOrder(Document):
 		return {"status": "success", "vehicle_location": self.vehicle_location, "total_bay_hours": self.total_bay_hours}
 
 	@frappe.whitelist()
-	def toggle_service_completion(self, service_row_id, is_completed, *args, **kwargs):
+	def toggle_service_completion(self, service_row_id=None, is_completed=None, **kwargs):
 		"""Toggle individual service completion with timestamping."""
+		service_row_id = service_row_id or kwargs.get("service_row_id")
+		if is_completed is None:
+			is_completed = kwargs.get("is_completed", 0)
+
 		target_service = None
 		for s in self.services:
 			if str(s.name) == str(service_row_id) or str(s.idx) == str(service_row_id) or str(s.service_title) == str(service_row_id):
@@ -490,11 +498,11 @@ class RepairOrder(Document):
 
 	# Backward compatibility alias
 	@frappe.whitelist()
-	def toggle_job_completion(self, job_id, is_completed, *args, **kwargs):
-		return self.toggle_service_completion(job_id, is_completed, *args, **kwargs)
+	def toggle_job_completion(self, job_id=None, is_completed=None, **kwargs):
+		return self.toggle_service_completion(service_row_id=job_id, is_completed=is_completed, **kwargs)
 
 	@frappe.whitelist()
-	def generate_approval_token(self, *args, **kwargs):
+	def generate_approval_token(self, **kwargs):
 		"""Generate token for remote customer signature portal."""
 		self.approval_token = secrets.token_urlsafe(32)
 		self.approval_token_expiry = add_days(now_datetime(), 2)
@@ -503,11 +511,19 @@ class RepairOrder(Document):
 		return {"approval_token": self.approval_token, "expiry": self.approval_token_expiry}
 
 	@frappe.whitelist()
-	def authorize_jobs(self, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, *args, **kwargs):
+	def authorize_jobs(self, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, **kwargs):
 		"""
 		Apply per-service customer decisions (Approved/Declined) and audit evidence.
 		approvals: {"1": "Approved", "Brake Service": "Declined"}
 		"""
+		# Defensive unwrapping in case Frappe or caller passed wrapped dict in approvals
+		if isinstance(approvals, dict) and ("approvals" in approvals or "channel" in approvals or "signer_name" in approvals):
+			channel = approvals.get("channel") or channel
+			signer_name = approvals.get("signer_name") or signer_name
+			signature_image = approvals.get("signature_image") or signature_image
+			notes = approvals.get("notes") or notes
+			approvals = approvals.get("approvals")
+
 		if isinstance(approvals, str):
 			try:
 				approvals = json.loads(approvals)
@@ -600,8 +616,9 @@ class RepairOrder(Document):
 		}
 
 	@frappe.whitelist()
-	def add_service_package(self, service_package, *args, **kwargs):
+	def add_service_package(self, service_package=None, **kwargs):
 		"""Expand canned service package into a new Service row with nested Parts."""
+		service_package = service_package or kwargs.get("service_package")
 		pkg = frappe.get_doc("Service Package", service_package)
 		is_supp = 1 if (self.docstatus == 1 or any(s.status == "Approved" for s in self.services)) else 0
 
@@ -653,9 +670,9 @@ class RepairOrder(Document):
 		return {"status": "success", "service": pkg.package_name}
 
 	@frappe.whitelist()
-	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, parts=None, notes=None, job_title=None, *args, **kwargs):
+	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, parts=None, notes=None, job_title=None, **kwargs):
 		"""Add a supplemental repair service to an existing Repair Order."""
-		title = service_title or job_title or "Supplemental Service"
+		title = service_title or job_title or kwargs.get("service_title") or kwargs.get("job_title") or "Supplemental Service"
 		hours = flt(labor_hours)
 		rate = flt(labor_rate) or 120.0
 		labor_amount = flt(hours * rate, 2)
@@ -707,10 +724,13 @@ class RepairOrder(Document):
 		return {"status": "success", "service_title": title}
 
 	@frappe.whitelist()
-	def save_service_as_package(self, service_row_id, package_name=None, *args, **kwargs):
+	def save_service_as_package(self, service_row_id=None, package_name=None, **kwargs):
 		"""
 		Save a one-off repair service and its nested parts as a reusable Service Package.
 		"""
+		service_row_id = service_row_id or kwargs.get("service_row_id")
+		package_name = package_name or kwargs.get("package_name")
+
 		target = None
 		for s in self.services:
 			if str(s.name) == str(service_row_id) or str(s.idx) == str(service_row_id) or str(s.service_title) == str(service_row_id):
@@ -763,7 +783,7 @@ class RepairOrder(Document):
 		}
 
 	@frappe.whitelist()
-	def process_payment_and_release(self, payment_method="Debit / Interac", paid_amount=None, odometer_out=None, *args, **kwargs):
+	def process_payment_and_release(self, payment_method="Debit / Interac", paid_amount=None, odometer_out=None, **kwargs):
 		"""
 		Finalize billing audit:
 		1. Validates odometer out
@@ -771,6 +791,11 @@ class RepairOrder(Document):
 		3. Creates matching Payment Entry
 		4. Marks vehicle released, stamps vehicle last service specs, and submits RO
 		"""
+		payment_method = kwargs.get("payment_method") or payment_method
+		if paid_amount is None and "paid_amount" in kwargs:
+			paid_amount = kwargs.get("paid_amount")
+		if odometer_out is None and "odometer_out" in kwargs:
+			odometer_out = kwargs.get("odometer_out")
 		if odometer_out is not None:
 			self.odometer_out = cint(odometer_out)
 		self._validate_odometer()
@@ -921,7 +946,7 @@ class RepairOrder(Document):
 		}
 
 	@frappe.whitelist()
-	def create_material_request(self, *args, **kwargs):
+	def create_material_request(self, **kwargs):
 		"""Create background ERPNext Material Request for all parts in approved services."""
 		approved_services = [s for s in self.services if s.status == "Approved"]
 		if not approved_services:
@@ -1030,28 +1055,28 @@ def get_service_package_details(service_package):
 
 
 @frappe.whitelist()
-def save_service_as_package(service_row_id, package_name=None, docname=None, *args, **kwargs):
+def save_service_as_package(service_row_id=None, package_name=None, docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.save_service_as_package(service_row_id, package_name, *args, **kwargs)
+	return ro.save_service_as_package(service_row_id=service_row_id, package_name=package_name, **kwargs)
 
 
 @frappe.whitelist()
-def toggle_service_completion(service_row_id, is_completed, docname=None, *args, **kwargs):
+def toggle_service_completion(service_row_id=None, is_completed=None, docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.toggle_service_completion(service_row_id, is_completed, *args, **kwargs)
+	return ro.toggle_service_completion(service_row_id=service_row_id, is_completed=is_completed, **kwargs)
 
 
 @frappe.whitelist()
-def toggle_job_completion(job_id, is_completed, docname=None, *args, **kwargs):
-	return toggle_service_completion(job_id, is_completed, docname, *args, **kwargs)
+def toggle_job_completion(job_id=None, is_completed=None, docname=None, **kwargs):
+	return toggle_service_completion(service_row_id=job_id, is_completed=is_completed, docname=docname, **kwargs)
 
 
 @frappe.whitelist()
-def authorize_jobs(docname=None, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, *args, **kwargs):
+def authorize_jobs(docname=None, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
@@ -1061,65 +1086,64 @@ def authorize_jobs(docname=None, approvals=None, channel="Remote Web Link", sign
 		signer_name=signer_name,
 		signature_image=signature_image,
 		notes=notes,
-		*args,
 		**kwargs,
 	)
 
 
 @frappe.whitelist()
-def pick_up_vehicle(docname=None, *args, **kwargs):
+def pick_up_vehicle(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.pick_up_vehicle(*args, **kwargs)
+	return ro.pick_up_vehicle(**kwargs)
 
 
 @frappe.whitelist()
-def park_vehicle(docname=None, *args, **kwargs):
+def park_vehicle(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.park_vehicle(*args, **kwargs)
+	return ro.park_vehicle(**kwargs)
 
 
 @frappe.whitelist()
-def add_service_package(service_package, docname=None, *args, **kwargs):
+def add_service_package(service_package=None, docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.add_service_package(service_package, *args, **kwargs)
+	return ro.add_service_package(service_package=service_package, **kwargs)
 
 
 @frappe.whitelist()
-def add_supplement(service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, notes=None, parts=None, docname=None, job_title=None, *args, **kwargs):
+def add_supplement(service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, notes=None, parts=None, docname=None, job_title=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.add_supplement(service_title or job_title, category, labor_hours, labor_rate, parts, notes, *args, **kwargs)
+	return ro.add_supplement(service_title=service_title, category=category, labor_hours=labor_hours, labor_rate=labor_rate, parts=parts, notes=notes, job_title=job_title, **kwargs)
 
 
 @frappe.whitelist()
-def process_payment_and_release(payment_method="Debit / Interac", paid_amount=None, odometer_out=None, docname=None, *args, **kwargs):
+def process_payment_and_release(payment_method="Debit / Interac", paid_amount=None, odometer_out=None, docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.process_payment_and_release(payment_method, paid_amount, odometer_out, *args, **kwargs)
+	return ro.process_payment_and_release(payment_method=payment_method, paid_amount=paid_amount, odometer_out=odometer_out, **kwargs)
 
 
 @frappe.whitelist()
-def generate_approval_token(docname=None, *args, **kwargs):
+def generate_approval_token(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.generate_approval_token(*args, **kwargs)
+	return ro.generate_approval_token(**kwargs)
 
 
 @frappe.whitelist()
-def create_material_request(docname=None, *args, **kwargs):
+def create_material_request(docname=None, **kwargs):
 	if not docname:
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
-	return ro.create_material_request(*args, **kwargs)
+	return ro.create_material_request(**kwargs)
 
 
 @frappe.whitelist()

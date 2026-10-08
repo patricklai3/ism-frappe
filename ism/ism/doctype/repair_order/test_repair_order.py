@@ -671,3 +671,78 @@ class TestRepairOrder(ISMTestCase):
 		ro.pick_up_vehicle()
 		ro.reload()
 		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+
+	def test_authorize_jobs_with_wrapped_dict_and_json_string(self):
+		"""Verify authorize_jobs unwraps wrapped dict and parses json string approvals correctly."""
+		item = self.create_test_item("TEST-P6-X", is_stock_item=0, standard_rate=150)
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 45000,
+			"status": "Draft Estimate",
+			"approval_status": "Pending Approval",
+			"services": [
+				{
+					"service_title": "Transmission Fluid Exchange",
+					"status": "Draft",
+					"labor_hours": 1.5,
+					"labor_rate": 120.0,
+					"parts": json.dumps([{"item_code": item.name, "qty": 4, "rate": 25}]),
+				},
+			],
+		})
+		ro.insert()
+		ro.submit()
+		self.track(ro)
+
+		fake_sig = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+		# Simulate handler passing the entire request payload as a wrapped dictionary in the first parameter
+		wrapped_payload = {
+			"docname": ro.name,
+			"approvals": json.dumps({"1": "Approved", "JOB-1": "Approved"}),
+			"channel": "In-Person Signature",
+			"signer_name": "Prestiga-Biz",
+			"signature_image": fake_sig,
+			"notes": "Customer signed on shop tablet",
+		}
+		res = ro.authorize_jobs(wrapped_payload)
+		self.assertEqual(res.get("status"), "success")
+		self.assertEqual(res.get("approval_status"), "Approved")
+
+		ro.reload()
+		self.assertEqual(ro.approval_status, "Approved")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+		self.assertEqual(ro.authorized_by, "Prestiga-Biz")
+		self.assertEqual(ro.verbal_notes, "Customer signed on shop tablet")
+		self.assertEqual(ro.services[0].status, "Approved")
+		self.assertIsNotNone(ro.audit_hash)
+
+	def test_method_signatures_do_not_contain_args_parameter(self):
+		"""Verify that no whitelisted controller methods contain 'args' in their parameters,
+		which would cause Frappe's run_doc_method to fail keyword unpacking."""
+		import inspect
+		from ism.ism.doctype.repair_order.repair_order import RepairOrder
+
+		methods_to_check = [
+			"authorize_jobs",
+			"pick_up_vehicle",
+			"park_vehicle",
+			"toggle_service_completion",
+			"toggle_job_completion",
+			"generate_approval_token",
+			"add_service_package",
+			"add_supplement",
+			"save_service_as_package",
+			"process_payment_and_release",
+			"create_material_request",
+		]
+
+		for method_name in methods_to_check:
+			fn = getattr(RepairOrder, method_name, None)
+			self.assertIsNotNone(fn, f"Method {method_name} should exist on RepairOrder")
+			params = list(inspect.signature(fn).parameters.keys())
+			self.assertNotIn("args", params, f"Method {method_name} should not have 'args' parameter (e.g. *args)")
+
