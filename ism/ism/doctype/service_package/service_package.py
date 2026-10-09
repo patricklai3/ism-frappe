@@ -24,7 +24,7 @@ class ServicePackage(Document):
 		if not self.is_flat_rate and flt(self.standard_labor_hours) and flt(self.hourly_rate):
 			self.service_rate = flt(self.standard_labor_hours) * flt(self.hourly_rate)
 
-		if not getattr(self, "is_mobile_capable", 0) and getattr(self, "tesla_manual_url", None):
+		if getattr(self, "tesla_manual_url", None):
 			try:
 				from ism.utils.tesla_manual import get_mobile_capability_from_manifest
 				dep_info = get_mobile_capability_from_manifest(
@@ -32,10 +32,20 @@ class ServicePackage(Document):
 					getattr(self, "doc_guid", None),
 					getattr(self, "correction_code", None),
 				)
-				if dep_info and dep_info.get("is_mobile_capable"):
-					self.is_mobile_capable = dep_info["is_mobile_capable"]
+				if dep_info:
+					if not getattr(self, "is_mobile_capable", 0) and dep_info.get("is_mobile_capable"):
+						self.is_mobile_capable = dep_info["is_mobile_capable"]
+					if not getattr(self, "rh_correction_code", None) and dep_info.get("rh_correction_code"):
+						self.rh_correction_code = dep_info["rh_correction_code"]
+					if not getattr(self, "is_symmetrical", 0) and dep_info.get("is_symmetrical"):
+						self.is_symmetrical = 1
 			except Exception:
 				pass
+
+		if not getattr(self, "is_symmetrical", 0) and self.package_name:
+			import re
+			if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', self.package_name, re.IGNORECASE):
+				self.is_symmetrical = 1
 
 		self.ensure_service_item()
 

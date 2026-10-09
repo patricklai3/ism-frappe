@@ -6,12 +6,26 @@ document.addEventListener("DOMContentLoaded", () => {
   const openIsmLink = document.getElementById("open-ism-link");
 
   chrome.runtime.sendMessage({ action: "GET_CONTEXT" }, (context) => {
+    if (chrome.runtime.lastError) {}
     const activeRoName = context?.active_ro?.name;
-    const origin = context?.ism_origin || "http://localhost:8000";
+    let origin = context?.ism_origin || "http://localhost:8000";
+    if (origin.includes("tesla.com")) {
+      origin = "http://localhost:8000";
+    }
 
-    chrome.runtime.sendMessage({ action: "FETCH_ACTIVE_ROS" }, (res) => {
+    chrome.runtime.sendMessage({ action: "FETCH_ACTIVE_ROS", origin: origin }, (res) => {
+      if (chrome.runtime.lastError) {}
       roSelect.innerHTML = "";
       const orders = res?.orders || [];
+
+      if (res?.error) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "Unable to connect to ISM";
+        roSelect.appendChild(opt);
+        roVehicleEl.textContent = res.error;
+        return;
+      }
 
       if (orders.length === 0) {
         const opt = document.createElement("option");
@@ -47,13 +61,17 @@ document.addEventListener("DOMContentLoaded", () => {
         // Save selected RO into extension context
         chrome.runtime.sendMessage({
           action: "SYNC_ISM_CONTEXT",
-          ro: selectedOrder
+          ro: selectedOrder,
+          origin: origin
+        }, () => {
+          if (chrome.runtime.lastError) {}
         });
       }
     });
 
     roSelect.addEventListener("change", () => {
-      chrome.runtime.sendMessage({ action: "FETCH_ACTIVE_ROS" }, (res) => {
+      chrome.runtime.sendMessage({ action: "FETCH_ACTIVE_ROS", origin: origin }, (res) => {
+        if (chrome.runtime.lastError) {}
         const orders = res?.orders || [];
         const chosen = orders.find((o) => o.name === roSelect.value) || { name: roSelect.value };
         if (chosen) {
@@ -61,13 +79,16 @@ document.addEventListener("DOMContentLoaded", () => {
           roVehicleEl.textContent = `${chosen.customer || "Customer"} | ${vInfo || "Tesla"}`;
           chrome.runtime.sendMessage({
             action: "SYNC_ISM_CONTEXT",
-            ro: chosen
+            ro: chosen,
+            origin: origin
+          }, () => {
+            if (chrome.runtime.lastError) {}
           });
         }
       });
     });
 
-    openIsmLink.href = `${origin}/desk#List/Repair%20Order/List`;
+    openIsmLink.href = `${origin}/app/repair-order`;
     openIsmLink.addEventListener("click", (e) => {
       e.preventDefault();
       chrome.tabs.create({ url: openIsmLink.href });

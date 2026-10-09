@@ -428,14 +428,48 @@ def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None
 				is_mobile = 0
 				mobile_level = "No"
 
+			rh_cc = str(target.get("rh-correction-code") or "").strip() or None
 			return {
 				"is_mobile_capable": is_mobile,
 				"mobile_service_level": mobile_level,
+				"rh_correction_code": rh_cc,
+				"is_symmetrical": 1 if rh_cc else 0,
 			}
 	except Exception:
 		pass
 
 	return None
+
+
+def swap_side_in_title(title, to_side="RH"):
+	"""Swap symmetrical side indicator in title (e.g. LH -> RH or RH -> LH)."""
+	if not title:
+		return title
+
+	to_side_upper = str(to_side).strip().upper()
+	if to_side_upper == "RH":
+		new_title = re.sub(r'\bLH\b', 'RH', title)
+		new_title = re.sub(r'\bLeft\s+Hand\b', 'Right Hand', new_title, flags=re.IGNORECASE)
+		new_title = re.sub(r'\bLeft\b(?!\s+(?:Turn|Foot))', 'Right', new_title, flags=re.IGNORECASE)
+		return new_title
+	elif to_side_upper == "LH":
+		new_title = re.sub(r'\bRH\b', 'LH', title)
+		new_title = re.sub(r'\bRight\s+Hand\b', 'Left Hand', new_title, flags=re.IGNORECASE)
+		new_title = re.sub(r'\bRight\b', 'Left', new_title, flags=re.IGNORECASE)
+		return new_title
+	return title
+
+
+def detect_service_side(title, correction_code=None, rh_correction_code=None):
+	"""Detect whether a title or correction code represents LH, RH, or None."""
+	if rh_correction_code and correction_code and str(correction_code).strip() == str(rh_correction_code).strip():
+		return "RH"
+	if title:
+		if re.search(r'\bRH\b|Right Hand', title, re.IGNORECASE):
+			return "RH"
+		if re.search(r'\bLH\b|Left Hand', title, re.IGNORECASE):
+			return "LH"
+	return "None"
 
 
 def parse_tesla_procedure_html(html_content, url=""):
@@ -446,6 +480,8 @@ def parse_tesla_procedure_html(html_content, url=""):
 	data = {
 		"title": "",
 		"correction_code": "",
+		"rh_correction_code": "",
+		"is_symmetrical": 0,
 		"frt": 0.0,
 		"doc_guid": "",
 		"tesla_manual_url": url,
@@ -527,6 +563,9 @@ def parse_tesla_procedure_html(html_content, url=""):
 		if dep_info is not None:
 			is_mobile_capable = dep_info["is_mobile_capable"]
 			mobile_level = dep_info["mobile_service_level"]
+			if dep_info.get("rh_correction_code"):
+				data["rh_correction_code"] = dep_info["rh_correction_code"]
+				data["is_symmetrical"] = 1
 
 	# B) Fallback to HTML classes and indicator elements if manifest was not conclusive
 	if mobile_level in ("No", "Unknown", None):
@@ -544,5 +583,10 @@ def parse_tesla_procedure_html(html_content, url=""):
 
 	data["is_mobile_capable"] = is_mobile_capable
 	data["mobile_service_level"] = mobile_level
+
+	# 8. Symmetrical Detection
+	if not data.get("is_symmetrical") and data.get("title"):
+		if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', data["title"], re.IGNORECASE):
+			data["is_symmetrical"] = 1
 
 	return data

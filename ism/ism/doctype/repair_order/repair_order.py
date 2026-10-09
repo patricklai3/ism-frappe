@@ -922,8 +922,11 @@ class RepairOrder(Document):
 
 	@frappe.whitelist()
 	def add_service_package(self, service_package=None, **kwargs):
-		"""Expand canned service package into a new Service row with nested Parts."""
+		"""Expand canned service package into new Service row(s) with nested Parts."""
+		from ism.utils.tesla_manual import swap_side_in_title
+
 		if isinstance(service_package, dict):
+			kwargs.update(service_package)
 			service_package = service_package.get("service_package")
 		service_package = service_package or kwargs.get("service_package")
 		pkg = frappe.get_doc("Service Package", service_package)
@@ -935,23 +938,19 @@ class RepairOrder(Document):
 		)
 		is_supp = 1 if (cint(kwargs.get("is_supplement", 0)) or has_prior_authorization) else 0
 
-		parts_list = []
-		parts_total = 0.0
-		for row in pkg.items:
-			item_doc = frappe.get_cached_doc("Item", row.item_code)
-			qty = flt(row.qty) or 1.0
-			rate = flt(row.rate)
-			amt = flt(qty * rate, 2)
-			parts_total += amt
-			parts_list.append({
-				"item_code": row.item_code,
-				"item_name": row.item_name or item_doc.item_name,
-				"qty": qty,
-				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
-				"rate": rate,
-				"amount": amt,
-				"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
-			})
+		side_param = str(kwargs.get("side") or "").strip().lower()
+		is_symm = cint(getattr(pkg, "is_symmetrical", 0))
+		rh_code = getattr(pkg, "rh_correction_code", None) or getattr(pkg, "correction_code", None)
+
+		sides_to_add = []
+		if side_param == "both" and is_symm:
+			sides_to_add.append({"side": "LH", "title": pkg.package_name, "code": getattr(pkg, "correction_code", None)})
+			sides_to_add.append({"side": "RH", "title": swap_side_in_title(pkg.package_name, "RH"), "code": rh_code})
+		elif side_param == "rh" and is_symm:
+			sides_to_add.append({"side": "RH", "title": swap_side_in_title(pkg.package_name, "RH"), "code": rh_code})
+		else:
+			pos = "LH" if is_symm else "None"
+			sides_to_add.append({"side": pos, "title": pkg.package_name, "code": getattr(pkg, "correction_code", None)})
 
 		labor_hours = flt(pkg.standard_labor_hours)
 		is_flat = cint(pkg.is_flat_rate)
@@ -962,23 +961,169 @@ class RepairOrder(Document):
 			labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
 			labor_amount = flt(labor_hours * labor_rate, 2)
 
-		self.append("services", {
-			"service_package": pkg.name,
-			"correction_code": getattr(pkg, "correction_code", None),
-			"service_title": pkg.package_name,
+		added_titles = []
+		for entry in sides_to_add:
+			cur_side = entry["side"]
+			cur_title = entry["title"]
+			cur_code = entry["code"]
+
+			# Skip if this service side is already on this repair order
+			if any(
+				(s.service_title and s.service_title.strip().lower() == cur_title.strip().lower())
+				or (pkg.name and s.service_package == pkg.name and getattr(s, "service_position", "") == cur_side and cur_side not in ("None", "Both", ""))
+				for s in self.services
+			):
+				continue
+
+			parts_list = []
+			parts_total = 0.0
+			for row in pkg.items:
+				row_side = getattr(row, "side", None) or "Both"
+				if cur_side in ("Both", "None") or row_side in ("Both", cur_side):
+					item_doc = frappe.get_cached_doc("Item", row.item_code)
+					qty = flt(row.qty) or 1.0
+					rate = flt(row.rate)
+					amt = flt(qty * rate, 2)
+					parts_total += amt
+					parts_list.append({
+						"item_code": row.item_code,
+						"item_name": row.item_name or item_doc.item_name,
+						"qty": qty,
+						"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+						"rate": rate,
+						"amount": amt,
+						"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+					})
+
+			self.append("services", {
+				"service_package": pkg.name,
+				"correction_code": cur_code,
+				"service_title": cur_title,
+				"service_position": cur_side,
+				"status": "Estimating",
+				"is_flat_rate": is_flat,
+				"labor_hours": labor_hours,
+				"labor_rate": labor_rate,
+				"labor_amount": labor_amount,
+				"parts": json.dumps(parts_list),
+				"parts_total": parts_total,
+				"total_amount": flt(labor_amount + parts_total, 2),
+				"parts_html": _render_parts_html(parts_list) if parts_list else "",
+				"is_supplement": is_supp,
+				"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
+				"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
+				"advisor_notes": kwargs.get("advisor_notes", "") or "",
+			})
+			added_titles.append(cur_title)
+
+		if is_supp:
+			if any(s.status == "Approved" for s in self.services):
+				self.approval_status = "Partially Approved"
+			else:
+				self.approval_status = "Pending Approval"
+
+		self.save(ignore_permissions=True)
+		return {"status": "success", "service": ", ".join(added_titles)}
+
+	@frappe.whitelist()
+	def duplicate_service_for_opposite_side(self, service_row_id=None, **kwargs):
+		"""Duplicate a service row for the opposite side (e.g. LH -> RH or RH -> LH)."""
+		from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
+
+		if not service_row_id:
+			frappe.throw(_("Service Row ID is required."))
+
+		target = None
+		for s in self.services:
+			if s.name == service_row_id or str(getattr(s, "idx", "")) == str(service_row_id):
+				target = s
+				break
+
+		if not target:
+			frappe.throw(_("Service row '{0}' not found on this Repair Order.").format(service_row_id))
+
+		curr_pos = getattr(target, "service_position", "") or detect_service_side(target.service_title)
+		opposite_pos = "RH" if curr_pos == "LH" else ("LH" if curr_pos == "RH" else "RH")
+		new_title = swap_side_in_title(target.service_title, opposite_pos)
+
+		# Check if opposite side service already exists
+		for s in self.services:
+			if (s.service_title and s.service_title.strip().lower() == new_title.strip().lower()) or (
+				target.service_package and s.service_package == target.service_package and getattr(s, "service_position", "") == opposite_pos
+			):
+				frappe.throw(_("Opposite side service '{0}' is already present on this Repair Order.").format(new_title))
+
+		pkg = None
+		if target.service_package and frappe.db.exists("Service Package", target.service_package):
+			pkg = frappe.get_doc("Service Package", target.service_package)
+
+		# Determine opposite correction code
+		new_code = target.correction_code
+		if opposite_pos == "RH":
+			if pkg and getattr(pkg, "rh_correction_code", None):
+				new_code = pkg.rh_correction_code
+		elif opposite_pos == "LH":
+			if pkg and getattr(pkg, "correction_code", None):
+				new_code = pkg.correction_code
+
+		# Determine parts for opposite side
+		parts_list = []
+		parts_total = 0.0
+		if pkg and pkg.items:
+			for item in pkg.items:
+				item_side = getattr(item, "side", None) or "Both"
+				if item_side in ("Both", opposite_pos):
+					item_doc = frappe.get_cached_doc("Item", item.item_code)
+					qty = flt(item.qty) or 1.0
+					rate = flt(item.rate)
+					amt = flt(qty * rate, 2)
+					parts_total += amt
+					parts_list.append({
+						"item_code": item.item_code,
+						"item_name": item.item_name or item_doc.item_name,
+						"qty": qty,
+						"uom": getattr(item, "uom", None) or item_doc.stock_uom or "Nos",
+						"rate": rate,
+						"amount": amt,
+						"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+					})
+		else:
+			try:
+				old_parts = json.loads(target.parts) if isinstance(target.parts, str) else (target.parts or [])
+				for p in old_parts:
+					p_copy = dict(p)
+					p_copy["item_name"] = swap_side_in_title(p_copy.get("item_name", ""), opposite_pos)
+					parts_list.append(p_copy)
+					parts_total += flt(p_copy.get("amount", 0))
+			except Exception:
+				parts_list = []
+
+		has_prior_authorization = bool(
+			self.authorized_at
+			or any(s.status == "Approved" for s in self.services)
+			or self.approval_status in ["Approved", "Partially Approved"]
+			or self.status in ["Authorized - In Progress", "Waiting on Parts", "Work Completed", "Billed / Paid"]
+		)
+		is_supp = 1 if (has_prior_authorization or getattr(target, "is_supplement", 0)) else 0
+
+		new_service = self.append("services", {
+			"service_package": target.service_package,
+			"correction_code": new_code,
+			"service_title": new_title,
+			"service_position": opposite_pos,
 			"status": "Estimating",
-			"is_flat_rate": is_flat,
-			"labor_hours": labor_hours,
-			"labor_rate": labor_rate,
-			"labor_amount": labor_amount,
+			"is_flat_rate": target.is_flat_rate,
+			"labor_hours": target.labor_hours,
+			"labor_rate": target.labor_rate,
+			"labor_amount": target.labor_amount,
 			"parts": json.dumps(parts_list),
 			"parts_total": parts_total,
-			"total_amount": flt(labor_amount + parts_total, 2),
-			"parts_html": _render_parts_html(parts_list),
+			"total_amount": flt(flt(target.labor_amount) + parts_total, 2),
+			"parts_html": _render_parts_html(parts_list) if parts_list else "",
 			"is_supplement": is_supp,
-			"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
-			"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
-			"advisor_notes": kwargs.get("advisor_notes", "") or "",
+			"is_mobile_capable": target.is_mobile_capable,
+			"tesla_manual_url": target.tesla_manual_url,
+			"advisor_notes": "",
 		})
 
 		if is_supp:
@@ -988,7 +1133,12 @@ class RepairOrder(Document):
 				self.approval_status = "Pending Approval"
 
 		self.save(ignore_permissions=True)
-		return {"status": "success", "service": pkg.package_name}
+		return {
+			"status": "success",
+			"service_row": new_service.as_dict() if hasattr(new_service, "as_dict") else None,
+			"service_title": new_title,
+			"service_position": opposite_pos,
+		}
 
 	@frappe.whitelist()
 	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, parts=None, notes=None, job_title=None, **kwargs):
@@ -1547,7 +1697,7 @@ def _extract_docname_from_request():
 
 
 @frappe.whitelist()
-def get_service_package_details(service_package):
+def get_service_package_details(service_package, side=None):
 	"""Return package info and its parts list so the client can automatically populate."""
 	if not service_package:
 		return {}
@@ -1556,20 +1706,39 @@ def get_service_package_details(service_package):
 	default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
 	default_rate = _get_default_labor_rate()
 
+	from ism.utils.tesla_manual import swap_side_in_title
+
+	is_symm = cint(getattr(pkg, "is_symmetrical", 0))
+	rh_code = getattr(pkg, "rh_correction_code", None)
+	target_side = str(side or "").strip().upper()
+
+	title = pkg.package_name
+	code = getattr(pkg, "correction_code", None)
+	pos = "None"
+	if is_symm:
+		pos = "RH" if target_side == "RH" else "LH"
+		if target_side == "RH":
+			title = swap_side_in_title(pkg.package_name, "RH")
+			if rh_code:
+				code = rh_code
+
 	parts = []
 	for row in pkg.items:
-		item_doc = frappe.get_cached_doc("Item", row.item_code)
-		qty = flt(row.qty) or 1.0
-		rate = flt(row.rate)
-		parts.append({
-			"item_code": row.item_code,
-			"item_name": row.item_name or item_doc.item_name,
-			"qty": qty,
-			"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
-			"rate": rate,
-			"amount": flt(qty * rate, 2),
-			"warehouse": default_wh,
-		})
+		row_side = getattr(row, "side", None) or "Both"
+		if not is_symm or target_side not in ("LH", "RH") or row_side in ("Both", target_side):
+			item_doc = frappe.get_cached_doc("Item", row.item_code)
+			qty = flt(row.qty) or 1.0
+			rate = flt(row.rate)
+			parts.append({
+				"item_code": row.item_code,
+				"item_name": row.item_name or item_doc.item_name,
+				"qty": qty,
+				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+				"rate": rate,
+				"amount": flt(qty * rate, 2),
+				"warehouse": default_wh,
+				"side": row_side,
+			})
 
 	labor_hours = flt(pkg.standard_labor_hours)
 	is_flat = cint(pkg.is_flat_rate)
@@ -1591,8 +1760,11 @@ def get_service_package_details(service_package):
 			pass
 
 	return {
-		"package_name": pkg.package_name,
-		"correction_code": getattr(pkg, "correction_code", None),
+		"package_name": title,
+		"correction_code": code,
+		"service_position": pos,
+		"is_symmetrical": is_symm,
+		"rh_correction_code": rh_code,
 		"frt": getattr(pkg, "frt", None) or labor_hours,
 		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
 		"category": pkg_cat or "Maintenance",
@@ -1674,6 +1846,14 @@ def add_service_package(service_package=None, docname=None, **kwargs):
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
 	return ro.add_service_package(service_package=service_package, **kwargs)
+
+
+@frappe.whitelist()
+def duplicate_service_for_opposite_side(service_row_id=None, docname=None, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.duplicate_service_for_opposite_side(service_row_id=service_row_id, **kwargs)
 
 
 @frappe.whitelist()

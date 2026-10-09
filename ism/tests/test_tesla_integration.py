@@ -360,3 +360,79 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(ro.services[3].status, "Estimating")
 		self.assertEqual(ro.approval_status, "Partially Approved")
 
+	def test_symmetrical_procedure_import(self):
+		from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
+
+		# 1. Helper tests
+		self.assertEqual(swap_side_in_title("Door - Front - LH (Remove and Replace)", "RH"), "Door - Front - RH (Remove and Replace)")
+		self.assertEqual(swap_side_in_title("Upper Control Arm - Front - RH", "LH"), "Upper Control Arm - Front - LH")
+		self.assertEqual(detect_service_side("Mirror - Side - LH"), "LH")
+		self.assertEqual(detect_service_side("Mirror - Side - RH"), "RH")
+
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+		ro = self.create_test_repair_order(customer=customer.name, vehicle=vehicle.name)
+
+		proc_payload = {
+			"title": "Door - Front - LH (Remove and Replace)",
+			"correction_code": "10106002",
+			"rh_correction_code": "10106102",
+			"frt": 1.25,
+			"is_symmetrical": 1,
+			"applicable_model": "Model Y",
+			"tesla_manual_url": "https://service.tesla.com/docs/ModelY/ServiceManual/en-us/GUID-DOOR-LH.html",
+		}
+
+		# Import with side="both"
+		res = import_tesla_procedure(
+			repair_order=ro.name,
+			data=proc_payload,
+			side="both",
+			allow_generation_mismatch=1,
+		)
+		self.assertEqual(res["status"], "success")
+		ro.reload()
+		self.assertEqual(len(ro.services), 2)
+
+		lh_service = ro.services[0]
+		rh_service = ro.services[1]
+
+		self.assertEqual(lh_service.service_position, "LH")
+		self.assertEqual(lh_service.correction_code, "10106002")
+		self.assertIn("LH", lh_service.service_title)
+
+		self.assertEqual(rh_service.service_position, "RH")
+		self.assertEqual(rh_service.correction_code, "10106102")
+		self.assertIn("RH", rh_service.service_title)
+
+		# Verify duplicate detection handles sides independently
+		# Importing LH again should trigger duplicate warning
+		dup_res = import_tesla_procedure(
+			repair_order=ro.name,
+			data=proc_payload,
+			side="lh",
+			allow_generation_mismatch=1,
+		)
+		self.assertEqual(dup_res["status"], "duplicate_warning")
+
+		# Opposite side duplicate action: duplicate_service_for_opposite_side
+		ro_single = self.create_test_repair_order(customer=customer.name, vehicle=vehicle.name)
+		res_single = import_tesla_procedure(
+			repair_order=ro_single.name,
+			data=proc_payload,
+			side="lh",
+			allow_generation_mismatch=1,
+		)
+		self.assertEqual(res_single["status"], "success")
+		ro_single.reload()
+		self.assertEqual(len(ro_single.services), 1)
+
+		# Call duplicate_service_for_opposite_side
+		ro_single.duplicate_service_for_opposite_side(ro_single.services[0].name)
+		ro_single.reload()
+		self.assertEqual(len(ro_single.services), 2)
+		self.assertEqual(ro_single.services[1].service_position, "RH")
+		self.assertEqual(ro_single.services[1].correction_code, "10106102")
+		self.assertIn("RH", ro_single.services[1].service_title)
+
+

@@ -1570,6 +1570,99 @@ class TestRepairOrder(ISMTestCase):
 		self.assertIn("has_indicator_for_cancelled: true", content)
 		self.assertIn("get_indicator", content)
 
+	def test_symmetrical_package_and_opposite_side(self):
+		part_both = self.create_test_item(item_code="BOLT-BOTH-1", is_stock_item=0, standard_rate=10)
+		part_lh = self.create_test_item(item_code="DOOR-LH-1", is_stock_item=0, standard_rate=50)
+		part_rh = self.create_test_item(item_code="DOOR-RH-1", is_stock_item=0, standard_rate=50)
+
+		pkg_name = f"{TEST_PREFIX}Door - Front - LH (Remove and Replace)"
+		if frappe.db.exists("Service Package", pkg_name):
+			frappe.delete_doc("Service Package", pkg_name, force=True, ignore_permissions=True)
+
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": pkg_name,
+			"correction_code": "10106002",
+			"rh_correction_code": "10106102",
+			"is_symmetrical": 1,
+			"standard_labor_hours": 1.2,
+			"hourly_rate": 100.0,
+			"items": [
+				{"item_code": part_both.name, "qty": 2, "rate": 10, "side": "Both"},
+				{"item_code": part_lh.name, "qty": 1, "rate": 50, "side": "LH"},
+				{"item_code": part_rh.name, "qty": 1, "rate": 50, "side": "RH"},
+			],
+		})
+		pkg.insert()
+		self.track(pkg)
+
+		# 1. Test get_service_package_details filtering
+		details_lh = get_service_package_details(pkg.name, side="LH")
+		self.assertEqual(details_lh["service_position"], "LH")
+		self.assertEqual(details_lh["correction_code"], "10106002")
+		self.assertEqual(len(details_lh["parts"]), 2)
+		self.assertEqual(details_lh["parts_total"], 70.0)
+
+		details_rh = get_service_package_details(pkg.name, side="RH")
+		self.assertEqual(details_rh["service_position"], "RH")
+		self.assertEqual(details_rh["correction_code"], "10106102")
+		self.assertIn("RH", details_rh["package_name"])
+		self.assertEqual(len(details_rh["parts"]), 2)
+		self.assertEqual(details_rh["parts_total"], 70.0)
+
+		# 2. Add with side="both" to Repair Order
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 54000,
+		})
+		ro.insert()
+		self.track(ro)
+
+		ro.add_service_package(pkg.name, side="both")
+		ro.reload()
+
+		self.assertEqual(len(ro.services), 2)
+		s_lh = ro.services[0]
+		s_rh = ro.services[1]
+
+		self.assertEqual(s_lh.service_position, "LH")
+		self.assertEqual(s_lh.correction_code, "10106002")
+		self.assertEqual(flt(s_lh.parts_total), 70.0)
+
+		self.assertEqual(s_rh.service_position, "RH")
+		self.assertEqual(s_rh.correction_code, "10106102")
+		self.assertIn("RH", s_rh.service_title)
+		self.assertEqual(flt(s_rh.parts_total), 70.0)
+
+		# 3. Add single side and duplicate opposite side
+		ro2 = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 54000,
+		})
+		ro2.insert()
+		self.track(ro2)
+
+		ro2.add_service_package(pkg.name, side="lh")
+		ro2.reload()
+		self.assertEqual(len(ro2.services), 1)
+
+		ro2.duplicate_service_for_opposite_side(ro2.services[0].name)
+		ro2.reload()
+		self.assertEqual(len(ro2.services), 2)
+		self.assertEqual(ro2.services[1].service_position, "RH")
+		self.assertEqual(ro2.services[1].correction_code, "10106102")
+		self.assertIn("RH", ro2.services[1].service_title)
+		self.assertEqual(flt(ro2.services[1].parts_total), 70.0)
+
+		# Duplicate attempt should raise error
+		with self.assertRaises(frappe.ValidationError):
+			ro2.duplicate_service_for_opposite_side(ro2.services[0].name)
+
+
 
 
 

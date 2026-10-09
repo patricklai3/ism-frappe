@@ -1,6 +1,9 @@
 // Content script running on ISM Desk pages to broadcast active Repair Order context
 
 function checkAndSyncActiveRO() {
+  // Never broadcast or run on Tesla Service Manual or tesla.com domains
+  if (window.location.origin.includes("tesla.com")) return;
+
   try {
     let ro = null;
 
@@ -23,22 +26,30 @@ function checkAndSyncActiveRO() {
       };
     }
 
-    // 3. Extract CSRF token from cookie
+    // 3. Extract CSRF token from window or cookie
     let csrfToken = "";
     try {
-      const cMatch = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
-      if (cMatch) csrfToken = decodeURIComponent(cMatch[1]);
+      if (window.frappe && window.frappe.csrf_token && window.frappe.csrf_token !== "None") {
+        csrfToken = window.frappe.csrf_token;
+      }
     } catch (e) {}
-
-    // 4. Broadcast to extension background
-    if (ro && ro.name) {
-      chrome.runtime.sendMessage({
-        action: "SYNC_ISM_CONTEXT",
-        ro: ro,
-        csrf_token: csrfToken,
-        origin: window.location.origin
-      });
+    if (!csrfToken) {
+      try {
+        const cMatch = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+        if (cMatch) csrfToken = decodeURIComponent(cMatch[1]);
+      } catch (e) {}
     }
+
+    // 4. Broadcast to extension background (always provide origin and csrfToken)
+    chrome.runtime.sendMessage({
+      action: "SYNC_ISM_CONTEXT",
+      ro: ro,
+      csrf_token: csrfToken,
+      origin: window.location.origin
+    }, () => {
+      // Check lastError to avoid unhandled message port closures
+      if (chrome.runtime.lastError) {}
+    });
   } catch (e) {
     console.debug("ISM sync error:", e);
   }

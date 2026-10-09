@@ -321,7 +321,8 @@ frappe.ui.form.on("Repair Order", {
 		}
 
 		if (frm.fields_dict.services && frm.fields_dict.services.grid) {
-			const sp_col = frm.fields_dict.services.grid.get_field("service_package");
+			const grid = frm.fields_dict.services.grid;
+			const sp_col = grid.get_field("service_package");
 			if (sp_col && !sp_col._ism_formatter_set) {
 				sp_col._ism_formatter_set = true;
 				sp_col.formatter = function (value, df, options, doc) {
@@ -329,6 +330,59 @@ frappe.ui.form.on("Repair Order", {
 						return `<span style="font-weight: 500; color: #1e293b;">${frappe.utils.escape_html(doc.service_title)}</span>`;
 					}
 					return frappe.form.formatters.Link ? frappe.form.formatters.Link(value, df, options, doc) : (value || "");
+				};
+			}
+
+			if (!grid._opposite_side_bound) {
+				grid._opposite_side_bound = true;
+				grid.wrapper.on("click", ".btn-grid-add-opposite-side", function (e) {
+					e.preventDefault();
+					e.stopPropagation();
+					const row_name = $(this).attr("data-row-name");
+					if (!row_name) return;
+
+					const perform_duplicate = () => {
+						frm.call({
+							doc: frm.doc,
+							method: "duplicate_service_for_opposite_side",
+							args: { service_row_id: row_name },
+							freeze: true,
+							freeze_message: __("Adding opposite side service..."),
+							callback(r) {
+								if (r.message && r.message.status === "success") {
+									frappe.show_alert({
+										message: __("Added opposite side: {0}", [r.message.service_title]),
+										indicator: "green",
+									});
+									frm.reload_doc();
+								}
+							},
+						});
+					};
+
+					if (frm.is_dirty() || String(row_name).startsWith("new-")) {
+						frm.save().then(() => perform_duplicate());
+					} else {
+						perform_duplicate();
+					}
+				});
+			}
+
+			const pos_col = grid.get_field("service_position");
+			if (pos_col && !pos_col._ism_formatter_set) {
+				pos_col._ism_formatter_set = true;
+				pos_col.formatter = function (value, df, options, doc) {
+					if (!value || value === "None") return `<span class="text-muted">-</span>`;
+					const opp = value === "LH" ? "RH" : (value === "RH" ? "LH" : null);
+					if (opp && doc && doc.name) {
+						return `
+							<span class="badge" style="background: #e0f2fe; color: #0369a1; font-weight: 600;">${value}</span>
+							<button type="button" class="btn btn-default btn-xs btn-grid-add-opposite-side" data-row-name="${doc.name}" title="${__("Add Opposite Side ({0})", [opp])}" style="padding: 1px 4px; margin-left: 4px; font-size: 10px; border-radius: 3px; line-height: 1;">
+								+${opp}
+							</button>
+						`;
+					}
+					return `<span class="badge" style="background: #f1f5f9; color: #475569;">${value}</span>`;
 				};
 			}
 		}
@@ -1071,11 +1125,51 @@ frappe.ui.form.on("Repair Order", {
 					label: __("Service Package"),
 					options: "Service Package",
 					reqd: 1,
+					onchange() {
+						const pkg_name = dialog.get_value("service_package");
+						if (pkg_name) {
+							frappe.db.get_value("Service Package", pkg_name, ["is_symmetrical", "package_name"], (r) => {
+								if (r && cint(r.is_symmetrical)) {
+									dialog.set_df_property("side_section", "hidden", false);
+									dialog.set_df_property("side", "hidden", false);
+								} else {
+									dialog.set_df_property("side_section", "hidden", true);
+									dialog.set_df_property("side", "hidden", true);
+								}
+							});
+						} else {
+							dialog.set_df_property("side_section", "hidden", true);
+							dialog.set_df_property("side", "hidden", true);
+						}
+					},
+				},
+				{
+					fieldtype: "Section Break",
+					fieldname: "side_section",
+					label: __("Symmetrical Operation Side"),
+					hidden: true,
+				},
+				{
+					fieldname: "side",
+					fieldtype: "Select",
+					label: __("Side Selection"),
+					options: "Both Sides\nLH (Left Hand)\nRH (Right Hand)",
+					default: "Both Sides",
+					hidden: true,
+					description: __("This procedure is symmetrical. Choose whether to add both sides or a specific side."),
 				},
 			],
 			primary_action_label: __("Add to Order"),
 			primary_action(values) {
-				frm.call("add_service_package", { service_package: values.service_package }).then(() => {
+				let side_arg = "both";
+				if (values.side === "LH (Left Hand)") side_arg = "lh";
+				else if (values.side === "RH (Right Hand)") side_arg = "rh";
+				else if (values.side === "Both Sides") side_arg = "both";
+
+				frm.call("add_service_package", {
+					service_package: values.service_package,
+					side: side_arg,
+				}).then(() => {
 					dialog.hide();
 					frm.reload_doc();
 				});
@@ -1129,16 +1223,30 @@ frappe.ui.form.on("Repair Order", {
 					label: __("Tesla Procedure URL"),
 					reqd: 1,
 					placeholder: "https://service.tesla.com/docs/..."
+				},
+				{
+					fieldname: "side",
+					fieldtype: "Select",
+					label: __("Side (for symmetrical procedures)"),
+					options: "Both Sides\nLH (Left Hand)\nRH (Right Hand)",
+					default: "Both Sides",
+					description: __("If the procedure is symmetrical (e.g. Door, Suspension, Mirror), select which side(s) to add."),
 				}
 			],
 			primary_action_label: __("Fetch & Import"),
 			primary_action(values) {
+				let side_arg = "both";
+				if (values.side === "LH (Left Hand)") side_arg = "lh";
+				else if (values.side === "RH (Right Hand)") side_arg = "rh";
+				else if (values.side === "Both Sides") side_arg = "both";
+
 				const do_import = (allow_mismatch = 0, duplicate_action = null) => {
 					frappe.call({
 						method: "ism.api.tesla.import_tesla_procedure",
 						args: {
 							repair_order: frm.doc.name,
 							url: values.tesla_url.trim(),
+							side: side_arg,
 							allow_generation_mismatch: allow_mismatch,
 							duplicate_action: duplicate_action,
 						},
@@ -1593,6 +1701,8 @@ frappe.ui.form.on("Repair Order Service", {
 					frappe.model.set_value(cdt, cdn, "is_flat_rate", is_flat);
 					frappe.model.set_value(cdt, cdn, "service_title", pkg.package_name || row.service_package);
 					if (pkg.correction_code) frappe.model.set_value(cdt, cdn, "correction_code", pkg.correction_code);
+					if (pkg.service_position) frappe.model.set_value(cdt, cdn, "service_position", pkg.service_position);
+					if (pkg.is_mobile_capable !== undefined) frappe.model.set_value(cdt, cdn, "is_mobile_capable", pkg.is_mobile_capable);
 					if (pkg.tesla_manual_url) frappe.model.set_value(cdt, cdn, "tesla_manual_url", pkg.tesla_manual_url);
 					frappe.model.set_value(cdt, cdn, "labor_hours", flt(pkg.standard_labor_hours || pkg.labor_hours || pkg.frt));
 					frappe.model.set_value(cdt, cdn, "labor_rate", flt(pkg.hourly_rate));
@@ -1719,6 +1829,42 @@ frappe.ui.form.on("Repair Order Service", {
 			__("Save as Reusable Service Package"),
 			__("Create Package")
 		);
+	},
+
+	btn_add_opposite_side(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (!row.service_position || (row.service_position !== "LH" && row.service_position !== "RH")) {
+			frappe.msgprint(__("This service does not have an LH or RH position set."));
+			return;
+		}
+		const perform_duplicate = () => {
+			frm.call({
+				doc: frm.doc,
+				method: "duplicate_service_for_opposite_side",
+				args: {
+					service_row_id: row.name,
+				},
+				freeze: true,
+				freeze_message: __("Adding opposite side service..."),
+				callback(r) {
+					if (r.message && r.message.status === "success") {
+						frappe.show_alert({
+							message: __("Added opposite side: {0}", [r.message.service_title]),
+							indicator: "green",
+						});
+						frm.reload_doc();
+					}
+				},
+			});
+		};
+
+		if (frm.is_dirty() || !row.name || String(row.name).startsWith("new-")) {
+			frm.save().then(() => {
+				perform_duplicate();
+			});
+		} else {
+			perform_duplicate();
+		}
 	},
 });
 

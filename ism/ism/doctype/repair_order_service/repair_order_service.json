@@ -23,6 +23,7 @@
   "parts_html",
   "btn_manage_parts",
   "btn_save_as_package",
+  "btn_add_opposite_side",
   "parts",
   "sec_execution",
   "assigned_technician",
@@ -162,6 +163,13 @@
   },
   {
    "allow_on_submit": 1,
+   "depends_on": "eval:doc.service_position == 'LH' || doc.service_position == 'RH'",
+   "fieldname": "btn_add_opposite_side",
+   "fieldtype": "Button",
+   "label": "Add Opposite Side"
+  },
+  {
+   "allow_on_submit": 1,
    "fieldname": "parts",
    "fieldtype": "JSON",
    "hidden": 1,
@@ -240,7 +248,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Side / Position",
-   "options": "None\nLH\nRH\nFront\nRear\nBoth"
+   "options": "None\nLH\nRH"
   }
  ],
  "istable": 1,

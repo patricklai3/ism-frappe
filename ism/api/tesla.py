@@ -5,6 +5,7 @@ import json
 import urllib.request
 import urllib.error
 import frappe
+import frappe.sessions
 from frappe.utils import flt, cint
 from ism.utils.tesla_manual import (
 	parse_tesla_procedure_html,
@@ -13,13 +14,18 @@ from ism.utils.tesla_manual import (
 	validate_vehicle_compatibility,
 	get_category_for_correction_code,
 	get_mobile_capability_from_manifest,
+	swap_side_in_title,
+	detect_service_side,
 )
-from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
+from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate, _render_parts_html
 
 
 @frappe.whitelist()
 def get_active_repair_orders():
 	"""Return recent draft/open Repair Orders with vehicle details for the extension and desk UI."""
+	if hasattr(frappe.local, "allow_cors"):
+		frappe.local.allow_cors = "*"
+
 	orders = frappe.db.sql(
 		"""
 		SELECT 
@@ -51,7 +57,7 @@ def get_active_repair_orders():
 		})
 
 	csrf_token = getattr(frappe.local.session.data, "csrf_token", None) if hasattr(frappe.local, "session") else None
-	if not csrf_token and hasattr(frappe.sessions, "get_csrf_token"):
+	if not csrf_token:
 		try:
 			csrf_token = frappe.sessions.get_csrf_token()
 		except Exception:
@@ -66,8 +72,11 @@ def get_active_repair_orders():
 @frappe.whitelist()
 def get_session_info():
 	"""Return active session info and CSRF token for browser extension authorization."""
+	if hasattr(frappe.local, "allow_cors"):
+		frappe.local.allow_cors = "*"
+
 	csrf_token = getattr(frappe.local.session.data, "csrf_token", None) if hasattr(frappe.local, "session") else None
-	if not csrf_token and hasattr(frappe.sessions, "get_csrf_token"):
+	if not csrf_token:
 		try:
 			csrf_token = frappe.sessions.get_csrf_token()
 		except Exception:
@@ -82,6 +91,9 @@ def get_session_info():
 @frappe.whitelist()
 def get_vehicle_manual_url(vehicle=None, repair_order=None):
 	"""Return the recommended Tesla Service Manual URL for a vehicle or repair order."""
+	if hasattr(frappe.local, "allow_cors"):
+		frappe.local.allow_cors = "*"
+
 	if repair_order and not vehicle:
 		vehicle = frappe.db.get_value("Repair Order", repair_order, "vehicle")
 
@@ -95,6 +107,9 @@ def get_vehicle_manual_url(vehicle=None, repair_order=None):
 @frappe.whitelist()
 def fetch_and_parse_tesla_procedure(url):
 	"""Fetch HTML of a Tesla service manual procedure and parse its metadata server-side."""
+	if hasattr(frappe.local, "allow_cors"):
+		frappe.local.allow_cors = "*"
+
 	if not url:
 		frappe.throw("Tesla procedure URL is required.")
 
@@ -136,6 +151,9 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	- url: Tesla manual URL to fetch and parse server-side
 	- duplicate_action: None (warn if exists), 'update' (update existing row), or 'add' (append additional row)
 	"""
+	if hasattr(frappe.local, "allow_cors"):
+		frappe.local.allow_cors = "*"
+
 	if not repair_order:
 		frappe.throw("Repair Order is required.")
 
@@ -169,16 +187,26 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 		title = re.sub(rf"^{re.escape(correction_code)}\s*[-–—:]?\s*", "", title).strip()
 	frt = flt(proc_data.get("frt"), 2)
 
-	# Ensure mobile capability is detected from manifest if not yet confirmed
-	if not cint(proc_data.get("is_mobile_capable")) and proc_url:
+	# Ensure mobile capability and symmetrical info are detected from manifest if not yet confirmed
+	if proc_url:
 		dep_info = get_mobile_capability_from_manifest(
 			proc_url,
 			proc_data.get("doc_guid"),
 			correction_code,
 		)
-		if dep_info and dep_info.get("is_mobile_capable"):
-			proc_data["is_mobile_capable"] = dep_info["is_mobile_capable"]
-			proc_data["mobile_service_level"] = dep_info["mobile_service_level"]
+		if dep_info:
+			if not cint(proc_data.get("is_mobile_capable")) and dep_info.get("is_mobile_capable"):
+				proc_data["is_mobile_capable"] = dep_info["is_mobile_capable"]
+				proc_data["mobile_service_level"] = dep_info["mobile_service_level"]
+			if not proc_data.get("rh_correction_code") and dep_info.get("rh_correction_code"):
+				proc_data["rh_correction_code"] = dep_info["rh_correction_code"]
+			if not proc_data.get("is_symmetrical") and dep_info.get("is_symmetrical"):
+				proc_data["is_symmetrical"] = 1
+
+	if not proc_data.get("is_symmetrical") and title:
+		import re
+		if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', title, re.IGNORECASE):
+			proc_data["is_symmetrical"] = 1
 
 	# 2. Compatibility check with vehicle
 	v_doc = frappe.get_doc("Repair Vehicle", ro.vehicle) if ro.vehicle else None
@@ -197,33 +225,37 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	# 3. Upsert Service Package in catalog
 	pkg = _upsert_service_package(proc_data, proc_url)
 
-	# 4. Check for duplicate on the current Repair Order
-	existing_service = None
-	if correction_code:
-		for s in ro.services:
-			if str(getattr(s, "correction_code", "") or "").strip() == correction_code:
-				existing_service = s
-				break
+	# 4. Determine sides/positions to add
+	side_param = str(kwargs.get("side") or proc_data.get("side") or "").strip().lower()
+	is_symmetrical = cint(proc_data.get("is_symmetrical") or (1 if pkg and pkg.is_symmetrical else 0))
+	rh_code = proc_data.get("rh_correction_code") or (getattr(pkg, "rh_correction_code", None) if pkg else None) or correction_code
 
-	if not existing_service and pkg and pkg.name:
-		for s in ro.services:
-			if s.service_package == pkg.name:
-				existing_service = s
-				break
+	operations_to_add = []
+	if side_param == "both" and is_symmetrical:
+		operations_to_add.append({
+			"side": "LH",
+			"title": title,
+			"code": correction_code,
+		})
+		operations_to_add.append({
+			"side": "RH",
+			"title": swap_side_in_title(title, "RH"),
+			"code": rh_code,
+		})
+	elif side_param == "rh" and is_symmetrical:
+		operations_to_add.append({
+			"side": "RH",
+			"title": swap_side_in_title(title, "RH"),
+			"code": rh_code,
+		})
+	else:
+		pos = "LH" if is_symmetrical else "None"
+		operations_to_add.append({
+			"side": pos,
+			"title": title,
+			"code": correction_code,
+		})
 
-	if existing_service and not duplicate_action:
-		code_display = correction_code or pkg.name or "this procedure"
-		return {
-			"status": "duplicate_warning",
-			"requires_duplicate_choice": True,
-			"message": f"Correction code {code_display} is already on this Repair Order. Update existing row or Add as additional job?",
-			"correction_code": correction_code,
-			"existing_service_title": existing_service.service_title,
-			"existing_idx": existing_service.idx,
-			"procedure_data": proc_data,
-		}
-
-	# 5. Populate labor rates and append or update
 	has_prior_authorization = bool(
 		ro.authorized_at
 		or any(s.status == "Approved" for s in ro.services)
@@ -235,43 +267,82 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	labor_hours = frt or flt(pkg.standard_labor_hours) or 1.0
 	labor_amount = flt(labor_hours * hourly_rate, 2)
 
-	service_category = proc_data.get("category") or getattr(pkg, "category", None)
-	if not service_category and correction_code:
-		c, _ = get_category_for_correction_code(correction_code)
-		if c:
-			service_category = c
-	service_category = service_category or "Maintenance"
-
 	action_taken = "added"
-	if existing_service and duplicate_action == "update":
-		action_taken = "updated"
-		existing_service.service_title = title
-		existing_service.labor_hours = labor_hours
-		existing_service.labor_rate = hourly_rate
-		existing_service.labor_amount = labor_amount
-		existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
-		existing_service.tesla_manual_url = proc_url
-		existing_service.is_mobile_capable = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
-		if kwargs.get("advisor_notes"):
-			existing_service.advisor_notes = kwargs.get("advisor_notes")
-		target_service = existing_service
-	else:
-		target_service = ro.append("services", {
-			"service_package": pkg.name,
-			"correction_code": correction_code,
-			"service_title": title,
-			"status": "Estimating",
-			"is_flat_rate": 0,
-			"labor_hours": labor_hours,
-			"labor_rate": hourly_rate,
-			"labor_amount": labor_amount,
-			"parts_total": 0.0,
-			"total_amount": labor_amount,
-			"is_supplement": is_supp,
-			"is_mobile_capable": cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0))),
-			"tesla_manual_url": proc_url,
-			"advisor_notes": kwargs.get("advisor_notes", "") or "",
-		})
+	added_rows = []
+
+	for op in operations_to_add:
+		op_side = op["side"]
+		op_title = op["title"]
+		op_code = op["code"]
+
+		# Check for duplicate on the current Repair Order with position awareness
+		existing_service = None
+		for s in ro.services:
+			s_code = str(getattr(s, "correction_code", "") or "").strip()
+			s_pos = str(getattr(s, "service_position", "") or "None").strip()
+			s_pkg = str(getattr(s, "service_package", "") or "").strip()
+
+			pos_matches = (s_pos == op_side) or (s_pos in ("None", "") and op_side in ("None", ""))
+			code_or_pkg_matches = (op_code and s_code == op_code) or (pkg and s_pkg == pkg.name)
+			if pos_matches and code_or_pkg_matches:
+				existing_service = s
+				break
+
+		if existing_service and not duplicate_action:
+			code_display = op_code or pkg.name or "this procedure"
+			side_str = f" ({op_side})" if op_side and op_side != "None" else ""
+			return {
+				"status": "duplicate_warning",
+				"requires_duplicate_choice": True,
+				"message": f"Correction code {code_display}{side_str} is already on this Repair Order. Update existing row or Add as additional job?",
+				"correction_code": op_code,
+				"existing_service_title": existing_service.service_title,
+				"existing_idx": existing_service.idx,
+				"procedure_data": proc_data,
+			}
+
+		# Extract nested parts for this specific side
+		parts_list, parts_total = _extract_parts_for_side(pkg, op_side)
+
+		if existing_service and duplicate_action == "update":
+			action_taken = "updated"
+			existing_service.service_title = op_title
+			existing_service.service_position = op_side
+			existing_service.correction_code = op_code
+			existing_service.labor_hours = labor_hours
+			existing_service.labor_rate = hourly_rate
+			existing_service.labor_amount = labor_amount
+			if parts_list:
+				existing_service.parts = json.dumps(parts_list)
+				existing_service.parts_total = parts_total
+				existing_service.parts_html = _render_parts_html(parts_list)
+			existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
+			existing_service.tesla_manual_url = proc_url
+			existing_service.is_mobile_capable = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
+			if kwargs.get("advisor_notes"):
+				existing_service.advisor_notes = kwargs.get("advisor_notes")
+			added_rows.append(existing_service)
+		else:
+			target_service = ro.append("services", {
+				"service_package": pkg.name,
+				"correction_code": op_code,
+				"service_title": op_title,
+				"service_position": op_side,
+				"status": "Estimating",
+				"is_flat_rate": 0,
+				"labor_hours": labor_hours,
+				"labor_rate": hourly_rate,
+				"labor_amount": labor_amount,
+				"parts": json.dumps(parts_list),
+				"parts_total": parts_total,
+				"total_amount": flt(labor_amount + parts_total, 2),
+				"parts_html": _render_parts_html(parts_list) if parts_list else "",
+				"is_supplement": is_supp,
+				"is_mobile_capable": cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0))),
+				"tesla_manual_url": proc_url,
+				"advisor_notes": kwargs.get("advisor_notes", "") or "",
+			})
+			added_rows.append(target_service)
 
 	if is_supp and any(s.status == "Approved" for s in ro.services):
 		ro.approval_status = "Partially Approved"
@@ -284,6 +355,8 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	ro.flags.ignore_validate_update_after_submit = True
 	ro.save(ignore_permissions=True)
 
+	last_row = added_rows[-1] if added_rows else None
+
 	# Broadcast realtime notification
 	frappe.publish_realtime(
 		"repair_order_updated",
@@ -293,7 +366,7 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 			"correction_code": correction_code,
 			"frt": frt,
 			"action": action_taken,
-			"is_mobile_capable": target_service.is_mobile_capable,
+			"is_mobile_capable": last_row.is_mobile_capable if last_row else 0,
 		},
 		doctype="Repair Order",
 		docname=ro.name,
@@ -308,9 +381,38 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 		"correction_code": correction_code,
 		"frt": frt,
 		"labor_amount": labor_amount,
-		"is_mobile_capable": target_service.is_mobile_capable,
-		"service_row": target_service.as_dict() if hasattr(target_service, "as_dict") else None,
+		"is_mobile_capable": last_row.is_mobile_capable if last_row else 0,
+		"service_row": last_row.as_dict() if hasattr(last_row, "as_dict") else None,
+		"count_added": len(added_rows),
 	}
+
+
+def _extract_parts_for_side(pkg, side="Both"):
+	"""Extract nested parts list from Service Package matching specified side."""
+	parts_list = []
+	parts_total = 0.0
+	if not pkg or not getattr(pkg, "items", None):
+		return parts_list, parts_total
+
+	for row in pkg.items:
+		row_side = getattr(row, "side", None) or "Both"
+		if side in ("Both", "None") or row_side in ("Both", side):
+			item_doc = frappe.get_cached_doc("Item", row.item_code)
+			qty = flt(row.qty) or 1.0
+			rate = flt(row.rate)
+			amt = flt(qty * rate, 2)
+			parts_total += amt
+			parts_list.append({
+				"item_code": row.item_code,
+				"item_name": row.item_name or item_doc.item_name,
+				"qty": qty,
+				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+				"rate": rate,
+				"amount": amt,
+				"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+			})
+
+	return parts_list, parts_total
 
 
 def _upsert_service_package(proc_data, proc_url):
@@ -334,6 +436,15 @@ def _upsert_service_package(proc_data, proc_url):
 		if dep_info and dep_info.get("is_mobile_capable"):
 			proc_data["is_mobile_capable"] = dep_info["is_mobile_capable"]
 			proc_data["mobile_service_level"] = dep_info["mobile_service_level"]
+		if dep_info and dep_info.get("rh_correction_code") and not proc_data.get("rh_correction_code"):
+			proc_data["rh_correction_code"] = dep_info["rh_correction_code"]
+		if dep_info and dep_info.get("is_symmetrical") and not proc_data.get("is_symmetrical"):
+			proc_data["is_symmetrical"] = 1
+
+	if not proc_data.get("is_symmetrical") and title:
+		import re
+		if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', title, re.IGNORECASE):
+			proc_data["is_symmetrical"] = 1
 
 	# Check for existing Service Package with matching correction_code
 	existing_pkg_name = None
@@ -358,6 +469,10 @@ def _upsert_service_package(proc_data, proc_url):
 			pkg.doc_guid = proc_data.get("doc_guid")
 		if "is_mobile_capable" in proc_data:
 			pkg.is_mobile_capable = cint(proc_data.get("is_mobile_capable"))
+		if "is_symmetrical" in proc_data:
+			pkg.is_symmetrical = cint(proc_data.get("is_symmetrical"))
+		if proc_data.get("rh_correction_code"):
+			pkg.rh_correction_code = proc_data.get("rh_correction_code")
 		pkg.save(ignore_permissions=True)
 		return pkg
 
@@ -369,6 +484,8 @@ def _upsert_service_package(proc_data, proc_url):
 		"standard_labor_hours": frt or 1.0,
 		"is_flat_rate": 0,
 		"is_mobile_capable": cint(proc_data.get("is_mobile_capable", 0)),
+		"is_symmetrical": cint(proc_data.get("is_symmetrical", 0)),
+		"rh_correction_code": proc_data.get("rh_correction_code") or "",
 		"tesla_manual_url": proc_url,
 		"doc_guid": proc_data.get("doc_guid") or "",
 	})

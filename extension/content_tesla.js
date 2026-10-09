@@ -5,7 +5,7 @@
   if (window.__ISM_TESLA_INJECTED__) return;
   window.__ISM_TESLA_INJECTED__ = true;
 
-  function extractProcedureData() {
+  async function extractProcedureData() {
     let title = "";
     let correctionCode = "";
     let frt = 0.0;
@@ -51,9 +51,11 @@
     const guidMatch = window.location.href.match(/(GUID-[0-9A-F-]{36})/i);
     const docGuid = guidMatch ? guidMatch[1].toUpperCase() : "";
 
-    // 6. Mobile Capability
+    // 6. Mobile Capability & Symmetrical Detection
     let isMobile = 0;
     let mobileLevel = "No";
+    let isSymmetrical = 0;
+    let rhCorrectionCode = "";
 
     // A) Check DOM indicator elements inserted by Tesla's service-manual.js
     const mcIndicator = document.querySelector(".mobile-capable-indicator");
@@ -110,6 +112,11 @@
             isMobile = 0;
             mobileLevel = "No";
           }
+
+          if (match["rh-correction-code"]) {
+            rhCorrectionCode = String(match["rh-correction-code"]).trim();
+            isSymmetrical = 1;
+          }
         }
       }
     } catch (e) {
@@ -134,6 +141,10 @@
       mobileLevel = "Mobile Only";
     }
 
+    if (!isSymmetrical && title && (/\bLH\b|\bRH\b|Left Hand|Right Hand/i.test(title))) {
+      isSymmetrical = 1;
+    }
+
     return {
       title: title,
       correction_code: correctionCode,
@@ -143,6 +154,8 @@
       tesla_manual_url: window.location.href,
       is_mobile_capable: isMobile,
       mobile_service_level: mobileLevel,
+      is_symmetrical: isSymmetrical,
+      rh_correction_code: rhCorrectionCode,
     };
   }
 
@@ -178,6 +191,16 @@
             <option value="">Loading Repair Orders...</option>
           </select>
         </div>
+        ${procData.is_symmetrical ? `
+        <div class="ism-ro-selector-container" style="margin-top: 8px;">
+          <div class="ism-ro-label">Side (Symmetrical)</div>
+          <select class="ism-ro-select" id="ism-side-select">
+            <option value="both" selected>Both Sides (LH & RH)</option>
+            <option value="lh">Left Hand (LH) Only</option>
+            <option value="rh">Right Hand (RH) Only</option>
+          </select>
+        </div>
+        ` : ""}
         <div class="ism-status-msg" id="ism-status-msg"></div>
       </div>
       <div class="ism-card-footer">
@@ -217,20 +240,33 @@
       }
     } catch (e) {}
 
+    // Context cache for origin and tokens
+    let cachedContext = null;
+
     // Fetch active ROs and sync
     chrome.runtime.sendMessage({ action: "GET_CONTEXT" }, (context) => {
-      const activeRoName = urlRo || context?.active_ro?.name;
+      if (chrome.runtime.lastError) {
+        console.debug("GET_CONTEXT error:", chrome.runtime.lastError.message);
+      }
+      cachedContext = context || {};
+      const activeRoName = urlRo || cachedContext?.active_ro?.name;
 
       chrome.runtime.sendMessage({ action: "FETCH_ACTIVE_ROS" }, (res) => {
+        if (chrome.runtime.lastError) {
+          console.debug("FETCH_ACTIVE_ROS error:", chrome.runtime.lastError.message);
+        }
         roSelect.innerHTML = "";
         const orders = res?.orders || [];
 
         if (orders.length === 0) {
           const opt = document.createElement("option");
           opt.value = "";
-          opt.textContent = "No open Repair Orders found";
+          opt.textContent = res?.error ? `ISM: ${res.error.slice(0, 45)}...` : "No open Repair Orders found";
           roSelect.appendChild(opt);
           importBtn.disabled = true;
+          if (res?.error) {
+            showStatus(res.error, "error");
+          }
           return;
         }
 
@@ -258,6 +294,8 @@
         chrome.runtime.sendMessage({
           action: "SYNC_ISM_CONTEXT",
           ro: currentSelected
+        }, () => {
+          if (chrome.runtime.lastError) {}
         });
       });
     });
@@ -267,6 +305,8 @@
       chrome.runtime.sendMessage({
         action: "SYNC_ISM_CONTEXT",
         ro: { name: roSelect.value }
+      }, () => {
+        if (chrome.runtime.lastError) {}
       });
     });
 
@@ -278,47 +318,77 @@
         return;
       }
 
+      const sideSelect = widget.querySelector("#ism-side-select");
+      const chosenSide = sideSelect ? sideSelect.value : (procData.is_symmetrical ? "both" : "");
+      procData.side = chosenSide;
+
       importBtn.disabled = true;
       importBtn.textContent = "Importing...";
       showStatus("Sending procedure to ISM...", "warning");
 
-      chrome.runtime.sendMessage({
-        action: "IMPORT_PROCEDURE",
-        repair_order: selectedRo,
-        procedure_data: procData,
-        allow_generation_mismatch: allowMismatch,
-        duplicate_action: duplicateAction
-      }, (res) => {
+      let timeoutFired = false;
+      const safetyTimer = setTimeout(() => {
+        timeoutFired = true;
         importBtn.disabled = false;
         importBtn.textContent = "Import to Repair Order";
+        showStatus("Request timed out. Please check if ISM is open in another tab.", "error");
+      }, 25000);
 
-        if (!res) {
-          showStatus("No response from ISM backend. Ensure ISM tab is open.", "error");
-          return;
-        }
+      try {
+        chrome.runtime.sendMessage({
+          action: "IMPORT_PROCEDURE",
+          origin: cachedContext?.ism_origin,
+          csrf_token: cachedContext?.csrf_token,
+          repair_order: selectedRo,
+          procedure_data: procData,
+          side: chosenSide,
+          allow_generation_mismatch: allowMismatch,
+          duplicate_action: duplicateAction
+        }, (res) => {
+          clearTimeout(safetyTimer);
+          if (timeoutFired) return;
 
-        if (!res.success) {
-          showStatus(`Import failed: ${res.error || "Unknown error"}`, "error");
-          return;
-        }
+          importBtn.disabled = false;
+          importBtn.textContent = "Import to Repair Order";
 
-        const result = res.result;
-        if (result?.status === "warning" && result?.requires_confirmation) {
-          showWarningConfirmation(result.warning, duplicateAction);
-          return;
-        }
+          if (chrome.runtime.lastError) {
+            showStatus(`Extension error: ${chrome.runtime.lastError.message}`, "error");
+            return;
+          }
 
-        if (result?.status === "duplicate_warning" && result?.requires_duplicate_choice) {
-          showDuplicateConfirmation(result, allowMismatch);
-          return;
-        }
+          if (!res) {
+            showStatus("No response from ISM backend. Ensure ISM tab is open and you are logged in.", "error");
+            return;
+          }
 
-        if (result?.status === "success") {
-          showSuccess(result);
-        } else {
-          showStatus(result?.message || "Import completed.", "success");
-        }
-      });
+          if (!res.success) {
+            showStatus(`Import failed: ${res.error || "Unknown error"}`, "error");
+            return;
+          }
+
+          const result = res.result;
+          if (result?.status === "warning" && result?.requires_confirmation) {
+            showWarningConfirmation(result.warning, duplicateAction);
+            return;
+          }
+
+          if (result?.status === "duplicate_warning" && result?.requires_duplicate_choice) {
+            showDuplicateConfirmation(result, allowMismatch);
+            return;
+          }
+
+          if (result?.status === "success") {
+            showSuccess(result);
+          } else {
+            showStatus(result?.message || "Import completed.", "success");
+          }
+        });
+      } catch (err) {
+        clearTimeout(safetyTimer);
+        importBtn.disabled = false;
+        importBtn.textContent = "Import to Repair Order";
+        showStatus(`Failed to send request: ${err.message}`, "error");
+      }
     };
 
     importBtn.addEventListener("click", () => triggerImport(false));
