@@ -364,12 +364,28 @@ def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None
 		return None
 
 	try:
+		from urllib.parse import urlparse
+		parsed_url = urlparse(url)
+		if parsed_url.scheme != "https" or parsed_url.netloc not in ("service.tesla.com", "service.teslamotors.com"):
+			return None
+
 		import urllib.request
 		clean_url = url.split("?")[0].split("#")[0]
 		base_manifest_url = clean_url.rsplit("/", 1)[0] + "/dependencies.json"
 		filename = clean_url.split("/")[-1]
 
-		topics = _MANIFEST_CACHE.get(base_manifest_url)
+		topics = None
+		cache_key = f"tesla_manifest:{base_manifest_url}"
+		try:
+			cached_json = frappe.cache().get_value(cache_key)
+			if cached_json:
+				topics = json.loads(cached_json) if isinstance(cached_json, str) else cached_json
+		except Exception:
+			pass
+
+		if topics is None:
+			topics = _MANIFEST_CACHE.get(base_manifest_url)
+
 		if topics is None:
 			headers = {
 				"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -383,6 +399,10 @@ def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None
 				manifest_data = json.loads(res.read().decode("utf-8"))
 				topics = manifest_data.get("topics", {}).get("topic", [])
 				_MANIFEST_CACHE[base_manifest_url] = topics
+				try:
+					frappe.cache().set_value(cache_key, json.dumps(topics), expires_in_sec=86400)
+				except Exception:
+					pass
 			except Exception:
 				# Fallback retry with basic User-Agent
 				try:
@@ -391,6 +411,10 @@ def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None
 					manifest_data = json.loads(res2.read().decode("utf-8"))
 					topics = manifest_data.get("topics", {}).get("topic", [])
 					_MANIFEST_CACHE[base_manifest_url] = topics
+					try:
+						frappe.cache().set_value(cache_key, json.dumps(topics), expires_in_sec=86400)
+					except Exception:
+						pass
 				except Exception:
 					topics = []
 

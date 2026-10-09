@@ -24,7 +24,7 @@ class ServicePackage(Document):
 		if not self.is_flat_rate and flt(self.standard_labor_hours) and flt(self.hourly_rate):
 			self.service_rate = flt(self.standard_labor_hours) * flt(self.hourly_rate)
 
-		if getattr(self, "tesla_manual_url", None):
+		if not getattr(self, "is_mobile_capable", 0) and getattr(self, "tesla_manual_url", None):
 			try:
 				from ism.utils.tesla_manual import get_mobile_capability_from_manifest
 				dep_info = get_mobile_capability_from_manifest(
@@ -33,7 +33,7 @@ class ServicePackage(Document):
 					getattr(self, "correction_code", None),
 				)
 				if dep_info:
-					if not getattr(self, "is_mobile_capable", 0) and dep_info.get("is_mobile_capable"):
+					if dep_info.get("is_mobile_capable"):
 						self.is_mobile_capable = dep_info["is_mobile_capable"]
 					if not getattr(self, "rh_correction_code", None) and dep_info.get("rh_correction_code"):
 						self.rh_correction_code = dep_info["rh_correction_code"]
@@ -110,6 +110,6 @@ class ServicePackage(Document):
 			has_si = frappe.db.count("Sales Invoice Item", {"item_code": item_code})
 			if not (has_ro or has_si):
 				try:
-					frappe.delete_doc("Item", item_code, force=True, ignore_permissions=True)
+					frappe.delete_doc("Item", item_code, ignore_permissions=True)
 				except Exception:
 					pass

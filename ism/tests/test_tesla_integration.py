@@ -435,4 +435,51 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(ro_single.services[1].correction_code, "10106102")
 		self.assertIn("RH", ro_single.services[1].service_title)
 
+		# 2. Test importing from an RH baseline procedure with side="both"
+		proc_rh_payload = {
+			"title": "Upper Control Arm - Front - RH",
+			"correction_code": "10106102",
+			"rh_correction_code": "10106102",
+			"frt": 1.5,
+			"is_symmetrical": 1,
+			"applicable_model": "Model Y",
+			"tesla_manual_url": "https://service.tesla.com/docs/ModelY/ServiceManual/en-us/GUID-UCA-RH.html",
+		}
+		ro_rh = self.create_test_repair_order(customer=customer.name, vehicle=vehicle.name)
+		res_rh = import_tesla_procedure(
+			repair_order=ro_rh.name,
+			data=proc_rh_payload,
+			side="both",
+			allow_generation_mismatch=1,
+		)
+		self.assertEqual(res_rh["status"], "success")
+		ro_rh.reload()
+		self.assertEqual(len(ro_rh.services), 2)
+		self.assertEqual(ro_rh.services[0].service_position, "LH")
+		self.assertIn("LH", ro_rh.services[0].service_title)
+		self.assertEqual(ro_rh.services[1].service_position, "RH")
+		self.assertIn("RH", ro_rh.services[1].service_title)
+
+		# 3. Verify non-symmetrical service duplication is blocked
+		ro_non_symm = self.create_test_repair_order(customer=customer.name, vehicle=vehicle.name)
+		ro_non_symm.append("services", {
+			"service_title": "Standard Oil Change",
+			"service_position": "None",
+			"status": "Estimating",
+			"labor_hours": 1.0,
+			"labor_rate": 120.0,
+			"labor_amount": 120.0,
+			"total_amount": 120.0,
+		})
+		ro_non_symm.save(ignore_permissions=True)
+		with self.assertRaises(frappe.ValidationError):
+			ro_non_symm.duplicate_service_for_opposite_side(ro_non_symm.services[0].name)
+
+		# 4. Verify SSRF protection on fetch_and_parse_tesla_procedure
+		from ism.api.tesla import fetch_and_parse_tesla_procedure
+		with self.assertRaises(frappe.ValidationError):
+			fetch_and_parse_tesla_procedure("http://169.254.169.254/latest/meta-data/")
+		with self.assertRaises(frappe.ValidationError):
+			fetch_and_parse_tesla_procedure("https://malicious-domain.com/hack.html")
+
 

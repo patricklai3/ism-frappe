@@ -373,16 +373,19 @@ frappe.ui.form.on("Repair Order", {
 				pos_col._ism_formatter_set = true;
 				pos_col.formatter = function (value, df, options, doc) {
 					if (!value || value === "None") return `<span class="text-muted">-</span>`;
+					const safe_val = frappe.utils.escape_html(String(value));
 					const opp = value === "LH" ? "RH" : (value === "RH" ? "LH" : null);
 					if (opp && doc && doc.name) {
+						const safe_opp = frappe.utils.escape_html(opp);
+						const safe_name = frappe.utils.escape_html(String(doc.name));
 						return `
-							<span class="badge" style="background: #e0f2fe; color: #0369a1; font-weight: 600;">${value}</span>
-							<button type="button" class="btn btn-default btn-xs btn-grid-add-opposite-side" data-row-name="${doc.name}" title="${__("Add Opposite Side ({0})", [opp])}" style="padding: 1px 4px; margin-left: 4px; font-size: 10px; border-radius: 3px; line-height: 1;">
-								+${opp}
+							<span class="badge" style="background: #e0f2fe; color: #0369a1; font-weight: 600;">${safe_val}</span>
+							<button type="button" class="btn btn-default btn-xs btn-grid-add-opposite-side" data-row-name="${safe_name}" title="${__("Add Opposite Side ({0})", [safe_opp])}" style="padding: 1px 4px; margin-left: 4px; font-size: 10px; border-radius: 3px; line-height: 1;">
+								+${safe_opp}
 							</button>
 						`;
 					}
-					return `<span class="badge" style="background: #f1f5f9; color: #475569;">${value}</span>`;
+					return `<span class="badge" style="background: #f1f5f9; color: #475569;">${safe_val}</span>`;
 				};
 			}
 		}

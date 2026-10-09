@@ -290,7 +290,13 @@ def _cleanup_customers(test_customers, stub_customers_created, log):
 
 
 def _cleanup_service_packages(log):
-	known_packages = ["Front Brake Renewal", "Engine Oil & Filter Change", "Ignition Overhaul Package", "test"]
+	known_packages = [
+		"Front Brake Renewal",
+		"Engine Oil & Filter Change",
+		"Ignition Overhaul Package",
+		"test",
+		"Door - Front - LH (Remove and Replace)",
+	]
 	packages = frappe.get_all("Service Package", pluck="name")
 	for pkg in packages:
 		if pkg in known_packages or any(pkg.startswith(p) for p in TEST_CUST_PREFIXES):
@@ -302,7 +308,11 @@ def _cleanup_service_packages(log):
 
 
 def _cleanup_items(log):
-	known_items = ["test", "_Test Labor Item"]
+	known_items = [
+		"test",
+		"_Test Labor Item",
+		"Door - Front - LH (Remove and Replace)",
+	]
 	items = frappe.get_all("Item", pluck="name")
 	for item in items:
 		if item == "LABOR-STD":

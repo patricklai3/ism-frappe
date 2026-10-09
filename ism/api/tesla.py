@@ -26,6 +26,9 @@ def get_active_repair_orders():
 	if hasattr(frappe.local, "allow_cors"):
 		frappe.local.allow_cors = "*"
 
+	if not frappe.has_permission("Repair Order", "read"):
+		frappe.throw(frappe._("Not permitted to view Repair Orders."), frappe.PermissionError)
+
 	orders = frappe.db.sql(
 		"""
 		SELECT 
@@ -111,7 +114,12 @@ def fetch_and_parse_tesla_procedure(url):
 		frappe.local.allow_cors = "*"
 
 	if not url:
-		frappe.throw("Tesla procedure URL is required.")
+		frappe.throw(frappe._("Tesla procedure URL is required."))
+
+	from urllib.parse import urlparse
+	parsed_url = urlparse(url)
+	if parsed_url.scheme != "https" or parsed_url.netloc not in ("service.tesla.com", "service.teslamotors.com"):
+		frappe.throw(frappe._("Invalid Tesla manual domain. URL must be an https:// URL from service.tesla.com."))
 
 	headers = {
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -229,27 +237,46 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	side_param = str(kwargs.get("side") or proc_data.get("side") or "").strip().lower()
 	is_symmetrical = cint(proc_data.get("is_symmetrical") or (1 if pkg and pkg.is_symmetrical else 0))
 	rh_code = proc_data.get("rh_correction_code") or (getattr(pkg, "rh_correction_code", None) if pkg else None) or correction_code
+	lh_code = getattr(pkg, "correction_code", None) or correction_code
+
+	base_side = detect_service_side(title, correction_code, rh_code)
+	if base_side == "RH":
+		rh_title = title
+		lh_title = swap_side_in_title(title, "LH")
+		rh_code = correction_code
+		if pkg and getattr(pkg, "correction_code", None) and pkg.correction_code != rh_code:
+			lh_code = pkg.correction_code
+	else:
+		lh_title = title
+		rh_title = swap_side_in_title(title, "RH")
+		lh_code = correction_code
 
 	operations_to_add = []
 	if side_param == "both" and is_symmetrical:
 		operations_to_add.append({
 			"side": "LH",
-			"title": title,
-			"code": correction_code,
+			"title": lh_title,
+			"code": lh_code,
 		})
 		operations_to_add.append({
 			"side": "RH",
-			"title": swap_side_in_title(title, "RH"),
+			"title": rh_title,
 			"code": rh_code,
 		})
 	elif side_param == "rh" and is_symmetrical:
 		operations_to_add.append({
 			"side": "RH",
-			"title": swap_side_in_title(title, "RH"),
+			"title": rh_title,
 			"code": rh_code,
 		})
+	elif side_param == "lh" and is_symmetrical:
+		operations_to_add.append({
+			"side": "LH",
+			"title": lh_title,
+			"code": lh_code,
+		})
 	else:
-		pos = "LH" if is_symmetrical else "None"
+		pos = "LH" if is_symmetrical and base_side != "RH" else ("RH" if is_symmetrical and base_side == "RH" else "None")
 		operations_to_add.append({
 			"side": pos,
 			"title": title,

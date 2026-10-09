@@ -368,7 +368,7 @@ class RepairOrder(Document):
 			# Check if flat rate from service row or linked package
 			is_flat = cint(getattr(s, "is_flat_rate", 0))
 			if not is_flat and s.service_package:
-				pkg_flat = frappe.db.get_value("Service Package", s.service_package, "is_flat_rate")
+				pkg_flat = frappe.get_cached_value("Service Package", s.service_package, "is_flat_rate")
 				if pkg_flat:
 					is_flat = 1
 					s.is_flat_rate = 1
@@ -376,7 +376,7 @@ class RepairOrder(Document):
 			labor_hours = flt(s.labor_hours)
 			if is_flat:
 				if s.labor_amount is None or (flt(s.labor_amount) == 0 and s.service_package):
-					pkg_service_rate = frappe.db.get_value("Service Package", s.service_package, "service_rate")
+					pkg_service_rate = frappe.get_cached_value("Service Package", s.service_package, "service_rate")
 					if pkg_service_rate is not None and pkg_service_rate != "":
 						s.labor_amount = flt(pkg_service_rate, 2)
 				s.labor_amount = flt(s.labor_amount, 2)
@@ -938,19 +938,36 @@ class RepairOrder(Document):
 		)
 		is_supp = 1 if (cint(kwargs.get("is_supplement", 0)) or has_prior_authorization) else 0
 
+		from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
+
 		side_param = str(kwargs.get("side") or "").strip().lower()
 		is_symm = cint(getattr(pkg, "is_symmetrical", 0))
-		rh_code = getattr(pkg, "rh_correction_code", None) or getattr(pkg, "correction_code", None)
+		pkg_title = pkg.package_name
+		pkg_code = getattr(pkg, "correction_code", None)
+		rh_code = getattr(pkg, "rh_correction_code", None) or pkg_code
+
+		base_side = detect_service_side(pkg_title, pkg_code, rh_code)
+		if base_side == "RH":
+			rh_title = pkg_title
+			lh_title = swap_side_in_title(pkg_title, "LH")
+			rh_code = pkg_code
+			lh_code = getattr(pkg, "lh_correction_code", None) or pkg_code
+		else:
+			lh_title = pkg_title
+			rh_title = swap_side_in_title(pkg_title, "RH")
+			lh_code = pkg_code
 
 		sides_to_add = []
 		if side_param == "both" and is_symm:
-			sides_to_add.append({"side": "LH", "title": pkg.package_name, "code": getattr(pkg, "correction_code", None)})
-			sides_to_add.append({"side": "RH", "title": swap_side_in_title(pkg.package_name, "RH"), "code": rh_code})
+			sides_to_add.append({"side": "LH", "title": lh_title, "code": lh_code})
+			sides_to_add.append({"side": "RH", "title": rh_title, "code": rh_code})
 		elif side_param == "rh" and is_symm:
-			sides_to_add.append({"side": "RH", "title": swap_side_in_title(pkg.package_name, "RH"), "code": rh_code})
+			sides_to_add.append({"side": "RH", "title": rh_title, "code": rh_code})
+		elif side_param == "lh" and is_symm:
+			sides_to_add.append({"side": "LH", "title": lh_title, "code": lh_code})
 		else:
-			pos = "LH" if is_symm else "None"
-			sides_to_add.append({"side": pos, "title": pkg.package_name, "code": getattr(pkg, "correction_code", None)})
+			pos = "LH" if is_symm and base_side != "RH" else ("RH" if is_symm and base_side == "RH" else "None")
+			sides_to_add.append({"side": pos, "title": pkg_title, "code": pkg_code})
 
 		labor_hours = flt(pkg.standard_labor_hours)
 		is_flat = cint(pkg.is_flat_rate)
@@ -1043,7 +1060,10 @@ class RepairOrder(Document):
 			frappe.throw(_("Service row '{0}' not found on this Repair Order.").format(service_row_id))
 
 		curr_pos = getattr(target, "service_position", "") or detect_service_side(target.service_title)
-		opposite_pos = "RH" if curr_pos == "LH" else ("LH" if curr_pos == "RH" else "RH")
+		if curr_pos not in ("LH", "RH"):
+			frappe.throw(_("Service '{0}' is not a symmetrical LH/RH operation.").format(target.service_title))
+
+		opposite_pos = "RH" if curr_pos == "LH" else "LH"
 		new_title = swap_side_in_title(target.service_title, opposite_pos)
 
 		# Check if opposite side service already exists
@@ -1706,7 +1726,7 @@ def get_service_package_details(service_package, side=None):
 	default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
 	default_rate = _get_default_labor_rate()
 
-	from ism.utils.tesla_manual import swap_side_in_title
+	from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
 
 	is_symm = cint(getattr(pkg, "is_symmetrical", 0))
 	rh_code = getattr(pkg, "rh_correction_code", None)
@@ -1717,10 +1737,15 @@ def get_service_package_details(service_package, side=None):
 	pos = "None"
 	if is_symm:
 		pos = "RH" if target_side == "RH" else "LH"
-		if target_side == "RH":
-			title = swap_side_in_title(pkg.package_name, "RH")
+		base_side = detect_service_side(pkg.package_name, code, rh_code)
+		if pos == "RH":
+			title = swap_side_in_title(pkg.package_name, "RH") if base_side == "LH" else pkg.package_name
 			if rh_code:
 				code = rh_code
+		elif pos == "LH":
+			title = swap_side_in_title(pkg.package_name, "LH") if base_side == "RH" else pkg.package_name
+			if getattr(pkg, "correction_code", None):
+				code = pkg.correction_code
 
 	parts = []
 	for row in pkg.items:
