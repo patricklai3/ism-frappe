@@ -48,6 +48,7 @@
   "signature_image",
   "verbal_notes",
   "audit_hash",
+  "approval_logs",
   "tab_workshop",
   "sec_bay",
   "vehicle_location",
@@ -304,11 +305,11 @@
   },
   {
    "allow_on_submit": 1,
-   "default": "Draft",
+   "default": "Estimating",
    "fieldname": "approval_status",
    "fieldtype": "Select",
    "label": "Approval Status",
-   "options": "Draft\nPending Approval\nApproved\nPartially Approved\nDeclined"
+   "options": "Estimating\nPending Approval\nApproved\nPartially Approved\nDeclined"
   },
   {
    "allow_on_submit": 1,
@@ -359,6 +360,14 @@
    "fieldname": "audit_hash",
    "fieldtype": "Data",
    "label": "Audit Hash",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "approval_logs",
+   "fieldtype": "Table",
+   "label": "Customer Authorization History",
+   "options": "Repair Order Approval Log",
    "read_only": 1
   },
   {

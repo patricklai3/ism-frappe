@@ -29,6 +29,15 @@
 	border-left: 6px solid #e53e3e;
 	opacity: 0.75;
 }
+.job-card.is-locked-approved {
+	border-left: 6px solid #2f855a;
+	background: #fdfefe;
+}
+.job-card.is-locked-declined {
+	border-left: 6px solid #a0aec0;
+	background: #f8fafc;
+	opacity: 0.75;
+}
 .job-header {
 	padding: 12px 16px;
 	background: #f7fafc;
@@ -141,7 +150,40 @@ canvas#sig-canvas {
 					</tbody>
 				</table>
 
-				{% if approval_data.jobs and approval_data.jobs[0].signature_image %}
+				{% if approval_data.approval_logs and approval_data.approval_logs|length > 0 %}
+				<div class="mt-4 border-top pt-3">
+					<h6 class="font-weight-bold mb-3"><i class="fa fa-history mr-1"></i> {{ _("Authorization Audit History") }}</h6>
+					{% for log in approval_data.approval_logs %}
+					<div class="p-3 mb-2 rounded bg-light border" style="font-size: 13px;">
+						<div class="d-flex justify-content-between align-items-center mb-1">
+							<span class="font-weight-bold text-dark">
+								<i class="fa fa-check-circle text-success mr-1"></i> {{ log.signer_name }}
+								<span class="badge badge-light border ml-1">{{ log.channel }}</span>
+							</span>
+							<span class="text-muted small">{{ log.approval_datetime }}</span>
+						</div>
+						<div class="text-muted small mb-1">
+							<b>{{ _("Amount Authorized:") }}</b> ${{ "{:,.2f}".format(log.authorized_amount) }}
+						</div>
+						{% if log.approved_services and log.approved_services != 'None' %}
+						<div class="small text-success">
+							<b>{{ _("Approved:") }}</b> {{ log.approved_services }}
+						</div>
+						{% endif %}
+						{% if log.declined_services and log.declined_services != 'None' %}
+						<div class="small text-danger">
+							<b>{{ _("Declined:") }}</b> {{ log.declined_services }}
+						</div>
+						{% endif %}
+						{% if log.signature_image %}
+						<div class="mt-2">
+							<img src="{{ log.signature_image }}" alt="Signature" style="max-height: 50px; border: 1px solid #cbd5e0; border-radius: 4px; padding: 2px; background: #fff;">
+						</div>
+						{% endif %}
+					</div>
+					{% endfor %}
+				</div>
+				{% elif approval_data.jobs and approval_data.jobs[0].signature_image %}
 				<div class="mt-4 border-top pt-3">
 					<h6>{{ _("Signature on File") }}:</h6>
 					<img src="{{ approval_data.jobs[0].signature_image }}" alt="Signature" style="max-height: 80px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px;">
@@ -187,13 +229,20 @@ canvas#sig-canvas {
 
 				<form id="approval-form">
 					{% for job in approval_data.jobs %}
-					<div class="job-card is-approved" id="job-card-{{ loop.index }}" data-job-id="{{ job.name }}" data-amount="{{ job.estimated_total }}">
+					<div class="job-card {% if job.is_locked %}{% if job.status == 'Declined' %}is-locked-declined is-declined{% else %}is-locked-approved is-approved{% endif %}{% else %}{% if job.status == 'Declined' %}is-declined{% else %}is-approved{% endif %}{% endif %}" id="job-card-{{ loop.index }}" data-job-id="{{ job.name }}" data-amount="{{ job.estimated_total }}" data-status="{{ job.status }}" data-locked="{{ 'true' if job.is_locked else 'false' }}">
 						<div class="job-header">
 							<div>
-								<span class="badge-category mr-2">{{ job.job_category }}</span>
+								{% if job.job_category %}<span class="badge-category mr-2">{{ job.job_category }}</span>{% endif %}
 								<b class="h6 mb-0">{{ job.job_title }}</b>
 								{% if job.is_supplement %}
 								<span class="badge badge-info ml-1">{{ _("Supplement") }}</span>
+								{% endif %}
+								{% if job.is_locked %}
+									{% if job.status == 'Approved' %}
+									<span class="badge badge-success ml-2 px-2 py-1"><i class="fa fa-lock mr-1"></i>{{ _("Previously Approved") }}</span>
+									{% else %}
+									<span class="badge badge-secondary ml-2 px-2 py-1"><i class="fa fa-lock mr-1"></i>{{ _("Previously Declined") }}</span>
+									{% endif %}
 								{% endif %}
 							</div>
 							<div class="text-right">
@@ -225,8 +274,26 @@ canvas#sig-canvas {
 							</table>
 							{% endif %}
 
-							<div class="d-flex justify-content-end align-items-center mt-2 pt-2 border-top">
-								<span class="mr-3 small text-muted font-weight-bold">{{ _("Your Decision:") }}</span>
+							{% if job.is_locked %}
+							<div class="d-flex justify-content-between align-items-center mt-2 pt-2 border-top">
+								<span class="small text-muted">
+									<i class="fa fa-lock text-secondary mr-1"></i> {{ _("Decision finalized in previous authorization") }}
+								</span>
+								{% if job.status == 'Approved' %}
+								<span class="badge badge-success px-3 py-2" style="font-size: 0.85rem;">
+									<i class="fa fa-check-circle mr-1"></i> {{ _("Authorized") }}: ${{ "{:,.2f}".format(job.authorized_amount or job.estimated_total) }}
+								</span>
+								{% else %}
+								<span class="badge badge-secondary px-3 py-2" style="font-size: 0.85rem;">
+									<i class="fa fa-ban mr-1"></i> {{ _("Declined / Deferred") }}
+								</span>
+								{% endif %}
+							</div>
+							{% else %}
+							<div class="d-flex justify-content-between align-items-center mt-2 pt-2 border-top">
+								<span class="mr-3 small text-muted font-weight-bold">
+									<span class="badge badge-warning mr-1">{{ _("Action Required") }}</span> {{ _("Your Decision:") }}
+								</span>
 								<div class="btn-group btn-group-toggle" data-toggle="buttons">
 									<label class="btn btn-sm btn-outline-success btn-toggle-approve active" onclick="setJobDecision('{{ loop.index }}', 'Approved')">
 										<input type="radio" name="decision_{{ job.name }}" value="Approved" checked> <i class="fa fa-check"></i> {{ _("Approve") }}
@@ -236,18 +303,64 @@ canvas#sig-canvas {
 									</label>
 								</div>
 							</div>
+							{% endif %}
 						</div>
 					</div>
 					{% endfor %}
 
 					<!-- Summary Box -->
 					<div class="card bg-light border-0 mb-4 p-3">
+						<div id="summary-multi-tier" class="mb-2 pb-2 border-bottom" style="display: none;">
+							<div class="d-flex justify-content-between align-items-center text-muted small mb-1">
+								<span>{{ _("Prior Authorized Amount:") }}</span>
+								<span class="font-weight-bold" id="prior-authorized-display">$0.00</span>
+							</div>
+							<div class="d-flex justify-content-between align-items-center text-muted small">
+								<span>{{ _("Newly Authorized (This Session):") }}</span>
+								<span class="font-weight-bold text-primary" id="new-authorized-display">$0.00</span>
+							</div>
+						</div>
 						<div class="d-flex justify-content-between align-items-center">
 							<h5 class="mb-0">{{ _("Total Authorized Amount:") }}</h5>
 							<h3 class="mb-0 text-success font-weight-bold" id="total-authorized-display">$0.00</h3>
 						</div>
 						<small class="text-muted text-right mt-1">{{ _("Plus applicable sales taxes and shop fees upon final invoicing.") }}</small>
 					</div>
+
+					{% if approval_data.approval_logs and approval_data.approval_logs|length > 0 %}
+					<div class="card p-3 mb-4 bg-light border">
+						<h6 class="font-weight-bold mb-3"><i class="fa fa-history mr-1"></i> {{ _("Prior Authorization History") }}</h6>
+						{% for log in approval_data.approval_logs %}
+						<div class="p-3 mb-2 rounded bg-white border" style="font-size: 13px;">
+							<div class="d-flex justify-content-between align-items-center mb-1">
+								<span class="font-weight-bold text-dark">
+									<i class="fa fa-check-circle text-success mr-1"></i> {{ log.signer_name }}
+									<span class="badge badge-light border ml-1">{{ log.channel }}</span>
+								</span>
+								<span class="text-muted small">{{ log.approval_datetime }}</span>
+							</div>
+							<div class="text-muted small mb-1">
+								<b>{{ _("Amount Authorized:") }}</b> ${{ "{:,.2f}".format(log.authorized_amount) }}
+							</div>
+							{% if log.approved_services and log.approved_services != 'None' %}
+							<div class="small text-success">
+								<b>{{ _("Approved:") }}</b> {{ log.approved_services }}
+							</div>
+							{% endif %}
+							{% if log.declined_services and log.declined_services != 'None' %}
+							<div class="small text-danger">
+								<b>{{ _("Declined:") }}</b> {{ log.declined_services }}
+							</div>
+							{% endif %}
+							{% if log.signature_image %}
+							<div class="mt-2">
+								<img src="{{ log.signature_image }}" alt="Signature" style="max-height: 45px; border: 1px solid #cbd5e0; border-radius: 4px; padding: 2px; background: #fff;">
+							</div>
+							{% endif %}
+						</div>
+						{% endfor %}
+					</div>
+					{% endif %}
 
 					<!-- Customer Signature Section -->
 					<div class="card p-3 mb-4">
@@ -285,17 +398,37 @@ canvas#sig-canvas {
 		<script>
 		const jobDecisions = {};
 		const token = {{ token | tojson }};
+		let priorAuthorizedTotal = 0.0;
+		let hasLockedJobs = false;
 
 		function initTotals() {
+			priorAuthorizedTotal = 0.0;
+			hasLockedJobs = false;
 			document.querySelectorAll('.job-card').forEach(card => {
 				const jobId = card.dataset.jobId;
-				jobDecisions[jobId] = 'Approved';
+				const isLocked = card.dataset.locked === 'true';
+				const status = card.dataset.status;
+				const amount = parseFloat(card.dataset.amount || 0);
+
+				if (isLocked) {
+					hasLockedJobs = true;
+					if (status === 'Approved') {
+						priorAuthorizedTotal += amount;
+					}
+				} else {
+					jobDecisions[jobId] = 'Approved';
+				}
 			});
+			if (hasLockedJobs) {
+				const multiTierEl = document.getElementById('summary-multi-tier');
+				if (multiTierEl) multiTierEl.style.display = 'block';
+			}
 			updateAuthorizedTotal();
 		}
 
 		function setJobDecision(index, decision) {
 			const card = document.getElementById('job-card-' + index);
+			if (!card || card.dataset.locked === 'true') return;
 			const jobId = card.dataset.jobId;
 			jobDecisions[jobId] = decision;
 
@@ -310,14 +443,28 @@ canvas#sig-canvas {
 		}
 
 		function updateAuthorizedTotal() {
-			let total = 0.0;
-			document.querySelectorAll('.job-card').forEach(card => {
+			let newTotal = 0.0;
+			document.querySelectorAll('.job-card[data-locked="false"]').forEach(card => {
 				const jobId = card.dataset.jobId;
 				if (jobDecisions[jobId] === 'Approved') {
-					total += parseFloat(card.dataset.amount || 0);
+					newTotal += parseFloat(card.dataset.amount || 0);
 				}
 			});
-			document.getElementById('total-authorized-display').innerText = '$' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+			const combinedTotal = priorAuthorizedTotal + newTotal;
+
+			const priorEl = document.getElementById('prior-authorized-display');
+			if (priorEl) {
+				priorEl.innerText = '$' + priorAuthorizedTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+			}
+			const newEl = document.getElementById('new-authorized-display');
+			if (newEl) {
+				newEl.innerText = '$' + newTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+			}
+			const totalEl = document.getElementById('total-authorized-display');
+			if (totalEl) {
+				totalEl.innerText = '$' + (hasLockedJobs ? combinedTotal : newTotal).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+			}
 		}
 
 		// Canvas Signature Logic

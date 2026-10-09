@@ -7,6 +7,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import cint, flt, today
 
 from ism.ism.doctype.repair_order.repair_order import (
+	get_deferred_services_for_vehicle,
 	get_filtered_vehicles,
 	get_service_package_details,
 	get_vehicle_customers,
@@ -149,7 +150,6 @@ class TestRepairOrder(ISMTestCase):
 			"services": [
 				{
 					"service_title": "Custom Ignition Tune-Up",
-					"category": "Mechanical",
 					"labor_hours": 2.0,
 					"labor_rate": 120.0,
 					"parts": json.dumps([
@@ -245,14 +245,14 @@ class TestRepairOrder(ISMTestCase):
 			"services": [
 				{
 					"service_title": "Brake Replacement",
-					"status": "Draft",
+					"status": "Estimating",
 					"labor_hours": 1.0,
 					"labor_rate": 100.0,
 					"parts": json.dumps([{"item_code": part1.name, "item_name": "Brakes", "qty": 1, "rate": 300, "amount": 300}]),
 				},
 				{
 					"service_title": "Transmission Flush",
-					"status": "Draft",
+					"status": "Estimating",
 					"labor_hours": 1.0,
 					"labor_rate": 100.0,
 					"parts": json.dumps([{"item_code": part2.name, "item_name": "Flush Fluid", "qty": 1, "rate": 250, "amount": 250}]),
@@ -283,6 +283,63 @@ class TestRepairOrder(ISMTestCase):
 			filters={"parent": self.vehicle.name, "job_title": "Transmission Flush"},
 		)
 		self.assertEqual(len(deferred), 1)
+
+		# Verify get_deferred_services_for_vehicle returns properly formatted entries
+		deferred_api = get_deferred_services_for_vehicle(self.vehicle.name)
+		self.assertEqual(len(deferred_api), 1)
+		item = deferred_api[0]
+		self.assertEqual(item.job_title, "Transmission Flush")
+		self.assertEqual(item.service_title, "Transmission Flush")
+		self.assertEqual(item.service_description, "Transmission Flush")
+		self.assertEqual(item.estimated_amount, 350.0)
+		self.assertEqual(item.estimated_cost, 350.0)
+		self.assertEqual(item.repair_order, ro.name)
+		self.assertEqual(item.decline_reason, "Declined during customer authorization")
+
+		# Test adding deferred service into a new repair order
+		ro2 = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 55000,
+		})
+		ro2.insert()
+		self.track(ro2)
+
+		res = ro2.add_deferred_services(deferred_items=deferred_api)
+		self.assertEqual(res.get("status"), "success")
+		self.assertEqual(res.get("added_count"), 1)
+		ro2.reload()
+		self.assertEqual(len(ro2.services), 1)
+		self.assertEqual(ro2.services[0].service_title, "Transmission Flush")
+		self.assertEqual(ro2.services[0].status, "Estimating")
+		self.assertEqual(ro2.approval_status, "Estimating")
+		self.assertEqual(flt(ro2.services[0].total_amount), 350.0)
+
+		# Attempting to add duplicate is ignored safely
+		res_dup = ro2.add_deferred_services(deferred_items=[{"job_title": "Transmission Flush"}])
+		self.assertEqual(res_dup.get("added_count"), 0)
+
+		# Authorize and complete the previously deferred service
+		ro2.authorize_jobs(
+			approvals={"1": "Approved"},
+			channel="Remote Web Link",
+			signer_name="John Customer",
+		)
+		ro2.reload()
+		ro2.toggle_service_completion(service_row_id=ro2.services[0].name, is_completed=1)
+
+		# Verify deferred service is marked 'Completed Later'
+		deferred_rec = frappe.db.get_value(
+			"Vehicle Deferred Service",
+			{"parent": self.vehicle.name, "job_title": "Transmission Flush"},
+			"status"
+		)
+		self.assertEqual(deferred_rec, "Completed Later")
+
+		# Verify it no longer appears in open recommendations
+		open_deferred = get_deferred_services_for_vehicle(self.vehicle.name)
+		self.assertEqual(len(open_deferred), 0)
 
 	def test_process_payment_and_release(self):
 		part = self.create_test_item("TEST-OIL-FILTER", is_stock_item=0, standard_rate=50)
@@ -432,7 +489,7 @@ class TestRepairOrder(ISMTestCase):
 		ro.reload()
 		self.assertEqual(len(ro.services), 2)
 		self.assertEqual(ro.services[1].is_supplement, 1)
-		self.assertEqual(ro.services[1].status, "Pending Approval")
+		self.assertEqual(ro.services[1].status, "Estimating")
 		# Only service 0 is approved so far, so 1 of 1 approved services is completed = 100%
 		self.assertEqual(ro.progress_percent, 100.0)
 
@@ -649,11 +706,11 @@ class TestRepairOrder(ISMTestCase):
 			"vehicle": self.vehicle.name,
 			"odometer_in": 30000,
 			"status": "Pending Authorization",
-			"approval_status": "Draft",
+			"approval_status": "Estimating",
 			"services": [
 				{
 					"service_title": "Engine Diagnostics",
-					"status": "Draft",
+					"status": "Estimating",
 					"labor_hours": 1.0,
 					"labor_rate": 120.0,
 					"parts": json.dumps([{"item_code": item.name, "qty": 1, "rate": 120}]),
@@ -693,7 +750,7 @@ class TestRepairOrder(ISMTestCase):
 			"services": [
 				{
 					"service_title": "Transmission Fluid Exchange",
-					"status": "Draft",
+					"status": "Estimating",
 					"labor_hours": 1.5,
 					"labor_rate": 120.0,
 					"parts": json.dumps([{"item_code": item.name, "qty": 4, "rate": 25}]),
@@ -794,7 +851,22 @@ class TestRepairOrder(ISMTestCase):
 		ro.reload()
 		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
 
-		# 2. Simulate client calling frm.call({ doc: frm.doc, method: "park_vehicle" })
+		# 2. Simulate client parking vehicle before work is completed (e.g. paused or staged)
+		frappe.response = frappe._dict()
+		frappe.response.docs = []
+		run_doc_method("park_vehicle", docs=ro.as_json())
+		self.assertEqual(frappe.response.message.get("status"), "success")
+		self.assertEqual(frappe.response.message.get("vehicle_location"), "In Customer Lot")
+
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "In Customer Lot")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+
+		# 3. Pull back into bay, complete the service check mark, and park when truly completed
+		ro.pick_up_vehicle()
+		ro.toggle_service_completion(ro.services[0].name, 1)
+		ro.reload()
+
 		frappe.response = frappe._dict()
 		frappe.response.docs = []
 		run_doc_method("park_vehicle", docs=ro.as_json())
@@ -928,7 +1000,7 @@ class TestRepairOrder(ISMTestCase):
 			"services": [
 				{
 					"service_title": "Complimentary Courtesy Check",
-					"status": "Draft",
+					"status": "Estimating",
 					"labor_hours": 0.5,
 					"labor_rate": 0.0,
 				}
@@ -1237,6 +1309,157 @@ class TestRepairOrder(ISMTestCase):
 		self.track(ro)
 		self.assertEqual(ro.customer, self.customer.name)
 		self.assertEqual(ro.vehicle, new_veh.name)
+
+	def test_approval_logging_and_locked_authorizations_with_estimating_guards(self):
+		"""Verify approval history logging, locked prior authorizations, and estimating guards."""
+		from ism.api.approval import get_public_quote_approval
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 30000,
+			"services": [
+				{
+					"service_title": "Brake Service",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 120.0,
+					"labor_amount": 120.0,
+					"total_amount": 120.0,
+				},
+				{
+					"service_title": "Cabin Air Filter",
+					"status": "Pending Approval",
+					"labor_hours": 0.5,
+					"labor_rate": 120.0,
+					"labor_amount": 60.0,
+					"total_amount": 60.0,
+				},
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		# 1. Round 1: Customer approves Brake Service and declines Cabin Air Filter
+		ro.authorize_jobs(
+			approvals={"1": "Approved", "2": "Declined"},
+			channel="Remote Web Link",
+			signer_name="Jane Doe",
+			signature_image="data:image/png;base64,fake_sig_1",
+		)
+		ro.reload()
+		self.assertEqual(ro.services[0].status, "Approved")
+		self.assertEqual(ro.services[1].status, "Declined")
+		self.assertEqual(len(ro.approval_logs), 1)
+		self.assertEqual(ro.approval_logs[0].signer_name, "Jane Doe")
+		self.assertEqual(ro.approval_logs[0].authorized_amount, 120.0)
+		self.assertIn("Brake Service", ro.approval_logs[0].approved_services)
+		self.assertIn("Cabin Air Filter", ro.approval_logs[0].declined_services)
+
+		# 2. Verify prior authorizations cannot be changed or declined
+		ro.authorize_jobs(
+			approvals={"1": "Declined", "2": "Approved"},
+			channel="Remote Web Link",
+			signer_name="Malicious Overwrite",
+		)
+		ro.reload()
+		self.assertEqual(ro.services[0].status, "Approved", "Previously approved service must remain Approved")
+		self.assertEqual(ro.services[1].status, "Declined", "Previously declined service must remain Declined")
+
+		# 3. Add supplement: starts in Estimating
+		ro.add_supplement(
+			service_title="Wiper Blades Replacement",
+			category="Maintenance",
+			labor_hours=0.25,
+			labor_rate=120.0,
+		)
+		ro.reload()
+		self.assertEqual(len(ro.services), 3)
+		self.assertEqual(ro.services[2].status, "Estimating")
+
+		# 4. Verify Repair Order CANNOT be closed/released while a service is still in Estimating
+		with self.assertRaises(frappe.ValidationError):
+			ro.process_payment_and_release(paid_amount=120.0, odometer_out=30010)
+
+		# 5. Round 2: Authorize supplement
+		ro.authorize_jobs(
+			approvals={"3": "Approved"},
+			channel="Remote Web Link",
+			signer_name="Jane Doe Round 2",
+			signature_image="data:image/png;base64,fake_sig_2",
+		)
+		ro.reload()
+		self.assertEqual(ro.services[2].status, "Approved")
+		self.assertEqual(len(ro.approval_logs), 2)
+		self.assertEqual(ro.approval_logs[1].signer_name, "Jane Doe Round 2")
+		self.assertEqual(ro.approval_logs[1].authorized_amount, 30.0)
+		self.assertIn("Wiper Blades", ro.approval_logs[1].approved_services)
+
+		# 6. Verify get_public_quote_approval locks prior decisions and includes logs
+		from ism.api.approval import get_or_create_approval_token
+		token, _ = get_or_create_approval_token(ro.name)
+		portal_data = get_public_quote_approval(token)
+		self.assertTrue(portal_data["valid"])
+		self.assertEqual(len(portal_data["approval_logs"]), 2)
+		for job in portal_data["services"]:
+			self.assertTrue(job["is_locked"], f"Job {job['job_title']} should be marked locked")
+
+		# 7. Complete approved services and release
+		ro.reload()
+		ro.services[0].is_completed = 1
+		ro.services[2].is_completed = 1
+		ro.save(ignore_permissions=True)
+		rel_res = ro.process_payment_and_release(paid_amount=ro.grand_total, odometer_out=30020)
+		self.assertEqual(rel_res.get("status"), "success")
+		self.assertEqual(ro.status, "Closed / Released")
+
+	def test_location_dependent_completion_and_tab_targeting(self):
+		"""Verify that checking all jobs complete keeps order in progress while vehicle is in bay,
+		and only marks Work Completed after technician parks vehicle back in customer lot."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 45000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Tire Mount and Balance",
+					"status": "Approved",
+					"labor_hours": 1.5,
+					"labor_rate": 120.0,
+					"labor_amount": 180.0,
+					"total_amount": 180.0,
+				}
+			],
+		})
+		ro.insert()
+		self.track(ro)
+
+		# 1. Pick up vehicle into bay
+		ro.pick_up_vehicle()
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+
+		# 2. Complete all services in bay
+		ro.toggle_service_completion(ro.services[0].name, 1)
+		ro.reload()
+		self.assertEqual(ro.services[0].is_completed, 1)
+		self.assertEqual(ro.progress_percent, 100.0)
+
+		# Crucial check: Order MUST NOT be marked Work Completed while vehicle is still in bay!
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+		self.assertEqual(ro.status, "Authorized - In Progress")
+
+		# 3. Technician parks vehicle back in lot
+		ro.park_vehicle()
+		ro.reload()
+		self.assertEqual(ro.vehicle_location, "Completed / Parked in Lot")
+		self.assertEqual(ro.status, "Work Completed")
+		self.assertIsNotNone(ro.parked_at)
+
 
 
 

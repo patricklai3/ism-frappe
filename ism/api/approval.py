@@ -28,11 +28,26 @@ def get_or_create_approval_token(repair_order_name: str) -> tuple[str, str]:
 	token = doc.approval_token
 	expiry = get_datetime(doc.approval_token_expiry) if doc.approval_token_expiry else None
 
+	# Advance uncommunicated draft/estimating services to Pending Approval upon requesting authorization
+	services_updated = False
+	for s in getattr(doc, "services", []):
+		if s.status in ["Draft", "Estimating"]:
+			s.status = "Pending Approval"
+			services_updated = True
+			if s.name and not str(s.name).startswith("new-"):
+				frappe.db.set_value("Repair Order Service", s.name, "status", "Pending Approval", update_modified=False)
+
 	if not token or not expiry or now > expiry:
 		token = frappe.generate_hash(length=32)
 		doc.approval_token = token
 		doc.approval_token_expiry = now + timedelta(hours=expiry_hours)
-		if doc.approval_status == "Draft":
+		services_updated = True
+
+	if services_updated:
+		has_approved = any(s.status == "Approved" for s in getattr(doc, "services", []))
+		if has_approved:
+			doc.approval_status = "Partially Approved"
+		else:
 			doc.approval_status = "Pending Approval"
 		doc.flags.ignore_validate = True
 		doc.flags.ignore_mandatory = True
@@ -133,7 +148,8 @@ def get_public_quote_approval(token: str) -> dict:
 		return {"valid": False, "error": _("This authorization link has expired. Please contact the service advisor for a new link.")}
 
 	# Check if already authorized
-	already_submitted = doc.approval_status in ["Approved", "Partially Approved", "Declined"] and doc.signature_image is not None
+	has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in getattr(doc, "services", []))
+	already_submitted = not has_pending and doc.approval_status in ["Approved", "Partially Approved", "Declined"] and doc.signature_image is not None
 
 	# Vehicle info
 	vehicle_data = {}
@@ -202,6 +218,7 @@ def get_public_quote_approval(token: str) -> dict:
 			"total_amount": flt(s.total_amount),
 			"status": s.status,
 			"is_supplement": cint(s.is_supplement),
+			"is_locked": s.status in ["Approved", "Declined"],
 			"items": linked_items,
 		})
 
@@ -241,6 +258,31 @@ def get_public_quote_approval(token: str) -> dict:
 		"I hereby authorize the repair work listed above to be done along with the necessary material. You and your employees may operate the vehicle for purpose of testing, inspection, or delivery."
 	)
 
+	approval_logs = [
+		{
+			"approval_datetime": str(log.approval_datetime),
+			"signer_name": log.signer_name,
+			"channel": log.channel,
+			"authorized_amount": flt(log.authorized_amount),
+			"approved_services": log.approved_services,
+			"declined_services": log.declined_services,
+			"signature_image": log.signature_image,
+		}
+		for log in getattr(doc, "approval_logs", [])
+	]
+	if not approval_logs and doc.authorized_at and doc.authorized_by:
+		prior_approved = [s for s in getattr(doc, "services", []) if s.status == "Approved"]
+		prior_declined = [s for s in getattr(doc, "services", []) if s.status == "Declined"]
+		approval_logs.append({
+			"approval_datetime": str(doc.authorized_at),
+			"signer_name": doc.authorized_by,
+			"channel": "Remote Web Link",
+			"authorized_amount": flt(sum(flt(s.total_amount) for s in prior_approved), 2),
+			"approved_services": ", ".join(f"{s.service_title} (${flt(s.total_amount):,.2f})" for s in prior_approved) or _("None"),
+			"declined_services": ", ".join(s.service_title for s in prior_declined) or _("None"),
+			"signature_image": doc.signature_image,
+		})
+
 	return {
 		"valid": True,
 		"already_submitted": already_submitted,
@@ -248,13 +290,17 @@ def get_public_quote_approval(token: str) -> dict:
 			"name": doc.name,
 			"transaction_date": doc.posting_date,
 			"status": doc.status,
+			"customer_name": getattr(doc, "customer_name", None) or doc.customer,
 			"customer_concern": doc.customer_concern,
+			"is_supplement": cint(doc.is_supplement) if hasattr(doc, "is_supplement") else int(any(s.get("is_supplement") for s in services_list)),
 		},
 		"repair_order": {
 			"name": doc.name,
 			"posting_date": doc.posting_date,
 			"status": doc.status,
+			"customer_name": getattr(doc, "customer_name", None) or doc.customer,
 			"customer_concern": doc.customer_concern,
+			"is_supplement": cint(doc.is_supplement) if hasattr(doc, "is_supplement") else int(any(s.get("is_supplement") for s in services_list)),
 		},
 		"vehicle": vehicle_data,
 		"company": company_data,
@@ -267,6 +313,7 @@ def get_public_quote_approval(token: str) -> dict:
 		"authorized_by": doc.authorized_by,
 		"authorized_at": doc.authorized_at,
 		"signature_image": doc.signature_image,
+		"approval_logs": approval_logs,
 	}
 
 
@@ -294,7 +341,8 @@ def submit_customer_approval(
 	if doc.approval_token_expiry and now_datetime() > get_datetime(doc.approval_token_expiry):
 		frappe.throw(_("Authorization token has expired."))
 
-	if doc.approval_status in ["Approved", "Partially Approved"] and doc.signature_image:
+	has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in getattr(doc, "services", []))
+	if not has_pending and doc.approval_status in ["Approved", "Partially Approved"] and doc.signature_image:
 		frappe.throw(_("This repair estimate has already been authorized."))
 
 	# Normalize approvals if passed as list of objects from web portal
@@ -319,6 +367,8 @@ def submit_customer_approval(
 		channel="Remote Web Link",
 		signer_name=signer_name,
 		signature_image=signature_data,
+		ip_address=ip_address,
+		user_agent=user_agent,
 	)
 
 	return {"success": True, "message": _("Thank you! Your authorization has been recorded.")}

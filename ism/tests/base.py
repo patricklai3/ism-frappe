@@ -51,14 +51,16 @@ class ISMTestCase(unittest.TestCase):
 
 	def create_test_quotation(self, customer, vehicle=None, items=None, **kwargs):
 		item_code = self.get_or_create_test_item()
-		doc = frappe.get_doc({
+		doc_dict = {
 			"doctype": "Quotation",
 			"quotation_to": "Customer",
 			"party_name": customer,
-			"custom_vehicle": vehicle,
 			"items": items or [{"item_code": item_code, "qty": 1, "rate": 100.0}],
 			**kwargs,
-		}).insert(ignore_permissions=True)
+		}
+		if vehicle and frappe.db.has_column("Quotation", "custom_vehicle"):
+			doc_dict["custom_vehicle"] = vehicle
+		doc = frappe.get_doc(doc_dict).insert(ignore_permissions=True)
 		return self.track(doc)
 
 	def create_test_repair_order(self, customer, vehicle, odometer_in=10000, **kwargs):

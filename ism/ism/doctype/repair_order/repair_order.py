@@ -202,6 +202,8 @@ class RepairOrder(Document):
 			self.taxes_and_charges = get_or_create_default_tax_template(self.company)
 		if not flt(self.tax_rate):
 			self.tax_rate = 13.0
+		if not self.approval_status or self.approval_status == "Draft":
+			self.approval_status = "Estimating"
 
 	def validate(self):
 		self._validate_check_in()
@@ -213,6 +215,7 @@ class RepairOrder(Document):
 		self._update_progress_and_job_timing()
 		self._validate_authorization_guards()
 		self._sync_declined_to_deferred_services()
+		self._sync_completed_deferred_services()
 		self._update_scheduling_capability_flags()
 
 	def _update_scheduling_capability_flags(self):
@@ -255,7 +258,16 @@ class RepairOrder(Document):
 		synchronize non-declined services so they become Approved.
 		"""
 		has_approved = any(s.status == "Approved" for s in self.services)
-		has_pending = any(s.status in ["Draft", "Pending Approval"] for s in self.services)
+		has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in self.services)
+
+		# Normalize Draft to Estimating if not approved
+		if not self.approval_status or self.approval_status == "Draft":
+			if not has_approved:
+				self.approval_status = "Estimating"
+
+		for s in self.services:
+			if s.status == "Draft":
+				s.status = "Estimating"
 
 		# If there are pending services (e.g. newly added supplement), approval_status cannot be "Approved"
 		# unless the user explicitly changed approval_status to "Approved" on the form
@@ -329,9 +341,9 @@ class RepairOrder(Document):
 		default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
 
 		for s in self.services:
-			# Auto-assign service title if missing but service_package is set
-			if not s.service_title and s.service_package:
-				s.service_title = s.service_package
+			# Auto-assign service title if missing
+			if not s.service_title:
+				s.service_title = s.service_package or _("Custom Service")
 
 			# Check if flat rate from service row or linked package
 			is_flat = cint(getattr(s, "is_flat_rate", 0))
@@ -461,16 +473,37 @@ class RepairOrder(Document):
 			if not exists:
 				if not veh_doc:
 					veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
+				reason = (s.advisor_notes or "").strip()
+				if not reason or reason.startswith("Correction code") or "NOTE: Unless otherwise explicitly stated" in reason:
+					reason = _("Declined during customer authorization")
 				veh_doc.append("deferred_services", {
 					"job_title": s.service_title,
 					"decline_date": today(),
 					"estimated_amount": s.total_amount,
 					"repair_order": self.name,
-					"decline_reason": s.advisor_notes or _("Declined during customer authorization"),
+					"decline_reason": reason,
 				})
 
 		if veh_doc:
 			veh_doc.save(ignore_permissions=True)
+
+	def _sync_completed_deferred_services(self):
+		"""Mark previously deferred services on this vehicle as Completed Later once completed."""
+		if not self.vehicle:
+			return
+
+		completed_titles = [s.service_title for s in self.services if s.is_completed and s.service_title]
+		if not completed_titles:
+			return
+
+		for title in completed_titles:
+			frappe.db.sql("""
+				UPDATE `tabVehicle Deferred Service`
+				SET status = 'Completed Later'
+				WHERE parent = %s
+				  AND job_title = %s
+				  AND status = 'Open Recommendation'
+			""", (self.vehicle, title))
 
 	def _validate_authorization_guards(self):
 		"""
@@ -480,8 +513,11 @@ class RepairOrder(Document):
 		3. Service completion: individual services cannot be marked completed unless approved.
 		"""
 		has_approved = any(s.status == "Approved" for s in self.services)
+		has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in self.services)
+		if has_pending and self.approval_status == "Approved":
+			self.approval_status = "Partially Approved" if has_approved else "Pending Approval"
 
-		# Auto-cascade if approval_status is Approved
+		# Auto-cascade if approval_status is Approved and no pending/estimating services
 		if self.approval_status == "Approved":
 			if not self.services:
 				has_approved = True
@@ -493,7 +529,7 @@ class RepairOrder(Document):
 		elif self.approval_status == "Partially Approved":
 			if not has_approved and self.services:
 				for s in self.services:
-					if s.status != "Declined":
+					if s.status not in ["Declined", "Estimating", "Draft", "Pending Approval"]:
 						s.status = "Approved"
 						has_approved = True
 						break
@@ -507,7 +543,7 @@ class RepairOrder(Document):
 			"Closed / Released",
 		]
 		if self.status in restricted_statuses:
-			if self.approval_status not in ["Approved", "Partially Approved"] or not has_approved:
+			if not has_approved:
 				frappe.throw(
 					_(
 						"Cannot advance Repair Order to '{0}' without customer authorization. "
@@ -522,7 +558,7 @@ class RepairOrder(Document):
 			"Released to Customer",
 		]
 		if self.vehicle_location in restricted_locations:
-			if self.approval_status not in ["Approved", "Partially Approved"] or not has_approved:
+			if not has_approved:
 				frappe.throw(
 					_(
 						"Vehicle cannot be moved to '{0}' without customer authorization on file. "
@@ -570,13 +606,24 @@ class RepairOrder(Document):
 
 	@frappe.whitelist()
 	def park_vehicle(self):
-		"""Technician parks vehicle back in lot after completing work."""
+		"""Technician parks vehicle back in lot."""
 		self.parked_at = now_datetime()
 		self.parked_by = frappe.session.user
-		self.vehicle_location = "Completed / Parked in Lot"
-		self.status = "Work Completed"
 		if self.picked_up_at:
 			self.total_bay_hours = flt(time_diff_in_hours(self.parked_at, self.picked_up_at), 2)
+
+		has_approved = any(s.status == "Approved" for s in self.services)
+		has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in self.services)
+		approved_services = [s for s in self.services if s.status == "Approved"]
+		all_approved_completed = bool(has_approved and not has_pending and all(s.is_completed for s in approved_services))
+
+		if all_approved_completed:
+			self.vehicle_location = "Completed / Parked in Lot"
+			self.status = "Work Completed"
+		else:
+			self.vehicle_location = "In Customer Lot"
+			if self.status not in ["Authorized - In Progress", "Waiting on Parts"]:
+				self.status = "Authorized - In Progress"
 
 		if self.docstatus == 1:
 			self.db_set("vehicle_location", self.vehicle_location)
@@ -635,8 +682,28 @@ class RepairOrder(Document):
 			}, update_modified=False)
 
 		self._update_progress_and_job_timing()
+
+		has_approved = any(s.status == "Approved" for s in self.services)
+		has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in self.services)
+		approved_services = [s for s in self.services if s.status == "Approved"]
+		all_approved_completed = bool(has_approved and not has_pending and all(s.is_completed for s in approved_services))
+
+		if all_approved_completed:
+			if self.vehicle_location == "Completed / Parked in Lot":
+				self.status = "Work Completed"
+			else:
+				# Keep status Authorized - In Progress until vehicle is moved/parked back in lot
+				if self.status not in ["Authorized - In Progress", "Waiting on Parts"]:
+					self.status = "Authorized - In Progress"
+		elif self.status == "Work Completed" and not all_approved_completed:
+			self.status = "Authorized - In Progress"
+			if self.vehicle_location == "Completed / Parked in Lot":
+				self.vehicle_location = "In Bay / Being Serviced" if self.picked_up_at else "In Customer Lot"
+
 		if self.docstatus == 1:
 			self.db_set("progress_percent", self.progress_percent)
+			self.db_set("status", self.status)
+			self.db_set("vehicle_location", self.vehicle_location)
 
 		self.save(ignore_permissions=True)
 		return {"status": "success", "progress_percent": self.progress_percent}
@@ -651,7 +718,19 @@ class RepairOrder(Document):
 		"""Generate token for remote customer signature portal."""
 		self.approval_token = secrets.token_urlsafe(32)
 		self.approval_token_expiry = add_days(now_datetime(), 2)
-		self.approval_status = "Pending Approval"
+
+		# Advance uncommunicated draft/estimating services to Pending Approval upon generating/sending approval link
+		for s in self.services:
+			if s.status in ["Draft", "Estimating"]:
+				s.status = "Pending Approval"
+				if s.name and not str(s.name).startswith("new-"):
+					frappe.db.set_value("Repair Order Service", s.name, "status", "Pending Approval", update_modified=False)
+
+		has_approved = any(s.status == "Approved" for s in self.services)
+		if has_approved:
+			self.approval_status = "Partially Approved"
+		else:
+			self.approval_status = "Pending Approval"
 		self.save(ignore_permissions=True)
 		return {"approval_token": self.approval_token, "expiry": self.approval_token_expiry}
 
@@ -675,26 +754,41 @@ class RepairOrder(Document):
 			except Exception:
 				approvals = {}
 
+		newly_approved = []
+		newly_declined = []
+		newly_authorized_amount = 0.0
+
 		if not approvals:
 			for s in self.services:
 				if s.status != "Declined":
+					if s.status != "Approved":
+						newly_approved.append(s)
+						newly_authorized_amount += flt(s.total_amount)
 					s.status = "Approved"
 		else:
 			for s in self.services:
+				# Prior authorized or declined services cannot be altered or revoked via customer portal
+				if s.status in ["Approved", "Declined"]:
+					continue
+
 				decision = _match_service_decision(s, approvals)
 				if decision is None and len(self.services) == 1 and len(approvals) == 1:
 					decision = list(approvals.values())[0]
 
 				if decision in ["Approved", "Declined"]:
 					s.status = decision
-					if decision == "Declined":
+					if decision == "Approved":
+						newly_approved.append(s)
+						newly_authorized_amount += flt(s.total_amount)
+					elif decision == "Declined":
+						newly_declined.append(s)
 						s.is_completed = 0
 						s.completed_at = None
 						s.completed_by = None
 
 		approved = [s for s in self.services if s.status == "Approved"]
 		declined = [s for s in self.services if s.status == "Declined"]
-		pending = [s for s in self.services if s.status in ["Draft", "Pending Approval"]]
+		pending = [s for s in self.services if s.status in ["Draft", "Estimating", "Pending Approval"]]
 
 		if approved and not pending and not declined:
 			self.approval_status = "Approved"
@@ -709,31 +803,77 @@ class RepairOrder(Document):
 			if self.status in ["Draft Estimate", "Pending Authorization", "", None]:
 				self.status = "Authorized - In Progress"
 
-		self.authorized_by = signer_name or frappe.session.user
-		self.authorized_at = now_datetime()
+		current_timestamp = now_datetime()
 
-		if signature_image:
-			if signature_image.startswith("data:image"):
-				from frappe.utils.file_manager import save_file
+		# Backfill initial historical authorization log if table was empty but prior approval exists
+		if (not getattr(self, "approval_logs", None) or len(self.approval_logs) == 0) and self.authorized_at and self.authorized_by:
+			prior_approved = [s for s in self.services if s.status == "Approved" and s not in newly_approved]
+			if prior_approved:
+				self.append("approval_logs", {
+					"approval_datetime": self.authorized_at,
+					"signer_name": self.authorized_by,
+					"channel": "Remote Web Link",
+					"authorized_amount": flt(sum(flt(s.total_amount) for s in prior_approved), 2),
+					"approved_services": ", ".join(f"{s.service_title} (${flt(s.total_amount):,.2f})" for s in prior_approved),
+					"declined_services": ", ".join(s.service_title for s in self.services if s.status == "Declined" and s not in newly_declined) or _("None"),
+					"signature_image": self.signature_image,
+					"notes": _("Initial customer authorization on file"),
+				})
 
-				file_doc = save_file(
-					fname=f"sig_{self.name}.png",
-					content=signature_image,
-					dt=self.doctype,
-					dn=self.name,
-					decode=True,
-					is_private=0,
-					df="signature_image",
-				)
-				self.signature_image = file_doc.file_url
-			else:
-				self.signature_image = signature_image
+		if newly_approved or newly_declined:
+			self.authorized_by = signer_name or frappe.session.user
+			self.authorized_at = current_timestamp
 
-		if notes:
-			self.verbal_notes = notes
+			if signature_image:
+				if signature_image.startswith("data:image"):
+					from frappe.utils.file_manager import save_file
 
-		audit_payload = f"{self.name}|{self.authorized_by}|{self.authorized_at}|{json.dumps(approvals or {}, sort_keys=True)}"
-		self.audit_hash = hashlib.sha256(audit_payload.encode()).hexdigest()
+					file_doc = save_file(
+						fname=f"sig_{self.name}_{int(now_datetime().timestamp())}.png",
+						content=signature_image,
+						dt=self.doctype,
+						dn=self.name,
+						decode=True,
+						is_private=0,
+						df="signature_image",
+					)
+					self.signature_image = file_doc.file_url
+				else:
+					self.signature_image = signature_image
+
+			if notes:
+				self.verbal_notes = notes
+
+			audit_payload = f"{self.name}|{self.authorized_by}|{self.authorized_at}|{json.dumps(approvals or {}, sort_keys=True)}"
+			self.audit_hash = hashlib.sha256(audit_payload.encode()).hexdigest()
+
+			approved_summary = ", ".join(f"{s.service_title} (${flt(s.total_amount):,.2f})" for s in newly_approved) or _("None")
+			declined_summary = ", ".join(s.service_title for s in newly_declined) or _("None")
+
+			valid_channels = [
+				"Remote Web Link",
+				"In-Person Digital",
+				"In-Person Signature",
+				"Phone Verbal",
+				"Verbal Approval",
+				"Written Work Order",
+				"Advisor Manual",
+			]
+			channel_to_record = channel if channel in valid_channels else "In-Person Signature"
+
+			self.append("approval_logs", {
+				"approval_datetime": current_timestamp,
+				"signer_name": self.authorized_by,
+				"channel": channel_to_record,
+				"authorized_amount": flt(newly_authorized_amount, 2),
+				"approved_services": approved_summary,
+				"declined_services": declined_summary,
+				"signature_image": self.signature_image,
+				"ip_address": kwargs.get("ip_address"),
+				"user_agent": kwargs.get("user_agent"),
+				"notes": notes or self.verbal_notes,
+				"audit_hash": self.audit_hash,
+			})
 
 		for s in self.services:
 			if s.name and not str(s.name).startswith("new-"):
@@ -767,7 +907,13 @@ class RepairOrder(Document):
 			service_package = service_package.get("service_package")
 		service_package = service_package or kwargs.get("service_package")
 		pkg = frappe.get_doc("Service Package", service_package)
-		is_supp = 1 if (self.docstatus == 1 or any(s.status == "Approved" for s in self.services)) else 0
+		has_prior_authorization = bool(
+			self.authorized_at
+			or any(s.status == "Approved" for s in self.services)
+			or self.approval_status in ["Approved", "Partially Approved"]
+			or self.status in ["Authorized - In Progress", "Waiting on Parts", "Work Completed", "Billed / Paid"]
+		)
+		is_supp = 1 if (cint(kwargs.get("is_supplement", 0)) or has_prior_authorization) else 0
 
 		parts_list = []
 		parts_total = 0.0
@@ -796,26 +942,12 @@ class RepairOrder(Document):
 			labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
 			labor_amount = flt(labor_hours * labor_rate, 2)
 
-		service_category = "Maintenance"
-		if getattr(pkg, "category", None):
-			service_category = pkg.category
-		elif getattr(pkg, "correction_code", None):
-			try:
-				from ism.utils.tesla_manual import get_category_for_correction_code
-				cat, _ = get_category_for_correction_code(pkg.correction_code)
-				if cat:
-					service_category = cat
-			except Exception:
-				pass
-
 		self.append("services", {
 			"service_package": pkg.name,
 			"correction_code": getattr(pkg, "correction_code", None),
 			"service_title": pkg.package_name,
-			"category": service_category,
-			"status": "Pending Approval" if is_supp else "Draft",
+			"status": "Estimating",
 			"is_flat_rate": is_flat,
-			"frt": getattr(pkg, "frt", None) or labor_hours,
 			"labor_hours": labor_hours,
 			"labor_rate": labor_rate,
 			"labor_amount": labor_amount,
@@ -826,7 +958,7 @@ class RepairOrder(Document):
 			"is_supplement": is_supp,
 			"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
 			"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
-			"advisor_notes": getattr(pkg, "description", "") or "",
+			"advisor_notes": kwargs.get("advisor_notes", "") or "",
 		})
 
 		if is_supp:
@@ -879,8 +1011,7 @@ class RepairOrder(Document):
 
 		self.append("services", {
 			"service_title": title,
-			"category": category or "Maintenance",
-			"status": "Pending Approval",
+			"status": "Estimating",
 			"labor_hours": hours,
 			"labor_rate": rate,
 			"labor_amount": labor_amount,
@@ -889,7 +1020,7 @@ class RepairOrder(Document):
 			"total_amount": flt(labor_amount + parts_total, 2),
 			"parts_html": _render_parts_html(parts_list),
 			"is_supplement": 1,
-			"advisor_notes": notes or _("Discovered during teardown / inspection"),
+			"advisor_notes": notes or "",
 		})
 
 		if any(s.status == "Approved" for s in self.services):
@@ -899,6 +1030,143 @@ class RepairOrder(Document):
 
 		self.save(ignore_permissions=True)
 		return {"status": "success", "service_title": title}
+
+	@frappe.whitelist()
+	def add_deferred_services(self, deferred_items=None, **kwargs):
+		"""
+		Add one or more previously deferred services to this Repair Order.
+		deferred_items can be a list of job titles, dicts, or a JSON string.
+		"""
+		if isinstance(deferred_items, str):
+			try:
+				deferred_items = json.loads(deferred_items)
+			except Exception:
+				deferred_items = [deferred_items]
+		elif not deferred_items and kwargs.get("services"):
+			deferred_items = kwargs.get("services")
+			if isinstance(deferred_items, str):
+				try:
+					deferred_items = json.loads(deferred_items)
+				except Exception:
+					deferred_items = [deferred_items]
+
+		if not deferred_items:
+			frappe.throw(_("No deferred services specified to add."))
+
+		has_prior_authorization = bool(
+			self.authorized_at
+			or any(s.status == "Approved" for s in self.services)
+			or self.approval_status in ["Approved", "Partially Approved"]
+			or self.status in ["Authorized - In Progress", "Waiting on Parts", "Work Completed", "Billed / Paid"]
+		)
+		is_supp = 1 if has_prior_authorization else 0
+
+		added_services = []
+		for item in deferred_items:
+			if isinstance(item, str):
+				title = item.strip()
+				est_amount = 0.0
+			elif isinstance(item, dict):
+				title = (item.get("job_title") or item.get("service_title") or "").strip()
+				est_amount = flt(item.get("estimated_amount") if item.get("estimated_amount") is not None else item.get("estimated_cost", 0.0))
+			else:
+				continue
+
+			if not title:
+				continue
+
+			# Avoid duplicate if exact service title already exists on this order
+			if any(s.service_title and s.service_title.strip().lower() == title.lower() for s in self.services):
+				continue
+
+			# Check if there is an existing Service Package for this title
+			pkg_name = frappe.db.get_value("Service Package", {"package_name": title}, "name")
+			if not pkg_name and frappe.db.exists("Service Package", title):
+				pkg_name = title
+
+			if pkg_name:
+				pkg = frappe.get_doc("Service Package", pkg_name)
+				parts_list = []
+				parts_total = 0.0
+				default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
+				for row in pkg.items:
+					item_doc = frappe.get_cached_doc("Item", row.item_code)
+					qty = flt(row.qty) or 1.0
+					part_rate = flt(row.rate)
+					amt = flt(qty * part_rate, 2)
+					parts_total += amt
+					parts_list.append({
+						"item_code": row.item_code,
+						"item_name": row.item_name or item_doc.item_name,
+						"qty": qty,
+						"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+						"rate": part_rate,
+						"amount": amt,
+						"warehouse": getattr(row, "warehouse", None) or default_wh,
+					})
+
+				labor_hours = flt(pkg.standard_labor_hours)
+				is_flat = cint(pkg.is_flat_rate)
+				if is_flat:
+					labor_rate = flt(pkg.hourly_rate)
+					labor_amount = flt(pkg.service_rate, 2)
+				else:
+					labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
+					labor_amount = flt(labor_hours * labor_rate, 2)
+
+				self.append("services", {
+					"service_package": pkg.name,
+					"correction_code": getattr(pkg, "correction_code", None),
+					"service_title": pkg.package_name,
+					"status": "Estimating",
+					"is_flat_rate": is_flat,
+					"labor_hours": labor_hours,
+					"labor_rate": labor_rate,
+					"labor_amount": labor_amount,
+					"parts": json.dumps(parts_list),
+					"parts_total": parts_total,
+					"total_amount": flt(labor_amount + parts_total, 2),
+					"parts_html": _render_parts_html(parts_list),
+					"is_supplement": is_supp,
+					"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
+					"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
+					"advisor_notes": "",
+				})
+				added_services.append(title)
+			else:
+				self.append("services", {
+					"service_title": title,
+					"status": "Estimating",
+					"is_flat_rate": 1,
+					"labor_hours": 0.0,
+					"labor_rate": 0.0,
+					"labor_amount": est_amount,
+					"parts": json.dumps([]),
+					"parts_total": 0.0,
+					"total_amount": est_amount,
+					"parts_html": "",
+					"is_supplement": is_supp,
+					"advisor_notes": "",
+				})
+				added_services.append(title)
+
+		if not added_services:
+			return {
+				"status": "noop",
+				"message": _("Selected services are already present on this Repair Order."),
+				"added_count": 0,
+			}
+
+		if is_supp:
+			if any(s.status == "Approved" for s in self.services):
+				self.approval_status = "Partially Approved"
+			else:
+				self.approval_status = "Pending Approval"
+
+		self._calculate_service_totals()
+		self._calculate_taxes_and_totals()
+		self.save(ignore_permissions=True)
+		return {"status": "success", "added_count": len(added_services), "added_services": added_services}
 
 	@frappe.whitelist()
 	def save_service_as_package(self, service_row_id=None, package_name=None, **kwargs):
@@ -989,6 +1257,15 @@ class RepairOrder(Document):
 		approved_services = [s for s in self.services if s.status == "Approved"]
 		if not approved_services:
 			frappe.throw(_("Cannot process payment without approved services."))
+
+		has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in self.services)
+		if has_pending:
+			frappe.throw(
+				_(
+					"Cannot close or release Repair Order while services are still in Estimating, Draft, or Pending Approval. "
+					"Please obtain customer authorization or decline pending supplements before final billing and release."
+				)
+			)
 
 		default_income_account = frappe.db.get_value(
 			"Company", self.company, "default_income_account"
@@ -1303,10 +1580,11 @@ def get_service_package_details(service_package):
 		"frt": getattr(pkg, "frt", None) or labor_hours,
 		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
 		"category": pkg_cat or "Maintenance",
-		"description": getattr(pkg, "description", "") or "",
+		"description": "",
 		"is_flat_rate": is_flat,
 		"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
 		"standard_labor_hours": labor_hours,
+		"labor_hours": labor_hours,
 		"hourly_rate": hourly_rate,
 		"service_rate": service_rate,
 		"parts": parts,
@@ -1320,6 +1598,14 @@ def save_service_as_package(service_row_id=None, package_name=None, docname=None
 		docname = _extract_docname_from_request()
 	ro = frappe.get_doc("Repair Order", docname)
 	return ro.save_service_as_package(service_row_id=service_row_id, package_name=package_name, **kwargs)
+
+
+@frappe.whitelist()
+def add_deferred_services(docname=None, deferred_items=None, **kwargs):
+	if not docname:
+		docname = _extract_docname_from_request()
+	ro = frappe.get_doc("Repair Order", docname)
+	return ro.add_deferred_services(deferred_items=deferred_items, **kwargs)
 
 
 @frappe.whitelist()
@@ -1461,12 +1747,39 @@ def get_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters, a
 def get_deferred_services_for_vehicle(vehicle: str):
 	if not vehicle:
 		return []
-	return frappe.get_all(
+
+	services = frappe.get_all(
 		"Vehicle Deferred Service",
-		filters={"parent": vehicle},
-		fields=["name", "job_title", "decline_date", "estimated_amount", "decline_reason"],
+		filters={
+			"parent": vehicle,
+			"status": ["in", ["Open Recommendation", ""]],
+		},
+		fields=[
+			"name",
+			"job_title",
+			"decline_date",
+			"repair_order",
+			"estimated_amount",
+			"status",
+			"safety_hazard",
+			"decline_reason",
+		],
 		order_by="decline_date desc",
 	)
+
+	for s in services:
+		# Compatibility aliases for legacy or alternate field names
+		s["service_title"] = s.get("job_title") or ""
+		s["service_description"] = s.get("job_title") or ""
+		s["estimated_cost"] = flt(s.get("estimated_amount") or 0.0)
+		s["estimated_amount"] = flt(s.get("estimated_amount") or 0.0)
+
+		# Sanitize residual Tesla manual scraped boilerplate if present
+		reason = (s.get("decline_reason") or "").strip()
+		if reason.startswith("Correction code") or "NOTE: Unless otherwise explicitly stated" in reason:
+			s["decline_reason"] = _("Declined during customer authorization")
+
+	return services
 
 
 @frappe.whitelist()

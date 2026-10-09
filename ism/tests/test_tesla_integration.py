@@ -12,6 +12,7 @@ from ism.utils.tesla_manual import (
 	get_tesla_manual_url_for_vehicle,
 	validate_vehicle_compatibility,
 	parse_tesla_procedure_html,
+	_MANIFEST_CACHE,
 )
 from ism.api.tesla import import_tesla_procedure, get_active_repair_orders, get_vehicle_manual_url
 from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
@@ -47,7 +48,7 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(p1["doc_guid"], "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50")
 
 		# Model 3 2024 Highland
-		m3_24_url = "https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/GUID-AAAA-BBBB-CCCC-DDDD.html"
+		m3_24_url = "https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/GUID-AAAA-BBBB-CCCC-DDDD.html"
 		p2 = parse_tesla_manual_url(m3_24_url)
 		self.assertEqual(p2["applicable_model"], "Model 3")
 		self.assertEqual(p2["matched_generation"], "Model 3 Jan 2024")
@@ -90,7 +91,7 @@ class TestTeslaIntegration(ISMTestCase):
 			"manufactured_month": "03/24",
 		})
 		url2 = get_tesla_manual_url_for_vehicle(v_m3_24)
-		self.assertEqual(url2, "https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/")
+		self.assertEqual(url2, "https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/")
 
 	def test_generation_compatibility_validation(self):
 		v_m3_20 = frappe._dict({
@@ -109,7 +110,7 @@ class TestTeslaIntegration(ISMTestCase):
 		# Mismatched URL (2024+ Highland on 2020 Model 3)
 		compat_bad = validate_vehicle_compatibility(
 			v_m3_20,
-			"https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+			"https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
 		)
 		self.assertFalse(compat_bad["is_compatible"])
 		self.assertIn("Generation mismatch", compat_bad["warning"])
@@ -154,6 +155,14 @@ class TestTeslaIntegration(ISMTestCase):
 
 		# Test mobile-capable procedure
 		mobile_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-000FD8BF-C857-490D-85B1-2DD266887CB3.html"
+		_MANIFEST_CACHE["https://service.tesla.com/docs/Model3/ServiceManual/en-us/dependencies.json"] = [
+			{
+				"guid": "GUID-000FD8BF-C857-490D-85B1-2DD266887CB3",
+				"url": "GUID-000FD8BF-C857-490D-85B1-2DD266887CB3.html",
+				"correction-code": "00030700",
+				"mobile-capable": "Level 1",
+			}
+		]
 		parsed_mobile = parse_tesla_procedure_html(sample_html, mobile_url)
 		self.assertEqual(parsed_mobile["is_mobile_capable"], 1)
 		self.assertIn("Level 1", parsed_mobile["mobile_service_level"])
@@ -215,6 +224,7 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(flt(srv.frt), 0.90)
 		self.assertEqual(flt(srv.labor_hours), 0.90)
 		self.assertEqual(srv.is_mobile_capable, 0)
+		self.assertEqual(srv.is_supplement, 0)
 		self.assertEqual(ro.is_mobile_capable, 0)
 
 		default_rate = _get_default_labor_rate()
@@ -256,7 +266,7 @@ class TestTeslaIntegration(ISMTestCase):
 		ro.reload()
 		self.assertEqual(len(ro.services), 2)
 
-		# Test supplement import into an approved order (verifying approval_status = Partially Approved)
+		# Verify imported service into an order does NOT default to supplement
 		ro.services[0].status = "Approved"
 		ro.approval_status = "Approved"
 		ro.save(ignore_permissions=True)
@@ -272,5 +282,29 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(res3["status"], "success")
 		ro.reload()
 		self.assertEqual(len(ro.services), 3)
+		# Newly imported procedure on an authorized order must be flagged as a supplement in Estimating (unsent)
+		self.assertEqual(ro.services[2].is_supplement, 1)
+		self.assertEqual(ro.services[2].status, "Estimating")
+		self.assertEqual(ro.approval_status, "Partially Approved")
+
+		# Generating approval token communicates the supplement and promotes Estimating -> Pending Approval
+		ro.generate_approval_token()
+		ro.reload()
+		self.assertEqual(ro.services[2].status, "Pending Approval")
+		self.assertEqual(ro.approval_status, "Partially Approved")
+
+		# Explicit supplement import should set is_supplement = 1 and status Estimating
+		proc_payload3 = {
+			"title": "Trunk Hinge Replacement",
+			"correction_code": "15111199",
+			"frt": 0.50,
+			"is_supplement": 1
+		}
+		res4 = import_tesla_procedure(repair_order=ro.name, data=proc_payload3)
+		self.assertEqual(res4["status"], "success")
+		ro.reload()
+		self.assertEqual(len(ro.services), 4)
+		self.assertEqual(ro.services[3].is_supplement, 1)
+		self.assertEqual(ro.services[3].status, "Estimating")
 		self.assertEqual(ro.approval_status, "Partially Approved")
 

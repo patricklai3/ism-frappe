@@ -125,7 +125,7 @@ def fetch_and_parse_tesla_procedure(url):
 
 
 @frappe.whitelist()
-def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_mismatch=False, duplicate_action=None):
+def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_mismatch=False, duplicate_action=None, is_supplement=0, **kwargs):
 	"""Import a Tesla service manual procedure into a Repair Order.
 
 	Accepts either:
@@ -211,7 +211,13 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 		}
 
 	# 5. Populate labor rates and append or update
-	is_supp = 1 if (ro.docstatus == 1 or any(s.status == "Approved" for s in ro.services)) else 0
+	has_prior_authorization = bool(
+		ro.authorized_at
+		or any(s.status == "Approved" for s in ro.services)
+		or ro.approval_status in ["Approved", "Partially Approved"]
+		or ro.status in ["Authorized - In Progress", "Waiting on Parts", "Work Completed", "Billed / Paid"]
+	)
+	is_supp = 1 if (cint(is_supplement) or cint(proc_data.get("is_supplement", 0)) or cint(kwargs.get("is_supplement", 0)) or has_prior_authorization) else 0
 	hourly_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
 	labor_hours = frt or flt(pkg.standard_labor_hours) or 1.0
 	labor_amount = flt(labor_hours * hourly_rate, 2)
@@ -227,26 +233,22 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	if existing_service and duplicate_action == "update":
 		action_taken = "updated"
 		existing_service.service_title = title
-		existing_service.frt = frt
 		existing_service.labor_hours = labor_hours
 		existing_service.labor_rate = hourly_rate
 		existing_service.labor_amount = labor_amount
 		existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
 		existing_service.tesla_manual_url = proc_url
-		existing_service.category = service_category or existing_service.category
 		existing_service.is_mobile_capable = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
-		if proc_data.get("description"):
-			existing_service.advisor_notes = proc_data.get("description")
+		if kwargs.get("advisor_notes"):
+			existing_service.advisor_notes = kwargs.get("advisor_notes")
 		target_service = existing_service
 	else:
 		target_service = ro.append("services", {
 			"service_package": pkg.name,
 			"correction_code": correction_code,
 			"service_title": title,
-			"category": service_category,
-			"status": "Pending Approval" if is_supp else "Draft",
+			"status": "Estimating",
 			"is_flat_rate": 0,
-			"frt": frt,
 			"labor_hours": labor_hours,
 			"labor_rate": hourly_rate,
 			"labor_amount": labor_amount,
@@ -255,14 +257,11 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 			"is_supplement": is_supp,
 			"is_mobile_capable": cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0))),
 			"tesla_manual_url": proc_url,
-			"advisor_notes": proc_data.get("description") or getattr(pkg, "description", "") or "",
+			"advisor_notes": kwargs.get("advisor_notes", "") or "",
 		})
 
-	if is_supp:
-		if any(s.status == "Approved" for s in ro.services):
-			ro.approval_status = "Partially Approved"
-		else:
-			ro.approval_status = "Pending Approval"
+	if is_supp and any(s.status == "Approved" for s in ro.services):
+		ro.approval_status = "Partially Approved"
 
 	# Update order-level scheduling flags
 	if ro.services:

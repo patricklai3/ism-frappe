@@ -9,15 +9,21 @@ function get_status_target_tab(doc_or_frm) {
 
 	const status = doc.status;
 	const is_released = !!doc.vehicle_released || status === "Closed / Released";
+	const is_billed = status === "Billed / Paid";
+	const is_in_bay = doc.vehicle_location === "In Bay / Being Serviced";
 	const is_work_completed =
-		status === "Work Completed" || doc.vehicle_location === "Completed / Parked in Lot";
+		status === "Work Completed" && doc.vehicle_location === "Completed / Parked in Lot";
 	const is_in_progress =
-		["Authorized - In Progress", "Waiting on Parts"].includes(status) ||
-		doc.vehicle_location === "In Bay / Being Serviced";
+		["Authorized - In Progress", "Waiting on Parts"].includes(status) || is_in_bay;
 	const is_approved =
 		doc.approval_status === "Approved" || doc.approval_status === "Partially Approved";
 
-	if (is_released || status === "Billed / Paid" || is_work_completed) {
+	if (is_released || is_billed) {
+		return "tab_billing";
+	} else if (is_in_bay) {
+		// As long as vehicle is in the bay, stay on workshop tab so technician can complete tasks and park vehicle
+		return "tab_workshop";
+	} else if (is_work_completed) {
 		return "tab_billing";
 	} else if (is_in_progress || is_approved) {
 		return "tab_workshop";
@@ -34,13 +40,15 @@ function update_tab_visibility(frm) {
 	const is_approved =
 		frm.doc.approval_status === "Approved" || frm.doc.approval_status === "Partially Approved";
 	const status = frm.doc.status;
-	const is_in_progress = ["Authorized - In Progress", "Waiting on Parts"].includes(status);
+	const is_in_bay = frm.doc.vehicle_location === "In Bay / Being Serviced";
+	const is_in_progress = ["Authorized - In Progress", "Waiting on Parts"].includes(status) || is_in_bay;
 	const is_work_completed =
 		["Work Completed", "Billed / Paid", "Closed / Released"].includes(status) ||
+		frm.doc.vehicle_location === "Completed / Parked in Lot" ||
 		!!frm.doc.vehicle_released;
 	const is_cancelled = status === "Cancelled";
 
-	const show_workshop = is_approved || is_in_progress || is_work_completed || is_cancelled;
+	const show_workshop = is_approved || is_in_progress || is_in_bay || is_work_completed || is_cancelled;
 	const show_billing = is_work_completed || is_cancelled;
 
 	if (frm.layout && frm.layout.tabs) {
@@ -277,6 +285,24 @@ frappe.ui.form.on("Repair Order", {
 		frm.trigger("render_workshop_tasks");
 		frm._original_odometer_in = frm.doc.odometer_in;
 		update_tab_visibility(frm);
+
+		if (!frm.doc.approval_status || frm.doc.approval_status === "Draft") {
+			frm.set_value("approval_status", "Estimating");
+		}
+
+		if (frm.fields_dict.services && frm.fields_dict.services.grid) {
+			const sp_col = frm.fields_dict.services.grid.get_field("service_package");
+			if (sp_col && !sp_col._ism_formatter_set) {
+				sp_col._ism_formatter_set = true;
+				sp_col.formatter = function (value, df, options, doc) {
+					if (!value && doc && doc.service_title) {
+						return `<span style="font-weight: 500; color: #1e293b;">${frappe.utils.escape_html(doc.service_title)}</span>`;
+					}
+					return frappe.form.formatters.Link ? frappe.form.formatters.Link(value, df, options, doc) : (value || "");
+				};
+			}
+		}
+
 		frm.trigger("set_route_options_for_new_doc");
 
 		if (frm._user_clicked_tab) {
@@ -322,12 +348,19 @@ frappe.ui.form.on("Repair Order", {
 					frm.trigger("open_add_supplement_dialog");
 				}, __("Jobs & Packages"));
 
+				frm.add_custom_button(__("Deferred Services"), () => {
+					frm.trigger("show_deferred_services_dialog_manual");
+				}, __("Jobs & Packages"));
+
 				if (frm.fields_dict.services && frm.fields_dict.services.grid) {
 					frm.fields_dict.services.grid.add_custom_button(__("Tesla Manual"), () => {
 						frm.trigger("open_tesla_manual");
 					});
 					frm.fields_dict.services.grid.add_custom_button(__("Import Tesla URL"), () => {
 						frm.trigger("open_import_tesla_url_dialog");
+					});
+					frm.fields_dict.services.grid.add_custom_button(__("Deferred Services"), () => {
+						frm.trigger("show_deferred_services_dialog_manual");
 					});
 				}
 			}
@@ -404,7 +437,7 @@ frappe.ui.form.on("Repair Order", {
 				}
 
 				if (frm.doc.vehicle_location === "In Bay / Being Serviced") {
-					frm.add_custom_button(__("Park Vehicle (Lot / Ready)"), () => {
+					frm.add_custom_button(__("Park Vehicle in Lot"), () => {
 						frm.call({
 							doc: frm.doc,
 							method: "park_vehicle",
@@ -463,25 +496,18 @@ frappe.ui.form.on("Repair Order", {
 			});
 
 			frm.trigger("load_vehicle_customers");
-
-			// Check for previously deferred services
-			frappe.call({
-				method: "ism.ism.doctype.repair_order.repair_order.get_deferred_services_for_vehicle",
-				args: { vehicle: frm.doc.vehicle },
-				callback(r) {
-					if (r.message && r.message.length > 0) {
-						let deferred_items = r.message.map((d) => `• ${d.service_description} ($${d.estimated_cost})`).join("<br>");
-						frappe.msgprint({
-							title: __("Deferred Services History"),
-							message: __("This vehicle has open deferred services from previous visits:<br><br>{0}", [deferred_items]),
-							indicator: "orange",
-						});
-					}
-				},
-			});
+			frm.trigger("show_deferred_services_for_vehicle");
 		} else {
 			frm.set_df_property("customer", "description", "");
 		}
+	},
+
+	show_deferred_services_for_vehicle(frm) {
+		fetch_and_show_deferred_services(frm, false);
+	},
+
+	show_deferred_services_dialog_manual(frm) {
+		fetch_and_show_deferred_services(frm, true);
 	},
 
 	load_vehicle_customers(frm) {
@@ -665,13 +691,13 @@ frappe.ui.form.on("Repair Order", {
 
 		const approved = services.filter((s) => s.status === "Approved");
 		const declined = services.filter((s) => s.status === "Declined");
-		const pending = services.filter((s) => ["Draft", "Pending Approval"].includes(s.status));
+		const pending = services.filter((s) => ["Draft", "Estimating", "Pending Approval"].includes(s.status));
 		const completed = approved.filter((s) => !!s.is_completed);
 
 		const approved_count = approved.length;
 		const completed_count = completed.length;
 		const progress_pct = approved_count > 0 ? Math.round((completed_count / approved_count) * 100) : 0;
-		const is_all_completed = approved_count > 0 && completed_count === approved_count;
+		const is_all_completed = approved_count > 0 && completed_count === approved_count && pending.length === 0;
 		const in_bay = frm.doc.vehicle_location === "In Bay / Being Serviced";
 		const is_released = !!frm.doc.vehicle_released || frm.doc.status === "Closed / Released";
 
@@ -700,19 +726,51 @@ frappe.ui.form.on("Repair Order", {
 		`;
 
 		// 2. Action Handoff Banners
-		if (is_all_completed && in_bay && !is_released) {
+		if (is_all_completed && !is_released && frm.doc.vehicle_location !== "Completed / Parked in Lot") {
 			html += `
 				<div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
 					<div>
 						<div style="font-weight: 700; color: #166534; font-size: 14px;">
-							✓ ${__("All Approved Bay Services Completed!")}
+							✓ ${__("All Approved Services Completed!")}
 						</div>
 						<div style="color: #15803d; font-size: 12px; margin-top: 2px;">
-							${__("All tasks have been signed off. Park vehicle in lot to complete bay execution and advance to billing.")}
+							${__("All tasks have been signed off. Park vehicle in lot to complete workshop execution and advance to billing.")}
 						</div>
 					</div>
 					<button type="button" class="btn btn-sm btn-success btn-board-park-vehicle" style="font-weight: 600; padding: 7px 16px; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-						🅿️ ${__("Park Vehicle (Lot / Ready)")}
+						🅿️ ${__("Park Vehicle in Lot")}
+					</button>
+				</div>
+			`;
+		} else if (frm.doc.vehicle_location === "Completed / Parked in Lot" && !is_released) {
+			html += `
+				<div style="background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+					<div>
+						<div style="font-weight: 700; color: #166534; font-size: 14px;">
+							🅿️ ${__("Vehicle Parked in Customer Lot (Completed)")}
+						</div>
+						<div style="color: #15803d; font-size: 12px; margin-top: 2px;">
+							${__("All authorized services have been completed and vehicle is parked in the lot. Ready for invoicing and release.")}
+						</div>
+					</div>
+					<button type="button" class="btn btn-sm btn-primary btn-board-go-to-billing" style="font-weight: 600; padding: 7px 16px; border-radius: 6px;">
+						💳 ${__("Go to Billing & Release")}
+					</button>
+				</div>
+			`;
+		} else if (in_bay && !is_released) {
+			html += `
+				<div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+					<div>
+						<div style="font-weight: 700; color: #1e40af; font-size: 14px;">
+							🔧 ${__("Vehicle is In Bay / Being Serviced")}
+						</div>
+						<div style="color: #1d4ed8; font-size: 12px; margin-top: 2px;">
+							${__("Work is in progress. Return vehicle to the lot if service is paused or non-consecutive.")}
+						</div>
+					</div>
+					<button type="button" class="btn btn-sm btn-outline-secondary btn-board-park-vehicle" style="font-weight: 600; padding: 7px 16px; border-radius: 6px; background: #fff;">
+						🅿️ ${__("Park Vehicle in Lot")}
 					</button>
 				</div>
 			`;
@@ -760,12 +818,14 @@ frappe.ui.form.on("Repair Order", {
 									<span style="font-size: 15px; font-weight: 700; color: #1e293b; ${is_done ? "text-decoration: line-through; color: #64748b;" : ""}">
 										${frappe.utils.escape_html(s.service_title)}
 									</span>
+									${s.category ? `
 									<span class="badge" style="background: #f1f5f9; color: #475569; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #e2e8f0;">
-										${frappe.utils.escape_html(s.category || "Service")}
+										${frappe.utils.escape_html(s.category)}
 									</span>
+									` : ""}
 									${s.correction_code ? `
 										<span class="badge" style="background: #eef2ff; color: #4338ca; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #c7d2fe;">
-											${__("Code:")} ${frappe.utils.escape_html(s.correction_code)}
+											${frappe.utils.escape_html(s.correction_code)}
 										</span>
 									` : ""}
 									${s.is_supplement ? `
@@ -778,9 +838,9 @@ frappe.ui.form.on("Repair Order", {
 											${__("Flat Rate")}
 										</span>
 									` : ""}
-									${s.frt ? `
+									${(s.labor_hours || s.frt) ? `
 										<span style="font-size: 11px; color: #64748b; font-weight: 600;">
-											FRT: ${s.frt} hrs
+											FRT: ${s.labor_hours || s.frt} hrs
 										</span>
 									` : ""}
 								</div>
@@ -839,31 +899,44 @@ frappe.ui.form.on("Repair Order", {
 			});
 		}
 
-		// 4. Collapsible Unapproved / Declined Services Drawer (if any)
-		const other_services = [...pending, ...declined];
+		// 4. Always-Unfolded Unapproved, Estimating & Declined Services Panel (if any)
+		const other_services = services.filter((s) => s.status !== "Approved");
 		if (other_services.length > 0) {
 			html += `
-				<div style="margin-top: 18px;">
-					<details style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px;">
-						<summary style="font-size: 12px; font-weight: 600; color: #64748b; cursor: pointer; user-select: none;">
-							${__("Unapproved / Declined Services")} (${other_services.length}) — <i>${__("Not authorized for shop floor execution")}</i>
-						</summary>
-						<div style="margin-top: 10px;">
-							${other_services.map((s) => `
-								<div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #edf2f7; font-size: 12px;">
-									<div>
-										<span style="font-weight: 600; color: #475569;">${frappe.utils.escape_html(s.service_title)}</span>
-										<span class="badge ${s.status === "Declined" ? "badge-danger" : "badge-warning"}" style="margin-left: 6px; font-size: 10px;">
-											${frappe.utils.escape_html(s.status)}
+				<div style="margin-top: 18px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px;">
+					<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">
+						<span style="font-size: 13px; font-weight: 700; color: #475569;">
+							⚠️ ${__("Unapproved, Estimating & Declined Services")} (${other_services.length})
+						</span>
+						<span class="text-muted small" style="font-style: italic;">
+							${__("Not authorized for shop floor execution")}
+						</span>
+					</div>
+					<div>
+						${other_services.map((s) => `
+							<div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #edf2f7; font-size: 12px;">
+								<div>
+									<span style="font-weight: 600; color: #334155;">${frappe.utils.escape_html(s.service_title)}</span>
+									${s.is_supplement ? `
+										<span class="badge" style="background: #fef3c7; color: #92400e; font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-left: 4px;">
+											${__("Supplement")}
 										</span>
-									</div>
-									<span class="text-muted" style="font-size: 11px;">
-										${s.status === "Declined" ? __("Logged to Vehicle Deferred Services") : __("Pending Customer Authorization")}
+									` : ""}
+									<span class="badge ${s.status === "Declined" ? "badge-danger" : s.status === "Estimating" ? "badge-info" : s.status === "Draft" ? "badge-secondary" : "badge-warning"}" style="margin-left: 6px; font-size: 10px;">
+										${frappe.utils.escape_html(s.status)}
 									</span>
+									${s.total_amount ? `
+										<span style="margin-left: 8px; color: #64748b; font-weight: 500;">
+											$${frappe.format(s.total_amount, { fieldtype: "Currency" })}
+										</span>
+									` : ""}
 								</div>
-							`).join("")}
-						</div>
-					</details>
+								<span class="text-muted" style="font-size: 11px;">
+									${s.status === "Declined" ? __("Logged to Vehicle Deferred Services") : s.status === "Estimating" ? __("Estimating (Internal)") : s.status === "Draft" ? __("Internal Draft (Unsent)") : __("Sent to Customer (Pending Approval)")}
+								</span>
+							</div>
+						`).join("")}
+					</div>
 				</div>
 			`;
 		}
@@ -913,6 +986,12 @@ frappe.ui.form.on("Repair Order", {
 					frm.reload_doc();
 				},
 			});
+		});
+
+		$wrapper.find(".btn-board-go-to-billing").on("click", function (e) {
+			e.preventDefault();
+			frm._user_clicked_tab = "tab_billing";
+			select_tab(frm, "tab_billing");
 		});
 
 		$wrapper.find(".btn-board-pickup-vehicle").on("click", function (e) {
@@ -1072,6 +1151,7 @@ frappe.ui.form.on("Repair Order", {
 	open_send_approval_dialog(frm) {
 		frm.call("generate_approval_token").then((r) => {
 			if (r && r.message) {
+				frm.reload_doc();
 				const token = r.message.approval_token;
 				const url = `${window.location.origin}/quote-approval?token=${token}`;
 				frappe.msgprint({
@@ -1391,14 +1471,6 @@ frappe.ui.form.on("Repair Order", {
 					reqd: 1,
 				},
 				{
-					fieldtype: "Select",
-					fieldname: "category",
-					label: __("Category"),
-					options: "Maintenance\nDiagnostic\nMechanical\nElectrical\nTires\nBody\nOther",
-					default: "Mechanical",
-					reqd: 1,
-				},
-				{
 					fieldtype: "Column Break",
 				},
 				{
@@ -1431,7 +1503,6 @@ frappe.ui.form.on("Repair Order", {
 					method: "add_supplement",
 					args: {
 						service_title: values.service_title,
-						category: values.category,
 						labor_hours: values.labor_hours,
 						labor_rate: values.labor_rate,
 						notes: values.advisor_notes,
@@ -1470,19 +1541,14 @@ frappe.ui.form.on("Repair Order Service", {
 
 					frappe.model.set_value(cdt, cdn, "is_flat_rate", is_flat);
 					frappe.model.set_value(cdt, cdn, "service_title", pkg.package_name || row.service_package);
-					frappe.model.set_value(cdt, cdn, "category", pkg.category || "Maintenance");
 					if (pkg.correction_code) frappe.model.set_value(cdt, cdn, "correction_code", pkg.correction_code);
-					if (pkg.frt) frappe.model.set_value(cdt, cdn, "frt", flt(pkg.frt));
 					if (pkg.tesla_manual_url) frappe.model.set_value(cdt, cdn, "tesla_manual_url", pkg.tesla_manual_url);
-					frappe.model.set_value(cdt, cdn, "labor_hours", flt(pkg.standard_labor_hours));
+					frappe.model.set_value(cdt, cdn, "labor_hours", flt(pkg.standard_labor_hours || pkg.labor_hours || pkg.frt));
 					frappe.model.set_value(cdt, cdn, "labor_rate", flt(pkg.hourly_rate));
 					frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
 					frappe.model.set_value(cdt, cdn, "parts", JSON.stringify(pkg.parts || []));
 					frappe.model.set_value(cdt, cdn, "parts_total", parts_tot);
 					frappe.model.set_value(cdt, cdn, "total_amount", labor_amt + parts_tot);
-					if (pkg.description && !row.advisor_notes) {
-						frappe.model.set_value(cdt, cdn, "advisor_notes", pkg.description);
-					}
 					frappe.model.set_value(cdt, cdn, "parts_html", render_parts_html(pkg.parts || []));
 					frm.refresh_field("services");
 					recalculate_totals(frm);
@@ -1536,12 +1602,16 @@ frappe.ui.form.on("Repair Order Service", {
 			});
 			return;
 		}
+		const current_tab = frm._user_clicked_tab || "tab_estimate";
+		frm._user_clicked_tab = current_tab;
 		frm.call({
 			doc: frm.doc,
 			method: "toggle_service_completion",
 			args: { service_row_id: row.name, is_completed: row.is_completed },
 		}).then(() => {
-			frm.reload_doc();
+			frm.reload_doc().then(() => {
+				select_tab(frm, current_tab);
+			});
 		});
 	},
 
@@ -1886,4 +1956,259 @@ function open_parts_editor(frm, cdt, cdn) {
 
 	d.show();
 	render_modal_parts_table(d);
+}
+
+function fetch_and_show_deferred_services(frm, is_manual = false) {
+	if (!frm.doc.vehicle) {
+		if (is_manual) {
+			frappe.msgprint(__("Please select a vehicle first."));
+		}
+		return;
+	}
+
+	frappe.call({
+		method: "ism.ism.doctype.repair_order.repair_order.get_deferred_services_for_vehicle",
+		args: { vehicle: frm.doc.vehicle },
+		callback(r) {
+			const deferred_list = (r && r.message) || [];
+			if (deferred_list.length === 0) {
+				if (is_manual) {
+					frappe.msgprint({
+						title: __("Deferred Services History"),
+						message: __("No open deferred services found for vehicle <b>{0}</b>.", [frm.doc.vehicle]),
+						indicator: "blue",
+					});
+				}
+				return;
+			}
+
+			open_deferred_services_modal(frm, deferred_list);
+		},
+	});
+}
+
+function open_deferred_services_modal(frm, deferred_list) {
+	const currency = frm.doc.currency || (frappe.boot && frappe.boot.sysdefaults && frappe.boot.sysdefaults.currency) || "CAD";
+	const existing_titles = (frm.doc.services || []).map((s) => (s.service_title || "").trim().toLowerCase());
+
+	let all_already_added = true;
+	deferred_list.forEach((d) => {
+		const title_clean = (d.job_title || d.service_title || "").trim().toLowerCase();
+		d._already_added = existing_titles.includes(title_clean);
+		if (!d._already_added) {
+			all_already_added = false;
+		}
+	});
+
+	const items_html = deferred_list.map((d, idx) => {
+		const title = frappe.utils.escape_html(d.job_title || d.service_title || __("Deferred Service"));
+		const amount_val = flt(d.estimated_amount != null ? d.estimated_amount : d.estimated_cost);
+		const formatted_cost = format_currency(amount_val, currency);
+
+		const meta = [];
+		if (d.decline_date) {
+			meta.push(`<span><i class="fa fa-calendar text-muted"></i> ${frappe.datetime.str_to_user(d.decline_date)}</span>`);
+		}
+		if (d.repair_order) {
+			meta.push(`<span><i class="fa fa-file-text-o text-muted"></i> ${frappe.utils.escape_html(d.repair_order)}</span>`);
+		}
+		if (d.safety_hazard) {
+			meta.push(`<span class="indicator-pill red" style="font-size: 11px; padding: 2px 6px;">${__("Safety Hazard")}</span>`);
+		}
+
+		let reason_html = "";
+		if (d.decline_reason && d.decline_reason !== "Declined during customer authorization") {
+			reason_html = `<div style="font-size: 12px; color: var(--text-muted); margin-top: 4px; font-style: italic;">${frappe.utils.escape_html(d.decline_reason)}</div>`;
+		}
+
+		const chk_id = `deferred_item_${idx}`;
+		const is_checked = !d._already_added;
+		const disabled_attr = d._already_added ? "disabled" : "";
+		const card_opacity = d._already_added ? "opacity: 0.75;" : "";
+
+		return `
+			<div class="deferred-service-card" style="padding: 12px 14px; margin-bottom: 8px; border: 1px solid var(--border-color); border-radius: var(--border-radius-md, 6px); background: var(--bg-light-gray, #f8f9fa); ${card_opacity}">
+				<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
+					<div style="display: flex; align-items: flex-start; gap: 10px; flex: 1;">
+						<input type="checkbox" id="${chk_id}" data-idx="${idx}" class="deferred-service-chk" style="margin-top: 4px; cursor: pointer; transform: scale(1.15);" ${is_checked ? "checked" : ""} ${disabled_attr}>
+						<label for="${chk_id}" style="margin: 0; cursor: pointer; flex: 1;">
+							<span style="font-weight: 600; color: var(--text-color); font-size: 14px;">${title}</span>
+							${d._already_added ? `<span class="indicator-pill green" style="margin-left: 8px; font-size: 11px; padding: 2px 6px;">${__("In Current Order")}</span>` : ""}
+						</label>
+					</div>
+					<div style="display: flex; align-items: center; gap: 8px;">
+						<span style="font-weight: 700; color: var(--text-color); font-size: 14px; white-space: nowrap;">${formatted_cost}</span>
+						${!d._already_added ? `<button type="button" class="btn btn-xs btn-default btn-add-single-deferred" data-idx="${idx}" style="font-weight: 600;">${__("+ Add")}</button>` : ""}
+					</div>
+				</div>
+				<div style="margin-left: 26px;">
+					${meta.length > 0 ? `<div style="display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--text-muted); margin-top: 4px; flex-wrap: wrap;">${meta.join("")}</div>` : ""}
+					${reason_html}
+				</div>
+			</div>
+		`;
+	}).join("");
+
+	const d = new frappe.ui.Dialog({
+		title: __("Deferred Services History"),
+		fields: [
+			{
+				fieldtype: "HTML",
+				fieldname: "deferred_services_html",
+				options: `
+					<div style="margin-bottom: 12px;">
+						<p class="text-muted" style="margin-bottom: 8px;">
+							${__("This vehicle has open recommendations from previous visits. Select services to add them directly to this Repair Order:")}
+						</p>
+						${!all_already_added ? `
+							<div style="display: flex; justify-content: flex-end; margin-bottom: 6px;">
+								<a href="javascript:void(0)" class="btn-toggle-all-deferred" style="font-size: 12px; font-weight: 500;">
+									${__("Toggle All")}
+								</a>
+							</div>
+						` : ""}
+						<div class="deferred-services-container" style="max-height: 400px; overflow-y: auto;">
+							${items_html}
+						</div>
+					</div>
+				`,
+			},
+		],
+		primary_action_label: all_already_added ? __("Close") : __("Add Selected Services"),
+		primary_action() {
+			if (all_already_added) {
+				d.hide();
+				return;
+			}
+
+			const selected_indices = [];
+			d.$wrapper.find(".deferred-service-chk:checked").each(function () {
+				const idx = cint($(this).attr("data-idx"));
+				if (!deferred_list[idx]._already_added) {
+					selected_indices.push(idx);
+				}
+			});
+
+			if (selected_indices.length === 0) {
+				frappe.msgprint(__("Please select at least one deferred service to add."));
+				return;
+			}
+
+			const to_add = selected_indices.map((idx) => deferred_list[idx]);
+			execute_add_deferred_services(frm, to_add, d);
+		},
+		secondary_action_label: all_already_added ? null : __("Dismiss"),
+		secondary_action() {
+			d.hide();
+		},
+	});
+
+	d.show();
+
+	// Bind Toggle All
+	d.$wrapper.find(".btn-toggle-all-deferred").on("click", function () {
+		const checkboxes = d.$wrapper.find(".deferred-service-chk:not(:disabled)");
+		const any_unchecked = checkboxes.toArray().some((chk) => !chk.checked);
+		checkboxes.prop("checked", any_unchecked);
+	});
+
+	// Bind single item add
+	d.$wrapper.find(".btn-add-single-deferred").on("click", function () {
+		const idx = cint($(this).attr("data-idx"));
+		const item = deferred_list[idx];
+		if (!item || item._already_added) return;
+
+		$(this).prop("disabled", true).text(__("Added ✓"));
+		d.$wrapper.find(`.deferred-service-chk[data-idx="${idx}"]`).prop("disabled", true).prop("checked", true);
+		item._already_added = true;
+
+		execute_add_deferred_services(frm, [item], null);
+	});
+}
+
+function execute_add_deferred_services(frm, items_to_add, d) {
+	if (!items_to_add || items_to_add.length === 0) return;
+
+	if (frm.is_new()) {
+		let added_count = 0;
+		const has_prior_approval = frm.doc.approval_status === "Approved"
+			|| frm.doc.approval_status === "Partially Approved"
+			|| (frm.doc.services || []).some((s) => s.status === "Approved");
+
+		items_to_add.forEach((item) => {
+			const title = (item.job_title || item.service_title || "").trim();
+			if (!title) return;
+
+			// Prevent duplicate additions
+			const exists = (frm.doc.services || []).some(
+				(s) => (s.service_title || "").trim().toLowerCase() === title.toLowerCase()
+			);
+			if (exists) return;
+
+			const row = frm.add_child("services");
+			row.service_title = title;
+			row.is_flat_rate = 1;
+			row.labor_hours = 0.0;
+			row.labor_rate = 0.0;
+			row.labor_amount = flt(item.estimated_amount != null ? item.estimated_amount : item.estimated_cost);
+			row.parts_total = 0.0;
+			row.total_amount = row.labor_amount;
+			row.is_supplement = has_prior_approval ? 1 : 0;
+			row.status = "Estimating";
+			row.advisor_notes = "";
+
+			added_count++;
+
+			// If a matching Service Package exists, link it to trigger package field population
+			frappe.db.get_value(
+				"Service Package",
+				{ package_name: title },
+				"name",
+				(res) => {
+					const pkg_name = res && res.name;
+					if (pkg_name) {
+						frappe.model.set_value(row.doctype, row.name, "service_package", pkg_name);
+					} else {
+						frappe.db.get_value("Service Package", title, "name", (r2) => {
+							if (r2 && r2.name) {
+								frappe.model.set_value(row.doctype, row.name, "service_package", r2.name);
+							}
+						});
+					}
+				}
+			);
+		});
+
+		if (!frm.doc.approval_status || frm.doc.approval_status === "Draft") {
+			frm.set_value("approval_status", "Estimating");
+		}
+		frm.refresh_field("services");
+		recalculate_totals(frm);
+		if (d) d.hide();
+		frappe.show_alert({
+			message: __("Added {0} deferred service(s) to Repair Order", [added_count]),
+			indicator: "green",
+		});
+	} else {
+		frm.call({
+			doc: frm.doc,
+			method: "add_deferred_services",
+			args: { deferred_items: items_to_add },
+			freeze: true,
+			freeze_message: __("Adding deferred services to Repair Order..."),
+			callback(r) {
+				if (r.message && r.message.status === "success") {
+					frappe.show_alert({
+						message: __("Added {0} deferred service(s) to Repair Order", [r.message.added_count]),
+						indicator: "green",
+					});
+					if (d) d.hide();
+					frm.reload_doc();
+				} else if (r.message && r.message.status === "noop") {
+					frappe.msgprint(r.message.message);
+					if (d) d.hide();
+				}
+			},
+		});
+	}
 }

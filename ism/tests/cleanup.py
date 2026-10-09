@@ -163,11 +163,15 @@ def _cleanup_sales_orders(test_customers, log):
 
 
 def _cleanup_quotations(test_customers, log):
-	all_qtns = frappe.get_all("Quotation", fields=["name", "party_name", "custom_vehicle", "docstatus"])
+	fields = ["name", "party_name", "docstatus"]
+	has_custom_vehicle = frappe.db.has_column("Quotation", "custom_vehicle")
+	if has_custom_vehicle:
+		fields.append("custom_vehicle")
+	all_qtns = frappe.get_all("Quotation", fields=fields)
 	for qtn in all_qtns:
 		if qtn.party_name in PRESERVED_CUSTOMERS:
 			continue
-		is_test = qtn.party_name in test_customers or qtn.custom_vehicle in TEST_VINS
+		is_test = qtn.party_name in test_customers or (has_custom_vehicle and qtn.get("custom_vehicle") in TEST_VINS)
 		if is_test or (qtn.party_name and any(qtn.party_name.startswith(p) for p in TEST_CUST_PREFIXES)):
 			try:
 				doc = frappe.get_doc("Quotation", qtn.name)

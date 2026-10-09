@@ -45,7 +45,7 @@ GENERATION_CONFIG = {
 				"generations": [
 					{"name": "Model 3 Jan 2024", "start": (2024, 1), "end": None},
 				],
-				"default_url": "https://service.tesla.com/docs/Model3/2024/ServiceManual/en-us/",
+				"default_url": "https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/",
 			},
 			{
 				"url_match": None,
