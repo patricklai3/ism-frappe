@@ -55,28 +55,68 @@
     let isMobile = 0;
     let mobileLevel = "No";
 
+    // A) Check DOM indicator elements inserted by Tesla's service-manual.js
+    const mcIndicator = document.querySelector(".mobile-capable-indicator");
+    if (mcIndicator) {
+      if (mcIndicator.querySelector("img[src*='icon-mobile-capable'], img[alt*='Mobile Capable']") ||
+          mcIndicator.querySelector(".tds-chip--green-pastel") ||
+          mcIndicator.textContent.toLowerCase().includes("mobile capable")) {
+        isMobile = 1;
+        mobileLevel = "Level 1";
+      } else if (mcIndicator.querySelector("img[src*='icon-not-mobile-capable'], img[alt*='Not Mobile Capable']") ||
+                 mcIndicator.textContent.toLowerCase().includes("not mobile capable")) {
+        isMobile = 0;
+        mobileLevel = "No";
+      }
+    }
+
+    if (!isMobile) {
+      const mcChip = document.querySelector(".tds-chip--green-pastel");
+      if (mcChip && mcChip.textContent.toLowerCase().includes("mobile")) {
+        isMobile = 1;
+        mobileLevel = "Level 1";
+      }
+    }
+
+    if (!isMobile && document.querySelector("span.show-mobile-capable-indicator")) {
+      isMobile = 1;
+      mobileLevel = "Level 1";
+    }
+
+    // B) Query dependencies.json manifest with absolute URL
     try {
-      const res = await fetch("dependencies.json");
+      const cleanUrl = window.location.href.split("?")[0].split("#")[0];
+      const manifestUrl = cleanUrl.replace(/\/[^\/]+$/, "/dependencies.json");
+      const res = await fetch(manifestUrl);
       if (res.ok) {
         const data = await res.json();
         const topics = data?.topics?.topic || [];
-        const filename = window.location.pathname.split("/").pop();
+        const filename = cleanUrl.split("/").pop();
         const match = topics.find(t =>
           (filename && t.url === filename) ||
-          (docGuid && t.guid === docGuid) ||
-          (correctionCode && String(t["correction-code"]).trim() === String(correctionCode).trim())
+          (docGuid && t.guid && t.guid.toUpperCase() === docGuid) ||
+          (correctionCode && String(t["correction-code"]).trim() === String(correctionCode).trim()) ||
+          (correctionCode && String(t["rh-correction-code"]).trim() === String(correctionCode).trim())
         );
         if (match) {
           const cap = match["mobile-capable"];
-          const isL1 = Array.isArray(cap) ? cap.includes("Level 1") : cap === "Level 1";
-          isMobile = isL1 ? 1 : 0;
-          mobileLevel = Array.isArray(cap) ? cap.join(", ") : (cap || "No");
+          const isCap = Array.isArray(cap)
+            ? cap.some(c => String(c).toLowerCase().includes("level") || String(c).toLowerCase() === "yes")
+            : (cap && String(cap).toLowerCase() !== "no" && String(cap).toLowerCase() !== "none");
+          if (isCap) {
+            isMobile = 1;
+            mobileLevel = Array.isArray(cap) ? cap.join(", ") : String(cap);
+          } else {
+            isMobile = 0;
+            mobileLevel = "No";
+          }
         }
       }
     } catch (e) {
-      // Fallback below
+      // Manifest fetch error handled gracefully
     }
 
+    // C) Fallback to legacy manual classes
     if (mobileLevel === "No" || mobileLevel === "Unknown") {
       const procTitleEl = document.querySelector(".procedure-title");
       if (procTitleEl && procTitleEl.className.includes("MobileCapable-Yes")) {
@@ -88,6 +128,7 @@
       }
     }
 
+    // D) Fallback to title keywords
     if (!isMobile && title && title.toLowerCase().includes("mobile only")) {
       isMobile = 1;
       mobileLevel = "Mobile Only";

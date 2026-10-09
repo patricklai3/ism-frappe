@@ -8,12 +8,14 @@
  "field_order": [
   "package_name",
   "correction_code",
+  "rh_correction_code",
   "col_break_rates",
   "standard_labor_hours",
   "hourly_rate",
   "service_rate",
   "is_flat_rate",
   "is_mobile_capable",
+  "is_symmetrical",
   "sec_manual_ref",
   "btn_open_tesla_manual",
   "btn_import_from_url",
@@ -110,6 +112,20 @@
    "fieldtype": "Table",
    "label": "Parts",
    "options": "Service Package Item"
+  },
+  {
+   "fieldname": "rh_correction_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "RH Correction Code",
+   "search_index": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_symmetrical",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Symmetrical Operation (LH / RH)"
   }
  ],
  "links": [],

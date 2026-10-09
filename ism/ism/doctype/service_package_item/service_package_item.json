@@ -9,6 +9,7 @@
   "item_name",
   "qty",
   "rate",
+  "side",
   "is_labor"
  ],
  "fields": [
@@ -51,6 +52,15 @@
    "fieldtype": "Check",
    "hidden": 1,
    "label": "Is Labor"
+  },
+  {
+   "columns": 2,
+   "default": "Both",
+   "fieldname": "side",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Side / Variant",
+   "options": "Both\nLH\nRH"
   }
  ],
  "istable": 1,

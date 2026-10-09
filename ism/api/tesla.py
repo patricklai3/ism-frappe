@@ -12,6 +12,7 @@ from ism.utils.tesla_manual import (
 	get_tesla_manual_url_for_vehicle,
 	validate_vehicle_compatibility,
 	get_category_for_correction_code,
+	get_mobile_capability_from_manifest,
 )
 from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
 
@@ -97,25 +98,27 @@ def fetch_and_parse_tesla_procedure(url):
 	if not url:
 		frappe.throw("Tesla procedure URL is required.")
 
-	req = urllib.request.Request(
-		url,
-		headers={
-			"User-Agent": (
-				"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-				"AppleWebKit/537.36 (KHTML, like Gecko) "
-				"Chrome/124.0.0.0 Safari/537.36"
-			),
-			"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-		},
-	)
+	headers = {
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+		"Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Referer": "https://service.tesla.com/",
+	}
+	req = urllib.request.Request(url, headers=headers)
 
 	try:
-		with urllib.request.urlopen(req, timeout=12) as response:
+		with urllib.request.urlopen(req, timeout=15) as response:
 			html_content = response.read().decode("utf-8", errors="ignore")
-	except urllib.error.URLError as e:
-		frappe.throw(f"Unable to fetch Tesla service manual page: {e.reason}")
-	except Exception as e:
-		frappe.throw(f"Failed to fetch page: {str(e)}")
+	except Exception:
+		# Fallback retry with generic browser agent
+		try:
+			fallback_req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+			with urllib.request.urlopen(fallback_req, timeout=15) as response:
+				html_content = response.read().decode("utf-8", errors="ignore")
+		except urllib.error.URLError as e:
+			frappe.throw(f"Unable to fetch Tesla service manual page: {e.reason}")
+		except Exception as e:
+			frappe.throw(f"Failed to fetch page: {str(e)}")
 
 	parsed = parse_tesla_procedure_html(html_content, url=url)
 	if not parsed.get("title") and not parsed.get("correction_code"):
@@ -164,8 +167,18 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 	if correction_code:
 		import re
 		title = re.sub(rf"^{re.escape(correction_code)}\s*[-–—:]?\s*", "", title).strip()
-	title = title or "Tesla Service Procedure"
 	frt = flt(proc_data.get("frt"), 2)
+
+	# Ensure mobile capability is detected from manifest if not yet confirmed
+	if not cint(proc_data.get("is_mobile_capable")) and proc_url:
+		dep_info = get_mobile_capability_from_manifest(
+			proc_url,
+			proc_data.get("doc_guid"),
+			correction_code,
+		)
+		if dep_info and dep_info.get("is_mobile_capable"):
+			proc_data["is_mobile_capable"] = dep_info["is_mobile_capable"]
+			proc_data["mobile_service_level"] = dep_info["mobile_service_level"]
 
 	# 2. Compatibility check with vehicle
 	v_doc = frappe.get_doc("Repair Vehicle", ro.vehicle) if ro.vehicle else None
@@ -310,6 +323,17 @@ def _upsert_service_package(proc_data, proc_url):
 	title = title or "Tesla Service Procedure"
 
 	frt = flt(proc_data.get("frt"), 2)
+
+	# Ensure mobile capability is detected from manifest if not yet confirmed
+	if not cint(proc_data.get("is_mobile_capable")) and proc_url:
+		dep_info = get_mobile_capability_from_manifest(
+			proc_url,
+			proc_data.get("doc_guid"),
+			correction_code,
+		)
+		if dep_info and dep_info.get("is_mobile_capable"):
+			proc_data["is_mobile_capable"] = dep_info["is_mobile_capable"]
+			proc_data["mobile_service_level"] = dep_info["mobile_service_level"]
 
 	# Check for existing Service Package with matching correction_code
 	existing_pkg_name = None

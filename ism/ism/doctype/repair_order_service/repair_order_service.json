@@ -8,6 +8,7 @@
   "service_package",
   "correction_code",
   "service_title",
+  "service_position",
   "status",
   "is_completed",
   "col_break_labor",
@@ -230,6 +231,16 @@
    "fieldname": "advisor_notes",
    "fieldtype": "Small Text",
    "label": "Advisor Notes / Instructions"
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 1,
+   "default": "None",
+   "fieldname": "service_position",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Side / Position",
+   "options": "None\nLH\nRH\nFront\nRear\nBoth"
   }
  ],
  "istable": 1,

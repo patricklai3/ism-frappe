@@ -290,8 +290,23 @@ class RepairOrder(Document):
 			if self.status in ["Draft Estimate", "Pending Authorization", "", None]:
 				self.status = "Authorized - In Progress"
 
-	def before_update_after_submit(self):
-		self.validate()
+	def on_trash(self):
+		if "System Manager" not in frappe.get_roles() and frappe.session.user != "Administrator":
+			frappe.throw(
+				_("Only Administrators and System Managers are allowed to delete Repair Orders."),
+				frappe.PermissionError,
+			)
+
+	def submit(self):
+		"""Save for non-submittable Repair Order to preserve API compatibility."""
+		self.save(ignore_permissions=True)
+		return self
+
+	def cancel(self):
+		"""Handle cancellation for non-submittable Repair Order."""
+		self.on_cancel()
+		self.save(ignore_permissions=True)
+		return self
 
 	def on_cancel(self):
 		if self.sales_invoice:
@@ -304,6 +319,11 @@ class RepairOrder(Document):
 				)
 		self.status = "Cancelled"
 		self.db_set("status", "Cancelled")
+
+	@frappe.whitelist()
+	def cancel_repair_order(self):
+		self.on_cancel()
+		self.save(ignore_permissions=True)
 
 	def _validate_vehicle_and_customer(self):
 		if not self.vehicle or not self.customer:
@@ -1267,15 +1287,19 @@ class RepairOrder(Document):
 				)
 			)
 
+		abbr = frappe.db.get_value("Company", self.company, "abbr") or "I"
 		default_income_account = frappe.db.get_value(
 			"Company", self.company, "default_income_account"
-		) or "Sales - I"
+		) or f"Sales - {abbr}"
 		default_cost_center = frappe.db.get_value(
 			"Company", self.company, "cost_center"
-		) or "Main - I"
-		default_warehouse = frappe.db.get_single_value(
-			"Stock Settings", "default_warehouse"
-		) or "Stores - I"
+		) or f"Main - {abbr}"
+		default_warehouse = (
+			frappe.db.get_value("Warehouse", {"company": self.company, "warehouse_name": "Stores"}, "name")
+			or frappe.db.get_value("Warehouse", {"company": self.company, "is_group": 0}, "name")
+			or (frappe.db.get_single_value("Stock Settings", "default_warehouse") if frappe.db.get_value("Warehouse", frappe.db.get_single_value("Stock Settings", "default_warehouse"), "company") == self.company else None)
+			or f"Stores - {abbr}"
+		)
 
 		tax_template = self.taxes_and_charges or get_or_create_default_tax_template(self.company)
 		self.taxes_and_charges = tax_template
@@ -1347,7 +1371,12 @@ class RepairOrder(Document):
 						"qty": flt(p.get("qty", 1.0)),
 						"uom": p.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
 						"rate": flt(p.get("rate", 0.0)),
-						"warehouse": p.get("warehouse") or default_warehouse,
+						"warehouse": (
+							p.get("warehouse")
+							if p.get("warehouse")
+							and frappe.db.get_value("Warehouse", p.get("warehouse"), "company") == self.company
+							else default_warehouse
+						),
 						"income_account": default_income_account,
 						"cost_center": default_cost_center,
 					})
@@ -1439,20 +1468,7 @@ class RepairOrder(Document):
 			veh_doc.last_repair_order = self.name
 			veh_doc.save(ignore_permissions=True)
 
-		if self.docstatus == 0:
-			self.submit()
-		elif self.docstatus == 1:
-			self.db_set("sales_invoice", self.sales_invoice)
-			self.db_set("paid_amount", self.paid_amount)
-			self.db_set("outstanding_amount", self.outstanding_amount)
-			self.db_set("payment_status", self.payment_status)
-			self.db_set("vehicle_location", self.vehicle_location)
-			self.db_set("vehicle_released", 1)
-			self.db_set("checkout_date", self.checkout_date)
-			self.db_set("status", self.status)
-			if self.odometer_out:
-				self.db_set("odometer_out", self.odometer_out)
-			self.save(ignore_permissions=True)
+		self.save(ignore_permissions=True)
 		return {
 			"status": "success",
 			"sales_invoice": self.sales_invoice,

@@ -373,7 +373,7 @@ class TestRepairOrder(ISMTestCase):
 		ro.reload()
 
 		self.assertEqual(res.get("status"), "success")
-		self.assertEqual(ro.docstatus, 1)  # Submitted
+		self.assertEqual(ro.docstatus, 0)
 		self.assertEqual(ro.status, "Closed / Released")
 		self.assertEqual(ro.payment_status, "Paid")
 		self.assertEqual(ro.vehicle_released, 1)
@@ -458,9 +458,8 @@ class TestRepairOrder(ISMTestCase):
 		ro.insert()
 		self.track(ro)
 
-		# 1. User submits Repair Order at intake for audit trail
-		ro.submit()
-		self.assertEqual(ro.docstatus, 1)
+		# 1. Non-submittable Repair Order maintains docstatus 0
+		self.assertEqual(ro.docstatus, 0)
 
 		# 2. Bay execution on submitted document
 		ro.pick_up_vehicle()
@@ -526,6 +525,54 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.vehicle_released, 1)
 		self.assertEqual(ro.vehicle_location, "Released to Customer")
 		self.assertIsNotNone(ro.sales_invoice)
+
+	def test_delete_service_on_submitted_repair_order_with_mobile_capable_toggle(self):
+		"""Verify deleting a service row on a submitted Repair Order recalculates is_mobile_capable without UpdateAfterSubmitError."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 15000,
+			"status": "Draft Estimate",
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Mobile Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"is_mobile_capable": 1,
+				},
+				{
+					"service_title": "Shop Only Service",
+					"status": "Approved",
+					"labor_hours": 1.5,
+					"labor_rate": 100.0,
+					"is_mobile_capable": 0,
+				},
+			],
+		})
+		ro.insert()
+		self.track(ro)
+		# Initially both services present -> is_mobile_capable is 0
+		self.assertEqual(ro.is_mobile_capable, 0)
+
+		# Non-submittable Repair Order
+		self.assertEqual(ro.docstatus, 0)
+
+		# Delete the non-mobile service so remaining service makes ro.is_mobile_capable flip 0 -> 1
+		ro.services.pop(1)
+		ro.save()
+		ro.reload()
+		self.assertEqual(len(ro.services), 1)
+		self.assertEqual(ro.is_mobile_capable, 1)
+
+		# Now delete the mobile service so services is empty and ro.is_mobile_capable flips 1 -> 0
+		ro.services = []
+		ro.save()
+		ro.reload()
+		self.assertEqual(len(ro.services), 0)
+		self.assertEqual(ro.is_mobile_capable, 0)
 
 	def test_unapproved_pickup_and_status_progression_blocked(self):
 		"""Verify that starting work, pulling car into bay, or advancing status without authorization is strictly blocked."""
@@ -718,7 +765,6 @@ class TestRepairOrder(ISMTestCase):
 			],
 		})
 		ro.insert()
-		ro.submit()
 		self.track(ro)
 
 		# Advisor manually updates header approval_status to Approved and status to Authorized - In Progress
@@ -758,7 +804,6 @@ class TestRepairOrder(ISMTestCase):
 			],
 		})
 		ro.insert()
-		ro.submit()
 		self.track(ro)
 
 		fake_sig = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -838,7 +883,6 @@ class TestRepairOrder(ISMTestCase):
 			],
 		})
 		ro.insert()
-		ro.submit()
 		self.track(ro)
 
 		# 1. Simulate client calling frm.call({ doc: frm.doc, method: "pick_up_vehicle" })
@@ -982,12 +1026,42 @@ class TestRepairOrder(ISMTestCase):
 			],
 		})
 		ro.insert()
-		ro.submit()
 		self.track(ro)
 
 		ro.cancel()
 		db_status = frappe.db.get_value("Repair Order", ro.name, "status")
 		self.assertEqual(db_status, "Cancelled")
+
+	def test_only_admin_can_delete_repair_order(self):
+		"""Verify that only System Manager / Administrator can delete a Repair Order, while non-admin gets PermissionError."""
+		ro = self.create_test_repair_order(customer=self.customer.name, vehicle=self.vehicle.name)
+		self.track(ro)
+
+		# Create a non-admin test user with Sales User role
+		test_user = "test_sales_user_del@example.com"
+		if not frappe.db.exists("User", test_user):
+			u = frappe.new_doc("User")
+			u.email = test_user
+			u.first_name = "Test"
+			u.last_name = "Sales"
+			u.append("roles", {"role": "Sales User"})
+			u.flags.ignore_password_policy = True
+			u.insert(ignore_permissions=True)
+			self.track(u)
+
+		# Switch to non-admin user
+		orig_user = frappe.session.user
+		try:
+			frappe.set_user(test_user)
+			with self.assertRaises(frappe.PermissionError):
+				frappe.delete_doc("Repair Order", ro.name)
+		finally:
+			frappe.set_user(orig_user)
+
+		# Administrator should be able to delete successfully
+		frappe.set_user("Administrator")
+		frappe.delete_doc("Repair Order", ro.name)
+		self.assertFalse(frappe.db.exists("Repair Order", ro.name))
 
 	def test_zero_labor_rate_not_overwritten(self):
 		"""Verify that zero labor rate (e.g. warranty / complimentary service) is preserved."""
@@ -1459,6 +1533,43 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.vehicle_location, "Completed / Parked in Lot")
 		self.assertEqual(ro.status, "Work Completed")
 		self.assertIsNotNone(ro.parked_at)
+
+	def test_repair_order_custom_listview_states_and_indicators(self):
+		"""Verify DocType states and listview settings are configured to prevent vanilla Frappe Draft/Submitted fallback."""
+		meta = frappe.get_meta("Repair Order")
+		state_map = {s.title: s.color for s in meta.states}
+
+		expected_states = {
+			"Draft Estimate": "Orange",
+			"Pending Authorization": "Yellow",
+			"Authorized - In Progress": "Blue",
+			"Waiting on Parts": "Orange",
+			"Work Completed": "Purple",
+			"Billed / Paid": "Green",
+			"Closed / Released": "Gray",
+			"Cancelled": "Red",
+		}
+
+		for title, color in expected_states.items():
+			self.assertIn(title, state_map, f"State '{title}' should be configured in DocType metadata")
+			self.assertEqual(state_map[title], color)
+
+		# Verify repair_order_list.js exists and configures has_indicator_for_draft/cancelled
+		import os
+		list_js_path = os.path.join(
+			frappe.get_app_path("ism"),
+			"ism",
+			"doctype",
+			"repair_order",
+			"repair_order_list.js",
+		)
+		self.assertTrue(os.path.exists(list_js_path), "repair_order_list.js must exist")
+		with open(list_js_path, "r", encoding="utf-8") as f:
+			content = f.read()
+		self.assertIn("has_indicator_for_draft: true", content)
+		self.assertIn("has_indicator_for_cancelled: true", content)
+		self.assertIn("get_indicator", content)
+
 
 
 

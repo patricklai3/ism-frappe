@@ -24,6 +24,19 @@ class ServicePackage(Document):
 		if not self.is_flat_rate and flt(self.standard_labor_hours) and flt(self.hourly_rate):
 			self.service_rate = flt(self.standard_labor_hours) * flt(self.hourly_rate)
 
+		if not getattr(self, "is_mobile_capable", 0) and getattr(self, "tesla_manual_url", None):
+			try:
+				from ism.utils.tesla_manual import get_mobile_capability_from_manifest
+				dep_info = get_mobile_capability_from_manifest(
+					self.tesla_manual_url,
+					getattr(self, "doc_guid", None),
+					getattr(self, "correction_code", None),
+				)
+				if dep_info and dep_info.get("is_mobile_capable"):
+					self.is_mobile_capable = dep_info["is_mobile_capable"]
+			except Exception:
+				pass
+
 		self.ensure_service_item()
 
 	def format_package_name(self):

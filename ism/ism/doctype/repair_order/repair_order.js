@@ -1,6 +1,36 @@
 // Copyright (c) 2026, patricklai3 and contributors
 // For license information, please see license.txt
 
+frappe.provide("frappe.listview_settings");
+frappe.listview_settings["Repair Order"] = frappe.listview_settings["Repair Order"] || {
+	has_indicator_for_draft: true,
+	has_indicator_for_cancelled: true,
+	add_fields: [
+		"status",
+		"approval_status",
+		"vehicle_location",
+		"customer",
+		"vehicle",
+		"grand_total",
+		"docstatus",
+	],
+	get_indicator: function (doc) {
+		const status_colors = {
+			"Draft Estimate": "orange",
+			"Pending Authorization": "yellow",
+			"Authorized - In Progress": "blue",
+			"Waiting on Parts": "orange",
+			"Work Completed": "purple",
+			"Billed / Paid": "green",
+			"Closed / Released": "gray",
+			"Cancelled": "red",
+		};
+		const status = doc.status || (doc.docstatus === 2 ? "Cancelled" : "Draft Estimate");
+		const color = status_colors[status] || "blue";
+		return [__(status), color, `status,=,${status}`];
+	},
+};
+
 function get_status_target_tab(doc_or_frm) {
 	const doc = doc_or_frm && doc_or_frm.doc ? doc_or_frm.doc : doc_or_frm;
 	if (!doc || doc.__islocal) {
@@ -311,7 +341,7 @@ frappe.ui.form.on("Repair Order", {
 			auto_select_active_tab(frm);
 		}
 
-		if (!frm.is_new() && frm.doc.docstatus !== 2) {
+		if (!frm.is_new() && frm.doc.status !== "Cancelled" && frm.doc.docstatus !== 2) {
 			try {
 				localStorage.setItem("ism_active_ro", JSON.stringify({
 					name: frm.doc.name,
@@ -454,6 +484,27 @@ frappe.ui.form.on("Repair Order", {
 				frm.add_custom_button(__("Process Payment & Release"), () => {
 					frm.trigger("open_payment_modal");
 				}).addClass("btn-primary");
+			}
+
+			// 6. Cancellation (available before vehicle is released and when not already cancelled)
+			if (!is_released && frm.doc.status !== "Cancelled") {
+				frm.add_custom_button(__("Cancel Order"), () => {
+					frappe.confirm(__("Are you sure you want to cancel this Repair Order?"), () => {
+						frm.call({
+							doc: frm.doc,
+							method: "cancel_repair_order",
+							freeze: true,
+							freeze_message: __("Cancelling Repair Order..."),
+							callback(r) {
+								frm.reload_doc();
+							},
+						});
+					});
+				});
+			}
+
+			if (frm.doc.status === "Cancelled") {
+				frm.disable_save();
 			}
 		}
 	},

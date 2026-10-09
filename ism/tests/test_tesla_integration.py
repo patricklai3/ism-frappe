@@ -19,6 +19,14 @@ from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
 
 
 class TestTeslaIntegration(ISMTestCase):
+	def setUp(self):
+		super().setUp()
+		_MANIFEST_CACHE.clear()
+
+	def tearDown(self):
+		_MANIFEST_CACHE.clear()
+		super().tearDown()
+
 	def test_category_taxonomy_mapping(self):
 		# 00 -> INSPECTION AND SERVICE
 		cat, subcat = get_category_for_correction_code("00030700")
@@ -166,6 +174,50 @@ class TestTeslaIntegration(ISMTestCase):
 		parsed_mobile = parse_tesla_procedure_html(sample_html, mobile_url)
 		self.assertEqual(parsed_mobile["is_mobile_capable"], 1)
 		self.assertIn("Level 1", parsed_mobile["mobile_service_level"])
+
+		# Test Model Y manifest match with GUID and Level 1
+		model_y_url = "https://service.tesla.com/docs/ModelY/ServiceManual/en-us/GUID-2210D20F-E132-4806-8C20-E44630117D89.html"
+		_MANIFEST_CACHE["https://service.tesla.com/docs/ModelY/ServiceManual/en-us/dependencies.json"] = [
+			{
+				"guid": "GUID-2210D20F-E132-4806-8C20-E44630117D89",
+				"url": "GUID-2210D20F-E132-4806-8C20-E44630117D89.html",
+				"correction-code": 12201402,
+				"mobile-capable": "Level 1",
+			}
+		]
+		parsed_my = parse_tesla_procedure_html(sample_html, model_y_url)
+		self.assertEqual(parsed_my["is_mobile_capable"], 1)
+		self.assertEqual(parsed_my["mobile_service_level"], "Level 1")
+
+		# Test DOM-based mobile capability indicators
+		sample_dom_mobile = """
+		<html>
+		<body>
+			<article>
+				<h1 class="title topictitle1"><span class="ph procedure-title">Sample Mobile Procedure</span></h1>
+				<div class="mobile-capable-indicator show-mobile-capable-indicator">
+					<span class="tds-chip--green-pastel">Mobile Capable</span>
+				</div>
+				<p class="shortdesc">
+					<span class="ph correction-code">12345678</span>
+					<span class="ph frt">0.20</span>
+				</p>
+			</article>
+		</body>
+		</html>
+		"""
+		parsed_dom = parse_tesla_procedure_html(sample_dom_mobile, "https://service.tesla.com/docs/ModelY/ServiceManual/en-us/GUID-NONEXISTENT.html")
+		self.assertEqual(parsed_dom["is_mobile_capable"], 1)
+
+		# Test Service Package validate auto-populates is_mobile_capable
+		pkg = frappe.new_doc("Service Package")
+		pkg.package_name = "Test Mobile Service"
+		pkg.correction_code = "12201402"
+		pkg.tesla_manual_url = model_y_url
+		pkg.doc_guid = "GUID-2210D20F-E132-4806-8C20-E44630117D89"
+		pkg.validate()
+		self.assertEqual(pkg.is_mobile_capable, 1)
+		_MANIFEST_CACHE.clear()
 
 	def test_import_tesla_procedure_end_to_end(self):
 		cust = self.create_test_customer()

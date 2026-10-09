@@ -371,34 +371,66 @@ def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None
 
 		topics = _MANIFEST_CACHE.get(base_manifest_url)
 		if topics is None:
-			req = urllib.request.Request(base_manifest_url, headers={"User-Agent": "Mozilla/5.0"})
+			headers = {
+				"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+				"Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
+				"Accept-Language": "en-US,en;q=0.9",
+				"Referer": "https://service.tesla.com/",
+			}
+			req = urllib.request.Request(base_manifest_url, headers=headers)
 			try:
-				res = urllib.request.urlopen(req, timeout=4)
+				res = urllib.request.urlopen(req, timeout=15)
 				manifest_data = json.loads(res.read().decode("utf-8"))
 				topics = manifest_data.get("topics", {}).get("topic", [])
 				_MANIFEST_CACHE[base_manifest_url] = topics
 			except Exception:
-				_MANIFEST_CACHE[base_manifest_url] = []
-				return None
+				# Fallback retry with basic User-Agent
+				try:
+					req2 = urllib.request.Request(base_manifest_url, headers={"User-Agent": "Mozilla/5.0"})
+					res2 = urllib.request.urlopen(req2, timeout=15)
+					manifest_data = json.loads(res2.read().decode("utf-8"))
+					topics = manifest_data.get("topics", {}).get("topic", [])
+					_MANIFEST_CACHE[base_manifest_url] = topics
+				except Exception:
+					topics = []
 
 		target = None
-		for t in topics:
-			if filename and t.get("url") == filename:
+		target_guid = str(doc_guid).strip().upper() if doc_guid else ""
+		if not target_guid and filename and filename.startswith("GUID-"):
+			target_guid = filename.split(".")[0].upper()
+		target_cc = str(correction_code).strip() if correction_code else ""
+
+		for t in (topics or []):
+			t_url = str(t.get("url") or "").strip()
+			t_guid = str(t.get("guid") or "").strip().upper()
+			t_cc = str(t.get("correction-code") or "").strip()
+			t_rh_cc = str(t.get("rh-correction-code") or "").strip()
+
+			if filename and t_url == filename:
 				target = t
 				break
-			if doc_guid and t.get("guid") == doc_guid:
+			if target_guid and t_guid == target_guid:
 				target = t
 				break
-			if correction_code and str(t.get("correction-code", "")).strip() == str(correction_code).strip():
+			if target_cc and (t_cc == target_cc or t_rh_cc == target_cc):
 				target = t
 				break
 
 		if target:
 			cap = target.get("mobile-capable")
-			is_mobile = 1 if (cap == "Level 1" or (isinstance(cap, list) and "Level 1" in cap)) else 0
+			if isinstance(cap, list):
+				is_mobile = 1 if any(str(c).strip().lower() not in ("no", "none", "unknown", "0", "false") for c in cap) else 0
+				mobile_level = ", ".join(str(c) for c in cap)
+			elif cap and str(cap).strip().lower() not in ("no", "none", "unknown", "0", "false"):
+				is_mobile = 1
+				mobile_level = str(cap)
+			else:
+				is_mobile = 0
+				mobile_level = "No"
+
 			return {
 				"is_mobile_capable": is_mobile,
-				"mobile_service_level": ", ".join(cap) if isinstance(cap, list) else (str(cap) if cap else "No"),
+				"mobile_service_level": mobile_level,
 			}
 	except Exception:
 		pass
@@ -496,12 +528,12 @@ def parse_tesla_procedure_html(html_content, url=""):
 			is_mobile_capable = dep_info["is_mobile_capable"]
 			mobile_level = dep_info["mobile_service_level"]
 
-	# B) Fallback to HTML classes if manifest was not conclusive
+	# B) Fallback to HTML classes and indicator elements if manifest was not conclusive
 	if mobile_level in ("No", "Unknown", None):
-		if "MobileCapable-Yes" in html_content:
+		if any(k in html_content for k in ("MobileCapable-Yes", "icon-mobile-capable", "show-mobile-capable-indicator", "tds-chip--green-pastel", "Mobile Capable")):
 			is_mobile_capable = 1
 			mobile_level = "Level 1"
-		elif "MobileCapable-No" in html_content:
+		elif any(k in html_content for k in ("MobileCapable-No", "icon-not-mobile-capable", "show-not-mobile-capable-indicator", "Not Mobile Capable")):
 			is_mobile_capable = 0
 			mobile_level = "No"
 
