@@ -25,7 +25,7 @@ GENERATION_CONFIG = {
 					{"name": "Model S Feb 2021 - May 2025", "start": (2021, 2), "end": (2025, 5)},
 					{"name": "Model S June 2025", "start": (2025, 6), "end": None},
 				],
-				"default_url": "https://service.tesla.com/docs/ModelS/Palladium/ServiceManual/en-us/",
+				"default_url": "https://service.tesla.com/docs/ModelS/ServiceManual/Palladium/en-us/",
 			},
 			{
 				"url_match": None,  # classic / legacy
@@ -84,7 +84,7 @@ GENERATION_CONFIG = {
 				"generations": [
 					{"name": "Model Y Feb 2025", "start": (2025, 2), "end": None},
 				],
-				"default_url": "https://service.tesla.com/docs/ModelY/2025/ServiceManual/en-us/",
+				"default_url": "https://service.tesla.com/docs/ModelY/ServiceManual/2025/en-us/",
 			},
 			{
 				"url_match": None,

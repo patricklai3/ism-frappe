@@ -49,7 +49,7 @@ class TestTeslaIntegration(ISMTestCase):
 
 	def test_generation_url_parsing(self):
 		# Model 3 Classic
-		m3_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+		m3_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/"
 		p1 = parse_tesla_manual_url(m3_url)
 		self.assertEqual(p1["applicable_model"], "Model 3")
 		self.assertEqual(p1["matched_generation"], "Model 3 Jun 2017 - Dec 2023")
@@ -62,13 +62,13 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(p2["matched_generation"], "Model 3 Jan 2024")
 
 		# Model S Palladium
-		ms_pal_url = "https://service.tesla.com/docs/ModelS/Palladium/ServiceManual/en-us/GUID-1111.html"
+		ms_pal_url = "https://service.tesla.com/docs/ModelS/ServiceManual/Palladium/en-us/GUID-1111.html"
 		p3 = parse_tesla_manual_url(ms_pal_url)
 		self.assertEqual(p3["applicable_model"], "Model S")
 		self.assertEqual(p3["matched_generation"], "Model S Feb 2021 - May 2025")
 
 		# Model Y 2025 Juniper
-		my_25_url = "https://service.tesla.com/docs/ModelY/2025/ServiceManual/en-us/GUID-2222.html"
+		my_25_url = "https://service.tesla.com/docs/ModelY/ServiceManual/2025/en-us/GUID-2222.html"
 		p4 = parse_tesla_manual_url(my_25_url)
 		self.assertEqual(p4["applicable_model"], "Model Y")
 		self.assertEqual(p4["matched_generation"], "Model Y Feb 2025")
@@ -111,14 +111,14 @@ class TestTeslaIntegration(ISMTestCase):
 		# Compatible URL (2017-2023 Model 3)
 		compat_good = validate_vehicle_compatibility(
 			v_m3_20,
-			"https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+			"https://service.tesla.com/docs/Model3/ServiceManual/en-us/"
 		)
 		self.assertTrue(compat_good["is_compatible"])
 
 		# Mismatched URL (2024+ Highland on 2020 Model 3)
 		compat_bad = validate_vehicle_compatibility(
 			v_m3_20,
-			"https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+			"https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/"
 		)
 		self.assertFalse(compat_bad["is_compatible"])
 		self.assertIn("Generation mismatch", compat_bad["warning"])
@@ -151,7 +151,7 @@ class TestTeslaIntegration(ISMTestCase):
 		</body>
 		</html>
 		"""
-		url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
+		url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/"
 		parsed = parse_tesla_procedure_html(sample_html, url)
 
 		self.assertEqual(parsed["title"], "Basic Vehicle Inspection (Inspection)")
@@ -238,7 +238,7 @@ class TestTeslaIntegration(ISMTestCase):
 			"applicable_model": "Model 3",
 			"applicable_generation": "Model 3 Jun 2017 - Dec 2023",
 			"doc_guid": "GUID-C24C6004-94BF-4099-8681-8D6598EE6E50",
-			"tesla_manual_url": "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html",
+			"tesla_manual_url": "https://service.tesla.com/docs/Model3/ServiceManual/en-us/",
 			"description": "Basic vehicle multi-point inspection.",
 			"is_mobile_capable": 0,
 			"mobile_service_level": "No",
