@@ -5,16 +5,39 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "slot_number",
+  "component_slot",
   "item_code",
   "item_name",
+  "is_default",
+  "part_source",
+  "part_condition",
   "qty",
   "rate",
   "side",
+  "oem_part_number",
+  "warranty_period",
   "is_labor"
  ],
  "fields": [
   {
-   "columns": 3,
+   "columns": 1,
+   "default": "1",
+   "fieldname": "slot_number",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Slot #"
+  },
+  {
+   "columns": 1,
+   "fieldname": "component_slot",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Slot",
+   "read_only": 1
+  },
+  {
+   "columns": 2,
    "fieldname": "item_code",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -23,7 +46,7 @@
    "reqd": 1
   },
   {
-   "columns": 3,
+   "columns": 2,
    "fetch_from": "item_code.item_name",
    "fieldname": "item_name",
    "fieldtype": "Data",
@@ -32,7 +55,35 @@
    "read_only": 1
   },
   {
-   "columns": 2,
+   "columns": 1,
+   "default": "1",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Default Option"
+  },
+  {
+   "columns": 1,
+   "fetch_from": "item_code.part_source",
+   "fieldname": "part_source",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Source",
+   "options": "OEM\nAftermarket",
+   "read_only": 1
+  },
+  {
+   "columns": 1,
+   "fetch_from": "item_code.part_condition",
+   "fieldname": "part_condition",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Condition",
+   "options": "New\nUsed\nReconditioned",
+   "read_only": 1
+  },
+  {
+   "columns": 1,
    "default": "1",
    "fieldname": "qty",
    "fieldtype": "Float",
@@ -40,11 +91,34 @@
    "label": "Quantity"
   },
   {
-   "columns": 2,
+   "columns": 1,
    "fieldname": "rate",
    "fieldtype": "Currency",
    "in_list_view": 1,
    "label": "Rate"
+  },
+  {
+   "columns": 1,
+   "default": "Both",
+   "fieldname": "side",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Side / Variant",
+   "options": "Both\nLH\nRH"
+  },
+  {
+   "fetch_from": "item_code.oem_part_number",
+   "fieldname": "oem_part_number",
+   "fieldtype": "Data",
+   "label": "OEM Part #",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "item_code.warranty_period",
+   "fieldname": "warranty_period",
+   "fieldtype": "Data",
+   "label": "Warranty Period",
+   "read_only": 1
   },
   {
    "default": "0",
@@ -52,20 +126,11 @@
    "fieldtype": "Check",
    "hidden": 1,
    "label": "Is Labor"
-  },
-  {
-   "columns": 2,
-   "default": "Both",
-   "fieldname": "side",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Side / Variant",
-   "options": "Both\nLH\nRH"
   }
  ],
  "istable": 1,
  "links": [],
- "modified": "2026-10-06 00:00:00.000000",
+ "modified": "2026-10-10 06:20:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Package Item",

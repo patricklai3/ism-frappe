@@ -49,7 +49,7 @@ class TestTeslaIntegration(ISMTestCase):
 
 	def test_generation_url_parsing(self):
 		# Model 3 Classic
-		m3_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/"
+		m3_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
 		p1 = parse_tesla_manual_url(m3_url)
 		self.assertEqual(p1["applicable_model"], "Model 3")
 		self.assertEqual(p1["matched_generation"], "Model 3 Jun 2017 - Dec 2023")
@@ -151,7 +151,7 @@ class TestTeslaIntegration(ISMTestCase):
 		</body>
 		</html>
 		"""
-		url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/"
+		url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-C24C6004-94BF-4099-8681-8D6598EE6E50.html"
 		parsed = parse_tesla_procedure_html(sample_html, url)
 
 		self.assertEqual(parsed["title"], "Basic Vehicle Inspection (Inspection)")

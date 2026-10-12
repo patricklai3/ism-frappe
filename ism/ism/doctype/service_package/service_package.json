@@ -7,6 +7,8 @@
  "engine": "InnoDB",
  "field_order": [
   "package_name",
+  "applicable_model",
+  "applicable_generation",
   "correction_code",
   "rh_correction_code",
   "col_break_rates",
@@ -32,6 +34,21 @@
    "label": "Service / Job Title",
    "reqd": 1,
    "unique": 1
+  },
+  {
+   "fieldname": "applicable_model",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Vehicle Model",
+   "options": "\nModel 3\nModel Y\nModel S\nModel X\nCybertruck\nRoadster\nAll Models",
+   "search_index": 1
+  },
+  {
+   "fieldname": "applicable_generation",
+   "fieldtype": "Data",
+   "label": "Applicable Generation",
+   "description": "e.g. Model 3 Jun 2017 - Dec 2023, Jan 2024"
   },
   {
    "fieldname": "correction_code",
@@ -172,7 +189,7 @@
   }
  ],
  "row_format": "Dynamic",
- "search_fields": "package_name,correction_code",
+ "search_fields": "package_name,correction_code,applicable_model",
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": []

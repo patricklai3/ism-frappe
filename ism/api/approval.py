@@ -188,17 +188,33 @@ def get_public_quote_approval(token: str) -> dict:
 		elif not isinstance(parts, list):
 			parts = []
 
-		linked_items = [
-			{
-				"item_code": p.get("item_code", ""),
-				"item_name": p.get("item_name", p.get("item_code", "")),
+		linked_items = []
+		for p in parts:
+			ic = p.get("item_code", "")
+			src = p.get("part_source")
+			cond = p.get("part_condition")
+			warr = p.get("warranty_period")
+			oem_num = p.get("oem_part_number")
+			if ic and (not src or not cond or not warr):
+				it_info = frappe.db.get_value("Item", ic, ["part_source", "part_condition", "warranty_period", "oem_part_number"], as_dict=True)
+				if it_info:
+					src = src or it_info.part_source or "OEM"
+					cond = cond or it_info.part_condition or "New"
+					warr = warr or it_info.warranty_period or "12 Months / 20,000 km"
+					oem_num = oem_num or it_info.oem_part_number or ""
+
+			linked_items.append({
+				"item_code": ic,
+				"item_name": p.get("item_name", ic),
 				"item_type": "Stock Item",
+				"part_source": src or "OEM",
+				"part_condition": cond or "New",
+				"warranty_period": warr or "12 Months / 20,000 km",
+				"oem_part_number": oem_num or "",
 				"qty": flt(p.get("qty", 1.0)),
 				"rate": flt(p.get("rate", 0.0)),
 				"amount": flt(p.get("amount", 0.0)),
-			}
-			for p in parts
-		]
+			})
 
 		services_list.append({
 			"name": s.name,

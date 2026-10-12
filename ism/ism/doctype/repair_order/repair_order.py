@@ -17,6 +17,7 @@ from frappe.utils import (
 	time_diff_in_hours,
 	today,
 )
+from ism.api.parts import get_default_warehouse
 
 
 def _get_default_labor_rate():
@@ -211,6 +212,7 @@ class RepairOrder(Document):
 		self._validate_vehicle_and_customer()
 		self._validate_odometer()
 		self._calculate_service_totals()
+		self._sync_service_package_parts()
 		self._calculate_taxes_and_totals()
 		self._update_progress_and_job_timing()
 		self._validate_authorization_guards()
@@ -358,7 +360,7 @@ class RepairOrder(Document):
 		Calculate labor amounts, parts totals, and combined service total for each service row.
 		"""
 		total_billed_hours = 0.0
-		default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
+		default_wh = get_default_warehouse(self.company)
 
 		for s in self.services:
 			# Auto-assign service title if missing
@@ -406,14 +408,26 @@ class RepairOrder(Document):
 				rate = flt(p.get("rate", 0.0))
 				amt = flt(qty * rate, 2)
 				parts_total += amt
+				wh_filters = {"is_group": 0}
+				if self.company:
+					wh_filters["company"] = self.company
+				part_wh = p.get("warehouse")
+				valid_wh = part_wh if (part_wh and frappe.db.exists("Warehouse", {**wh_filters, "name": part_wh})) else default_wh
+
 				cleaned_parts.append({
 					"item_code": p.get("item_code", ""),
 					"item_name": p.get("item_name", p.get("item_code", "")),
+					"component_slot": p.get("component_slot") or p.get("item_name", p.get("item_code", "")),
+					"part_source": p.get("part_source", ""),
+					"part_condition": p.get("part_condition", ""),
+					"oem_part_number": p.get("oem_part_number", ""),
+					"warranty_period": p.get("warranty_period", ""),
+					"side": p.get("side", ""),
 					"qty": qty,
 					"uom": p.get("uom", "Nos"),
 					"rate": rate,
 					"amount": amt,
-					"warehouse": p.get("warehouse") or default_wh,
+					"warehouse": valid_wh,
 				})
 
 			s.parts = json.dumps(cleaned_parts)
@@ -427,6 +441,81 @@ class RepairOrder(Document):
 				total_billed_hours += labor_hours
 
 		self.total_billed_hours = total_billed_hours
+
+	def _sync_service_package_parts(self):
+		"""Auto-sync parts added to services on Repair Orders into their linked Service Packages.
+		Ensures that any part used for a service is automatically remembered as a compatible variant.
+		"""
+		for s in self.services:
+			pkg_name = s.service_package
+			if not pkg_name and s.service_title:
+				pkg_name = frappe.db.get_value("Service Package", {"package_name": s.service_title}, "name")
+				if pkg_name:
+					s.service_package = pkg_name
+
+			if not pkg_name or not frappe.db.exists("Service Package", pkg_name):
+				continue
+
+			parts = s.parts
+			if isinstance(parts, str):
+				try:
+					parts = json.loads(parts) if parts else []
+				except Exception:
+					parts = []
+			if not isinstance(parts, list) or not parts:
+				continue
+
+			pkg = frappe.get_doc("Service Package", pkg_name)
+			pkg_dirty = False
+			from ism.api.parts import parse_slot_number, format_slot_label
+
+			for p in parts:
+				if not isinstance(p, dict):
+					continue
+				item_code = p.get("item_code")
+				if not item_code or not frappe.db.exists("Item", item_code):
+					continue
+
+				slot_num = cint(p.get("slot_number", 0)) or parse_slot_number(p.get("component_slot"))
+				if slot_num == 0:
+					slot_num = 1
+				slot_label = format_slot_label(slot_num)
+
+				existing_row = next((it for it in pkg.items if it.item_code == item_code), None)
+				if existing_row:
+					# If previously unassigned in Service Package, PERMANENTLY assign it!
+					curr_slot = cint(getattr(existing_row, "slot_number", 0)) or parse_slot_number(existing_row.component_slot)
+					if curr_slot == 0:
+						existing_row.slot_number = slot_num
+						existing_row.component_slot = slot_label
+						pkg_dirty = True
+				else:
+					# Newly added part in RO not yet in Service Package items -> add and assign to this slot
+					item_doc = frappe.get_cached_doc("Item", item_code)
+					side = getattr(s, "service_position", None) or p.get("side") or "Both"
+					has_slot_items = any(
+						(cint(getattr(it, "slot_number", 0)) == slot_num or it.component_slot == slot_label)
+						for it in pkg.items
+					)
+					pkg.append("items", {
+						"slot_number": slot_num,
+						"component_slot": slot_label,
+						"item_code": item_code,
+						"item_name": item_doc.item_name,
+						"qty": flt(p.get("qty", 1.0)) or 1.0,
+						"rate": flt(p.get("rate", 0.0)) or flt(item_doc.standard_rate),
+						"side": side if side in ("LH", "RH") else "Both",
+						"is_default": 0 if has_slot_items else 1,
+						"part_source": getattr(item_doc, "part_source", "OEM") or "OEM",
+						"part_condition": getattr(item_doc, "part_condition", "New") or "New",
+						"oem_part_number": getattr(item_doc, "oem_part_number", "") or "",
+						"warranty_period": getattr(item_doc, "warranty_period", "12 Months / 20,000 km") or "12 Months / 20,000 km",
+					})
+					pkg_dirty = True
+
+			if pkg_dirty:
+				pkg.flags.ignore_permissions = True
+				pkg.save()
 
 	def _calculate_taxes_and_totals(self):
 		has_approved = any(s.status == "Approved" for s in self.services)
@@ -1009,7 +1098,7 @@ class RepairOrder(Document):
 						"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
 						"rate": rate,
 						"amount": amt,
-						"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+						"warehouse": get_default_warehouse(self.company),
 					})
 
 			self.append("services", {
@@ -1105,7 +1194,7 @@ class RepairOrder(Document):
 						"uom": getattr(item, "uom", None) or item_doc.stock_uom or "Nos",
 						"rate": rate,
 						"amount": amt,
-						"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+						"warehouse": get_default_warehouse(self.company),
 					})
 		else:
 			try:
@@ -1196,7 +1285,7 @@ class RepairOrder(Document):
 						"uom": getattr(item_doc, "stock_uom", "Nos"),
 						"rate": part_rate,
 						"amount": amt,
-						"warehouse": p.get("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+						"warehouse": (p.get("warehouse") if (p.get("warehouse") and frappe.db.exists("Warehouse", p.get("warehouse"))) else get_default_warehouse(self.company)),
 					})
 
 		self.append("services", {
@@ -1278,7 +1367,7 @@ class RepairOrder(Document):
 				pkg = frappe.get_doc("Service Package", pkg_name)
 				parts_list = []
 				parts_total = 0.0
-				default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
+				default_wh = get_default_warehouse(self.company)
 				for row in pkg.items:
 					item_doc = frappe.get_cached_doc("Item", row.item_code)
 					qty = flt(row.qty) or 1.0
@@ -1389,9 +1478,13 @@ class RepairOrder(Document):
 			except Exception:
 				parts = []
 
+		veh_model = frappe.db.get_value("Repair Vehicle", self.vehicle, "model") if self.vehicle else ""
+		app_model = getattr(target, "applicable_model", None) or veh_model or ""
+
 		pkg = frappe.get_doc({
 			"doctype": "Service Package",
 			"package_name": pkg_title,
+			"applicable_model": app_model,
 			"correction_code": getattr(target, "correction_code", None),
 			"is_flat_rate": cint(getattr(target, "is_flat_rate", 0)),
 			"is_mobile_capable": cint(getattr(target, "is_mobile_capable", 0)),
@@ -1534,10 +1627,19 @@ class RepairOrder(Document):
 				item_code = p.get("item_code")
 				if item_code and frappe.db.exists("Item", item_code):
 					item_doc = frappe.get_cached_doc("Item", item_code)
+					source = p.get("part_source") or getattr(item_doc, "part_source", "OEM") or "OEM"
+					condition = p.get("part_condition") or getattr(item_doc, "part_condition", "New") or "New"
+					warranty = p.get("warranty_period") or getattr(item_doc, "warranty_period", "") or ""
+					compliance_tag = f"[{source} - {condition}"
+					if warranty:
+						compliance_tag += f" | Warranty: {warranty}"
+					compliance_tag += "]"
+					desc = f"{p.get('item_name') or item_doc.item_name} {compliance_tag}"
+
 					si.append("items", {
 						"item_code": item_code,
 						"item_name": p.get("item_name") or item_doc.item_name,
-						"description": p.get("item_name") or item_doc.item_name,
+						"description": desc,
 						"qty": flt(p.get("qty", 1.0)),
 						"uom": p.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
 						"rate": flt(p.get("rate", 0.0)),
@@ -1676,15 +1778,24 @@ class RepairOrder(Document):
 		mr.transaction_date = today()
 		mr.schedule_date = today()
 
+		default_wh = get_default_warehouse(self.company)
+
 		for part in parts_to_order:
 			item_doc = frappe.get_cached_doc("Item", part.get("item_code"))
+			wh_filters = {"is_group": 0}
+			if self.company:
+				wh_filters["company"] = self.company
+			target_wh = part.get("warehouse")
+			if not target_wh or not frappe.db.exists("Warehouse", {**wh_filters, "name": target_wh}):
+				target_wh = default_wh
+
 			mr.append("items", {
 				"item_code": part.get("item_code"),
 				"item_name": part.get("item_name") or item_doc.item_name,
 				"description": part.get("item_name") or item_doc.item_name,
 				"qty": flt(part.get("qty", 1.0)),
 				"uom": part.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
-				"warehouse": part.get("warehouse") or frappe.db.get_single_value("Stock Settings", "default_warehouse"),
+				"warehouse": target_wh,
 				"schedule_date": today(),
 			})
 
@@ -1723,7 +1834,7 @@ def get_service_package_details(service_package, side=None):
 		return {}
 
 	pkg = frappe.get_doc("Service Package", service_package)
-	default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM"
+	default_wh = get_default_warehouse()
 	default_rate = _get_default_labor_rate()
 
 	from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
@@ -1747,23 +1858,56 @@ def get_service_package_details(service_package, side=None):
 			if getattr(pkg, "correction_code", None):
 				code = pkg.correction_code
 
+	slots_seen = set()
 	parts = []
+	unassigned_parts = []
+	from ism.api.parts import _get_item_stock_qty, parse_slot_number, format_slot_label
 	for row in pkg.items:
 		row_side = getattr(row, "side", None) or "Both"
 		if not is_symm or target_side not in ("LH", "RH") or row_side in ("Both", target_side):
+			s_num = cint(getattr(row, "slot_number", None))
+			if s_num == 0 and getattr(row, "component_slot", None):
+				s_num = parse_slot_number(row.component_slot)
+
+			slot = format_slot_label(s_num)
+			is_def = cint(getattr(row, "is_default", 1))
+
 			item_doc = frappe.get_cached_doc("Item", row.item_code)
 			qty = flt(row.qty) or 1.0
-			rate = flt(row.rate)
-			parts.append({
+			rate = flt(row.rate) if flt(row.rate) else flt(item_doc.standard_rate)
+			stock_qty = _get_item_stock_qty(row.item_code)
+
+			part_info = {
+				"slot_number": s_num,
+				"component_slot": slot,
 				"item_code": row.item_code,
 				"item_name": row.item_name or item_doc.item_name,
+				"part_source": getattr(item_doc, "part_source", "OEM") or "OEM",
+				"part_condition": getattr(item_doc, "part_condition", "New") or "New",
+				"oem_part_number": getattr(item_doc, "oem_part_number", "") or "",
+				"revision": getattr(item_doc, "revision", "") or "",
+				"warranty_period": getattr(item_doc, "warranty_period", "12 Months / 20,000 km") or "12 Months / 20,000 km",
 				"qty": qty,
 				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
 				"rate": rate,
 				"amount": flt(qty * rate, 2),
 				"warehouse": default_wh,
 				"side": row_side,
-			})
+				"stock_qty": stock_qty,
+			}
+
+			if s_num == 0:
+				unassigned_parts.append(part_info)
+				continue
+
+			# If this component slot was already populated by a default item, skip alternate options for initial load
+			if s_num in slots_seen and not is_def:
+				continue
+			if s_num in slots_seen and is_def:
+				parts = [p for p in parts if p.get("slot_number") != s_num]
+
+			parts.append(part_info)
+			slots_seen.add(s_num)
 
 	labor_hours = flt(pkg.standard_labor_hours)
 	is_flat = cint(pkg.is_flat_rate)
@@ -1784,8 +1928,22 @@ def get_service_package_details(service_package, side=None):
 		except Exception:
 			pass
 
+	app_model = getattr(pkg, "applicable_model", None)
+	app_gen = getattr(pkg, "applicable_generation", None)
+	if not app_model and getattr(pkg, "tesla_manual_url", None):
+		try:
+			from ism.utils.tesla_manual import parse_tesla_manual_url
+			u_meta = parse_tesla_manual_url(pkg.tesla_manual_url)
+			app_model = u_meta.get("applicable_model") or ""
+			if not app_gen:
+				app_gen = u_meta.get("matched_generation") or ""
+		except Exception:
+			pass
+
 	return {
 		"package_name": title,
+		"applicable_model": app_model or "",
+		"applicable_generation": app_gen or "",
 		"correction_code": code,
 		"service_position": pos,
 		"is_symmetrical": is_symm,
@@ -1801,6 +1959,7 @@ def get_service_package_details(service_package, side=None):
 		"hourly_rate": hourly_rate,
 		"service_rate": service_rate,
 		"parts": parts,
+		"unassigned_parts": unassigned_parts,
 		"parts_total": sum(p["amount"] for p in parts),
 	}
 

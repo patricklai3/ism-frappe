@@ -13,6 +13,49 @@ frappe.ui.form.on("Service Package", {
 		frm.add_custom_button(__("Import from Tesla URL"), () => {
 			frm.trigger("open_import_dialog");
 		});
+
+		frm.add_custom_button(__("Quick Add / Import Part"), () => {
+			frm.trigger("open_parts_importer");
+		}, __("Parts"));
+
+		if (frm.fields_dict.items && frm.fields_dict.items.grid) {
+			frm.fields_dict.items.grid.add_custom_button(__("+ Quick Add / Import Part"), () => {
+				frm.trigger("open_parts_importer");
+			});
+		}
+	},
+
+	open_parts_importer(frm) {
+		const launch = () => {
+			ism.parts.show_quick_importer({
+				service_package: frm.doc.name,
+				callback: (created_items) => {
+					created_items.forEach((it) => {
+						const row = frm.add_child("items");
+						const s_num = it.slot_number != null ? it.slot_number : 1;
+						row.slot_number = s_num;
+						row.component_slot = it.component_slot || (s_num > 0 ? `Slot ${s_num}` : "Unassigned");
+						row.item_code = it.item_code;
+						row.item_name = it.item_name;
+						row.part_source = it.part_source;
+						row.part_condition = it.part_condition;
+						row.oem_part_number = it.oem_part_number;
+						row.warranty_period = it.warranty_period;
+						row.qty = flt(it.qty) || 1.0;
+						row.rate = flt(it.unit_rate) || 0.0;
+						const slot_rows = (frm.doc.items || []).filter(r => r.slot_number === row.slot_number);
+						row.is_default = slot_rows.length <= 1 ? 1 : 0;
+					});
+					frm.refresh_field("items");
+				},
+			});
+		};
+
+		if (window.ism && ism.parts && ism.parts.show_quick_importer) {
+			launch();
+		} else {
+			frappe.require("/assets/ism/js/parts_manager.js", launch);
+		}
 	},
 
 	btn_open_tesla_manual(frm) {
@@ -73,6 +116,8 @@ frappe.ui.form.on("Service Package", {
 								frm.set_value("standard_labor_hours", flt(d.frt));
 							}
 							if (d.doc_guid) frm.set_value("doc_guid", d.doc_guid);
+							if (d.applicable_model) frm.set_value("applicable_model", d.applicable_model);
+							if (d.applicable_generation) frm.set_value("applicable_generation", d.applicable_generation);
 							if (d.is_mobile_capable !== undefined) frm.set_value("is_mobile_capable", d.is_mobile_capable ? 1 : 0);
 							frm.set_value("tesla_manual_url", url);
 

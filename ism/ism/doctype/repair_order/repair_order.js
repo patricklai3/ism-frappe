@@ -313,6 +313,7 @@ frappe.ui.form.on("Repair Order", {
 	refresh(frm) {
 		frm.trigger("render_progress_indicator");
 		frm.trigger("render_workshop_tasks");
+		frm.trigger("render_services_tree_html");
 		frm._original_odometer_in = frm.doc.odometer_in;
 		update_tab_visibility(frm);
 
@@ -431,6 +432,10 @@ frappe.ui.form.on("Repair Order", {
 					frm.trigger("open_import_tesla_url_dialog");
 				}, __("Jobs & Packages"));
 
+				frm.add_custom_button(__("Quick Add / Import Part"), () => {
+					frm.trigger("open_parts_importer");
+				}, __("Jobs & Packages"));
+
 				frm.add_custom_button(__("Add Supplement"), () => {
 					frm.trigger("open_add_supplement_dialog");
 				}, __("Jobs & Packages"));
@@ -440,6 +445,9 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Jobs & Packages"));
 
 				if (frm.fields_dict.services && frm.fields_dict.services.grid) {
+					frm.fields_dict.services.grid.add_custom_button(__("Quick Add / Import Part"), () => {
+						frm.trigger("open_parts_importer");
+					});
 					frm.fields_dict.services.grid.add_custom_button(__("Tesla Manual"), () => {
 						frm.trigger("open_tesla_manual");
 					});
@@ -618,6 +626,103 @@ frappe.ui.form.on("Repair Order", {
 		fetch_and_show_deferred_services(frm, true);
 	},
 
+	open_parts_importer(frm) {
+		const services = frm.doc.services || [];
+		if (services.length === 0) {
+			frappe.msgprint({
+				title: __("Service Required"),
+				indicator: "orange",
+				message: __("Please select or add a Service to this Repair Order before importing parts."),
+				primary_action: {
+					label: __("Add Service Package"),
+					action: () => {
+						frm.trigger("open_service_package_dialog");
+					},
+				},
+			});
+			return;
+		}
+
+		const existing_pkgs = services.map((s) => s.service_package).filter(Boolean);
+
+		const open_for_service = (sidx) => {
+			const row = frm.doc.services[sidx];
+			if (!row) return;
+
+			let parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+
+			ism.parts.show_quick_importer({
+				service_package: row.service_package,
+				existing_services: existing_pkgs,
+				component_slot: row.service_title || "",
+				default_description: row.service_title || "",
+				side: row.service_position || "Both",
+				default_mode: "single",
+				callback: (created_items) => {
+					created_items.forEach((it) => {
+						const qty = flt(it.qty) || 1.0;
+						const rate = flt(it.unit_rate != null ? it.unit_rate : it.rate) || 0.0;
+						parts.push({
+							component_slot: it.component_slot || it.item_name || it.item_code,
+							item_code: it.item_code,
+							item_name: it.item_name || it.item_code,
+							part_source: it.part_source || "OEM",
+							part_condition: it.part_condition || "New",
+							oem_part_number: it.oem_part_number || "",
+							warranty_period: it.warranty_period || "12 Months / 20,000 km",
+							qty: qty,
+							uom: it.stock_uom || "Nos",
+							rate: rate,
+							amount: qty * rate,
+							warehouse: (frappe.boot && frappe.boot.sysdefaults && frappe.boot.sysdefaults.default_warehouse) || "",
+							stock_qty: it.stock_qty || 0,
+						});
+					});
+
+					let new_parts_total = 0;
+					parts.forEach((it) => { new_parts_total += flt(it.amount); });
+					row.parts = JSON.stringify(parts);
+					row.parts_total = new_parts_total;
+					row.total_amount = flt(row.labor_amount) + new_parts_total;
+
+					recalculate_totals(frm);
+					frm.dirty();
+				},
+			});
+		};
+
+		if (services.length === 1) {
+			open_for_service(0);
+		} else {
+			const options = services.map((s, idx) => ({
+				label: `#${idx + 1}: ${s.service_title || s.service_package || 'Service'}`,
+				value: idx,
+			}));
+			const d = new frappe.ui.Dialog({
+				title: __("Select Target Service for Parts"),
+				fields: [
+					{
+						fieldname: "service_idx",
+						fieldtype: "Select",
+						label: __("Attach Parts to Service"),
+						options: options.map(o => o.label),
+						default: options[0].label,
+						reqd: 1,
+					},
+				],
+				primary_action_label: __("Continue"),
+				primary_action(vals) {
+					const chosen = options.find(o => o.label === vals.service_idx);
+					d.hide();
+					if (chosen) {
+						open_for_service(chosen.value);
+					}
+				},
+			});
+			d.show();
+		}
+	},
+
 	load_vehicle_customers(frm) {
 		if (!frm.doc.vehicle) return;
 
@@ -771,6 +876,10 @@ frappe.ui.form.on("Repair Order", {
 			]),
 			color
 		);
+	},
+
+	render_services_tree_html(frm) {
+		render_services_tree_html(frm);
 	},
 
 	render_workshop_tasks(frm) {
@@ -1707,6 +1816,7 @@ frappe.ui.form.on("Repair Order Service", {
 					if (pkg.service_position) frappe.model.set_value(cdt, cdn, "service_position", pkg.service_position);
 					if (pkg.is_mobile_capable !== undefined) frappe.model.set_value(cdt, cdn, "is_mobile_capable", pkg.is_mobile_capable);
 					if (pkg.tesla_manual_url) frappe.model.set_value(cdt, cdn, "tesla_manual_url", pkg.tesla_manual_url);
+					if (pkg.applicable_model) frappe.model.set_value(cdt, cdn, "applicable_model", pkg.applicable_model);
 					frappe.model.set_value(cdt, cdn, "labor_hours", flt(pkg.standard_labor_hours || pkg.labor_hours || pkg.frt));
 					frappe.model.set_value(cdt, cdn, "labor_rate", flt(pkg.hourly_rate));
 					frappe.model.set_value(cdt, cdn, "labor_amount", labor_amt);
@@ -1883,10 +1993,18 @@ function render_parts_html(parts) {
 		const uom = p.uom || "Nos";
 		const rate = flt(p.rate) || 0.0;
 		const amt = flt(p.amount || qty * rate).toFixed(2);
+		const src = (p.part_source || "OEM").toUpperCase().startsWith("OEM") ? "OEM" : "AFT";
+		const cond = p.part_condition || "New";
+		const src_badge = `<span class="badge" style="background: ${src === 'OEM' ? '#1e40af' : '#7e22ce'}; color: #fff; font-size: 10px;">${src}</span>`;
+		const cond_badge = `<span class="badge" style="background: ${cond === 'New' ? '#15803d' : cond === 'Used' ? '#b45309' : '#0e7490'}; color: #fff; font-size: 10px;">${cond}</span>`;
+
 		rows += `
 			<tr>
-				<td><b>${code}</b></td>
-				<td>${name}</td>
+				<td><b>${frappe.utils.escape_html(code)}</b></td>
+				<td>
+					<div>${frappe.utils.escape_html(name)}</div>
+					<div class="mt-1">${src_badge} ${cond_badge} ${p.warranty_period ? `<span class="text-muted ml-1 small">${frappe.utils.escape_html(p.warranty_period)}</span>` : ''}</div>
+				</td>
 				<td style="text-align: right;">${qty} ${uom}</td>
 				<td style="text-align: right;">$${flt(rate).toFixed(2)}</td>
 				<td style="text-align: right;"><b>$${amt}</b></td>
@@ -1898,7 +2016,7 @@ function render_parts_html(parts) {
 			<thead>
 				<tr style="background: #eef2f7;">
 					<th>Part Code</th>
-					<th>Description</th>
+					<th>Description & Compliance</th>
 					<th style="text-align: right;">Qty</th>
 					<th style="text-align: right;">Rate</th>
 					<th style="text-align: right;">Amount</th>
@@ -1911,7 +2029,7 @@ function render_parts_html(parts) {
 	`;
 }
 
-function recalculate_totals(frm) {
+function recalculate_totals(frm, rerender_tree = true) {
 	let net = 0.0;
 	const has_approved = (frm.doc.services || []).some((s) => s.status === "Approved");
 
@@ -1931,6 +2049,679 @@ function recalculate_totals(frm) {
 	frm.set_value("total_taxes_and_charges", tax);
 	frm.set_value("grand_total", grand);
 	frm.set_value("outstanding_amount", grand - flt(frm.doc.paid_amount));
+
+	if (rerender_tree && frm.fields_dict.services_tree_html && frm.fields_dict.services_tree_html.$wrapper) {
+		render_services_tree_html(frm);
+	}
+}
+
+function render_services_tree_html(frm) {
+	if (!frm.fields_dict.services_tree_html || !frm.fields_dict.services_tree_html.$wrapper) return;
+	const $wrapper = frm.fields_dict.services_tree_html.$wrapper;
+	const services = frm.doc.services || [];
+
+	if (services.length === 0) {
+		const empty_html = `
+			<div class="services-tree-empty" style="border: 2px dashed #cbd5e1; border-radius: 8px; padding: 30px; text-align: center; background: #f8fafc; margin-bottom: 15px;">
+				<div style="font-size: 15px; font-weight: 600; color: #475569; margin-bottom: 6px;">
+					${__("No services or parts added to this estimate yet.")}
+				</div>
+				<div style="font-size: 13px; color: #64748b; margin-bottom: 18px;">
+					${__("Add predefined Tesla service packages or build custom operations.")}
+				</div>
+				<button class="btn btn-sm btn-primary btn-tree-add-service mr-2">
+					<i class="fa fa-plus mr-1"></i> ${__("Add Service Package")}
+				</button>
+				<button class="btn btn-sm btn-default btn-tree-add-custom-service">
+					<i class="fa fa-wrench mr-1"></i> ${__("Add Custom Service / Labor")}
+				</button>
+			</div>
+		`;
+		$wrapper.html(empty_html);
+		bind_tree_events(frm, $wrapper);
+		return;
+	}
+
+	let total_labor_amt = 0;
+	let total_parts_amt = 0;
+	let services_cards_html = "";
+
+	services.forEach((s, sidx) => {
+		const is_flat = cint(s.is_flat_rate);
+		const labor_hours = flt(s.labor_hours) || 1.0;
+		const labor_rate = flt(s.labor_rate) || 120.0;
+		const labor_amt = is_flat ? flt(s.labor_amount) : flt(labor_hours * labor_rate);
+		total_labor_amt += labor_amt;
+
+		let parts = [];
+		try {
+			parts = typeof s.parts === "string" ? JSON.parse(s.parts) : (s.parts || []);
+		} catch (e) {
+			parts = [];
+		}
+
+		let svc_parts_total = 0;
+		let parts_rows_html = "";
+
+		parts.forEach((p, pidx) => {
+			const qty = flt(p.qty) || 1.0;
+			const rate = flt(p.rate) || 0.0;
+			const amt = flt(p.amount || qty * rate);
+			svc_parts_total += amt;
+
+			const src = (p.part_source || "OEM").toUpperCase().startsWith("OEM") ? "OEM" : "AFT";
+			const src_badge = src === "OEM"
+				? `<span class="badge" style="background: #1e40af; color: #fff; font-size: 10px; padding: 2px 6px;">OEM</span>`
+				: `<span class="badge" style="background: #7e22ce; color: #fff; font-size: 10px; padding: 2px 6px;">AFT</span>`;
+
+			const cond = p.part_condition || "New";
+			const cond_badge = cond === "New"
+				? `<span class="badge" style="background: #15803d; color: #fff; font-size: 10px; padding: 2px 6px;">New</span>`
+				: cond === "Used"
+				? `<span class="badge" style="background: #b45309; color: #fff; font-size: 10px; padding: 2px 6px;">Used</span>`
+				: `<span class="badge" style="background: #0e7490; color: #fff; font-size: 10px; padding: 2px 6px;">Recon</span>`;
+
+			const stock = flt(p.stock_qty || 0);
+			const stock_badge = stock > 0
+				? `<span class="badge" style="background: #dcfce7; color: #166534; font-size: 10px; border: 1px solid #bbf7d0;">${stock} in stock</span>`
+				: `<span class="badge" style="background: #f1f5f9; color: #64748b; font-size: 10px; border: 1px solid #e2e8f0;">0 in stock</span>`;
+
+			const warranty = p.warranty_period ? `<div style="font-size: 11px; color: #64748b; margin-top: 2px;"><i class="fa fa-shield text-muted mr-1"></i>${frappe.utils.escape_html(p.warranty_period)}</div>` : "";
+
+			parts_rows_html += `
+				<tr data-sidx="${sidx}" data-pidx="${pidx}" style="border-bottom: 1px solid #f1f5f9;">
+					<td style="vertical-align: middle; width: 110px;">
+						<span class="badge ${p.slot_number === 0 || p.component_slot === 'Unassigned' ? 'badge-warning' : 'badge-light border'}" style="font-size: 11px; padding: 4px 8px; font-weight: 600; color: #334155;">
+							${frappe.utils.escape_html(p.component_slot || (p.slot_number ? `Slot ${p.slot_number}` : "Unassigned"))}
+						</span>
+					</td>
+					<td style="vertical-align: middle;">
+						<div style="font-weight: 600; color: #0f172a; font-family: monospace; font-size: 12px;">${frappe.utils.escape_html(p.item_code)}</div>
+						<div style="font-size: 12px; color: #475569;">${frappe.utils.escape_html(p.item_name || p.item_code)}</div>
+						${warranty}
+					</td>
+					<td style="vertical-align: middle; text-align: center; width: 120px;">
+						${src_badge} ${cond_badge}
+					</td>
+					<td style="vertical-align: middle; text-align: center; width: 95px;">
+						${stock_badge}
+					</td>
+					<td style="vertical-align: middle; text-align: right; width: 85px;">
+						<input type="number" step="any" min="0" class="form-control input-xs tree-part-qty" data-sidx="${sidx}" data-pidx="${pidx}" value="${qty}" style="text-align: right; font-weight: 500;" />
+					</td>
+					<td style="vertical-align: middle; text-align: right; width: 95px;">
+						<input type="number" step="0.01" min="0" class="form-control input-xs tree-part-rate" data-sidx="${sidx}" data-pidx="${pidx}" value="${rate.toFixed(2)}" style="text-align: right; font-weight: 500;" />
+					</td>
+					<td style="vertical-align: middle; text-align: right; width: 105px;">
+						<b class="tree-part-amt" style="color: #0f172a;">$${amt.toFixed(2)}</b>
+					</td>
+					<td style="vertical-align: middle; text-align: center; width: 125px;">
+						<div class="btn-group">
+							<button class="btn btn-default btn-xs btn-tree-swap-part" data-sidx="${sidx}" data-pidx="${pidx}" title="${__("Swap Alternate / Condition")}">
+								<i class="fa fa-exchange text-primary"></i> ${__("Swap")}
+							</button>
+							${s.service_package ? `
+							<button class="btn btn-default btn-xs btn-tree-save-part-pkg" data-sidx="${sidx}" data-pidx="${pidx}" title="${__("Save as Alternate in Service Package")}">
+								<i class="fa fa-bookmark text-muted"></i>
+							</button>` : ''}
+							<button class="btn btn-default btn-xs text-danger btn-tree-remove-part" data-sidx="${sidx}" data-pidx="${pidx}" title="${__("Remove Part")}">
+								&times;
+							</button>
+						</div>
+					</td>
+				</tr>
+			`;
+		});
+
+		total_parts_amt += svc_parts_total;
+		const svc_total = labor_amt + svc_parts_total;
+
+		const status_color = s.status === "Approved" ? "success" : s.status === "Declined" ? "danger" : s.status === "Pending Approval" ? "warning" : "primary";
+		const pos_badge = s.service_position && s.service_position !== "None"
+			? `<span class="badge badge-info ml-1">${s.service_position}</span>`
+			: "";
+
+		services_cards_html += `
+			<div class="card mb-3 service-tree-card" data-sidx="${sidx}" style="border: 1px solid #cbd5e1; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); overflow: hidden; background: #fff;">
+				<!-- Service Header Strip -->
+				<div class="card-header d-flex justify-content-between align-items-center flex-wrap" style="background: #f8fafc; border-bottom: 1px solid #e2e8f0; padding: 10px 14px;">
+					<div class="d-flex align-items-center flex-wrap mr-3">
+						<span class="badge badge-secondary mr-2" style="font-size: 11px;">#${sidx + 1}</span>
+						<b style="font-size: 14px; color: #1e293b;">${frappe.utils.escape_html(s.service_title || s.service_package || "Service")}</b>
+						${s.applicable_model ? ism.parts.get_model_badge(s.applicable_model, 'ml-2') : ''}
+						${s.correction_code ? `<span class="badge badge-light border text-muted ml-2" style="font-size: 11px;">${s.correction_code}</span>` : ''}
+						${pos_badge}
+						<span class="badge badge-${status_color} ml-2" style="font-size: 11px;">${s.status || "Estimating"}</span>
+					</div>
+
+					<!-- Labor inputs & totals right in header -->
+					<div class="d-flex align-items-center flex-wrap" style="gap: 10px;">
+						<div class="d-flex align-items-center" style="font-size: 12px; color: #475569;">
+							<span class="mr-1"><b>${__("Labor:")}</b></span>
+							<input type="number" step="0.1" min="0" class="form-control input-xs tree-labor-hours" data-sidx="${sidx}" value="${labor_hours}" style="width: 55px; text-align: right; display: inline-block; font-weight: 500;" />
+							<span class="mx-1">hrs @ $</span>
+							<input type="number" step="1" min="0" class="form-control input-xs tree-labor-rate" data-sidx="${sidx}" value="${labor_rate}" style="width: 65px; text-align: right; display: inline-block; font-weight: 500;" />
+							<span class="mx-1">=</span>
+							<b class="tree-labor-amt text-dark mr-2">$${labor_amt.toFixed(2)}</b>
+						</div>
+
+						<div style="font-size: 12px; color: #475569;">
+							<span>${__("Parts:")}</span>
+							<b class="tree-svc-parts-total text-dark mr-2">$${svc_parts_total.toFixed(2)}</b>
+						</div>
+
+						<div class="badge badge-primary px-2 py-1" style="font-size: 13px; font-weight: bold;">
+							<span class="tree-svc-total">$${svc_total.toFixed(2)}</span>
+						</div>
+
+						<!-- Action buttons -->
+						<div class="btn-group ml-2">
+							<button class="btn btn-xs btn-primary btn-tree-quick-part" data-sidx="${sidx}" title="${__("Quick Add / Import Part for this service")}">
+								<i class="fa fa-plus mr-1"></i> ${__("Add Part")}
+							</button>
+							<button class="btn btn-xs btn-default btn-tree-catalog-part" data-sidx="${sidx}" title="${__("Select Part from Inventory Catalog")}">
+								<i class="fa fa-search"></i>
+							</button>
+							${(s.service_position === 'LH' || s.service_position === 'RH') ? `
+							<button class="btn btn-xs btn-default btn-tree-opp-side" data-sidx="${sidx}" title="${__("Add Opposite Side Operation")}">
+								<i class="fa fa-arrows-h"></i>
+							</button>` : ''}
+							<button class="btn btn-xs btn-default text-danger btn-tree-remove-svc" data-sidx="${sidx}" title="${__("Delete Service")}">
+								<i class="fa fa-trash"></i>
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- Nested Parts Table (Same Level) -->
+				<div class="card-body p-0">
+					${parts.length > 0 ? `
+					<table class="table table-sm mb-0" style="font-size: 12px;">
+						<thead style="background: #f1f5f9; color: #64748b;">
+							<tr>
+								<th style="width: 110px;">${__("Slot")}</th>
+								<th>${__("Part Code & Description")}</th>
+								<th style="text-align: center; width: 120px;">${__("Source / Condition")}</th>
+								<th style="text-align: center; width: 95px;">${__("Stock")}</th>
+								<th style="text-align: right; width: 85px;">${__("Qty")}</th>
+								<th style="text-align: right; width: 95px;">${__("Unit Rate ($)")}</th>
+								<th style="text-align: right; width: 105px;">${__("Amount")}</th>
+								<th style="text-align: center; width: 125px;">${__("Actions")}</th>
+							</tr>
+						</thead>
+						<tbody>
+							${parts_rows_html}
+						</tbody>
+					</table>
+					` : `
+					<div class="p-3 text-center text-muted" style="background: #fafbfc; font-size: 12px;">
+						<i>${__("No parts required or added for this service yet.")}</i>
+						<button class="btn btn-link btn-xs text-primary btn-tree-quick-part ml-2" data-sidx="${sidx}">
+							+ ${__("Add Part")}
+						</button>
+					</div>
+					`}
+				</div>
+			</div>
+		`;
+	});
+
+	const grand_subtotal = total_labor_amt + total_parts_amt;
+
+	const full_html = `
+		<div class="services-tree-container" style="margin-bottom: 20px;">
+			<!-- Top Action Bar -->
+			<div class="d-flex justify-content-between align-items-center mb-3">
+				<div>
+					<button class="btn btn-sm btn-primary btn-tree-add-service mr-2">
+						<i class="fa fa-plus mr-1"></i> ${__("Add Service Package")}
+					</button>
+					<button class="btn btn-sm btn-default btn-tree-add-custom-service mr-2">
+						<i class="fa fa-wrench mr-1"></i> ${__("Add Custom Service / Labor")}
+					</button>
+					<button class="btn btn-sm btn-link text-muted btn-toggle-raw-grid">
+						<small><i class="fa fa-table mr-1"></i>${__("Toggle Raw Grid")}</small>
+					</button>
+				</div>
+				<div class="text-right" style="font-size: 13px;">
+					<span class="text-muted mr-3">${__("Services:")} <b>${services.length}</b></span>
+					<span class="text-muted mr-3">${__("Labor Total:")} <b class="text-dark">$${total_labor_amt.toFixed(2)}</b></span>
+					<span class="text-muted mr-3">${__("Parts Total:")} <b class="text-dark">$${total_parts_amt.toFixed(2)}</b></span>
+					<span class="badge badge-light border text-primary px-2 py-1" style="font-size: 13px;">
+						${__("Net Subtotal:")} <b>$${grand_subtotal.toFixed(2)}</b>
+					</span>
+				</div>
+			</div>
+
+			<!-- All Services Cards with nested parts -->
+			${services_cards_html}
+		</div>
+	`;
+
+	$wrapper.html(full_html);
+	bind_tree_events(frm, $wrapper);
+}
+
+function bind_tree_events(frm, $wrapper) {
+	// Labor hours & rate inline input
+	$wrapper.find(".tree-labor-hours, .tree-labor-rate").on("input change", function () {
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const card = $wrapper.find(`.service-tree-card[data-sidx="${sidx}"]`);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		const hours = flt(card.find(".tree-labor-hours").val()) || 0.0;
+		const rate = flt(card.find(".tree-labor-rate").val()) || 0.0;
+		const labor_amt = hours * rate;
+
+		row.labor_hours = hours;
+		row.labor_rate = rate;
+		row.labor_amount = labor_amt;
+		row.total_amount = labor_amt + flt(row.parts_total);
+
+		card.find(".tree-labor-amt").text(`$${labor_amt.toFixed(2)}`);
+		card.find(".tree-svc-total").text(`$${row.total_amount.toFixed(2)}`);
+
+		recalculate_totals(frm, false);
+		frm.dirty();
+	});
+
+	// Part qty & rate inline input
+	$wrapper.find(".tree-part-qty, .tree-part-rate").on("input change", function () {
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const pidx = parseInt($(this).attr("data-pidx"), 10);
+		const card = $wrapper.find(`.service-tree-card[data-sidx="${sidx}"]`);
+		const tr = card.find(`tr[data-sidx="${sidx}"][data-pidx="${pidx}"]`);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		let parts = [];
+		try {
+			parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+		} catch (e) {
+			parts = [];
+		}
+
+		const p = parts[pidx];
+		if (!p) return;
+
+		const qty = flt(tr.find(".tree-part-qty").val()) || 0.0;
+		const rate = flt(tr.find(".tree-part-rate").val()) || 0.0;
+		const amt = qty * rate;
+
+		p.qty = qty;
+		p.rate = rate;
+		p.amount = amt;
+
+		tr.find(".tree-part-amt").text(`$${amt.toFixed(2)}`);
+
+		let new_parts_total = 0;
+		parts.forEach((it) => { new_parts_total += flt(it.amount); });
+
+		row.parts = JSON.stringify(parts);
+		row.parts_total = new_parts_total;
+		row.total_amount = flt(row.labor_amount) + new_parts_total;
+
+		card.find(".tree-svc-parts-total").text(`$${new_parts_total.toFixed(2)}`);
+		card.find(".tree-svc-total").text(`$${row.total_amount.toFixed(2)}`);
+
+		recalculate_totals(frm, false);
+		frm.dirty();
+	});
+
+	// Swap Alternate
+	$wrapper.find(".btn-tree-swap-part").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const pidx = parseInt($(this).attr("data-pidx"), 10);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		let parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+		const p = parts[pidx];
+		if (!p) return;
+
+		ism.parts.show_alternates_picker({
+			service_package: row.service_package,
+			slot_number: p.slot_number,
+			component_slot: p.component_slot,
+			item_code: p.item_code,
+			oem_part_number: p.oem_part_number,
+			callback: (sel) => {
+				p.slot_number = sel.slot_number != null ? sel.slot_number : p.slot_number;
+				p.component_slot = sel.component_slot || p.component_slot;
+				p.item_code = sel.item_code;
+				p.item_name = sel.item_name;
+				p.part_source = sel.part_source;
+				p.part_condition = sel.part_condition;
+				p.warranty_period = sel.warranty_period;
+				p.rate = flt(sel.rate);
+				p.amount = flt(p.qty) * flt(p.rate);
+				p.stock_qty = sel.stock_qty;
+
+				let new_parts_total = 0;
+				parts.forEach((it) => { new_parts_total += flt(it.amount); });
+				row.parts = JSON.stringify(parts);
+				row.parts_total = new_parts_total;
+				row.total_amount = flt(row.labor_amount) + new_parts_total;
+
+				recalculate_totals(frm);
+				frm.dirty();
+				render_services_tree_html(frm);
+			},
+		});
+	});
+
+	// Quick Add / Import Part
+	$wrapper.find(".btn-tree-quick-part").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		let parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+
+		const existing_pkgs = (frm.doc.services || []).map((s) => s.service_package).filter(Boolean);
+
+		ism.parts.show_quick_importer({
+			service_package: row.service_package,
+			existing_services: existing_pkgs,
+			default_model: row.applicable_model || (frm.doc.vehicle_model || ""),
+			default_description: "",
+			side: row.service_position || "Both",
+			default_mode: "single",
+			callback: (created_items) => {
+				created_items.forEach((it) => {
+					const qty = flt(it.qty) || 1.0;
+					const rate = flt(it.unit_rate != null ? it.unit_rate : it.rate) || 0.0;
+					const s_num = it.slot_number != null ? it.slot_number : 1;
+					parts.push({
+						slot_number: s_num,
+						component_slot: it.component_slot || ism.parts.format_slot_label(s_num),
+						item_code: it.item_code,
+						item_name: it.item_name || it.item_code,
+						part_source: it.part_source || "OEM",
+						part_condition: it.part_condition || "New",
+						oem_part_number: it.oem_part_number || "",
+						warranty_period: it.warranty_period || "12 Months / 20,000 km",
+						qty: qty,
+						uom: it.stock_uom || "Nos",
+						rate: rate,
+						amount: qty * rate,
+						warehouse: (frappe.boot && frappe.boot.sysdefaults && frappe.boot.sysdefaults.default_warehouse) || "",
+						stock_qty: it.stock_qty || 0,
+					});
+				});
+
+				let new_parts_total = 0;
+				parts.forEach((it) => { new_parts_total += flt(it.amount); });
+				row.parts = JSON.stringify(parts);
+				row.parts_total = new_parts_total;
+				row.total_amount = flt(row.labor_amount) + new_parts_total;
+
+				recalculate_totals(frm);
+				frm.dirty();
+				render_services_tree_html(frm);
+			},
+		});
+	});
+
+	// Add part from existing catalog
+	$wrapper.find(".btn-tree-catalog-part").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		let parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+		const existing_pkgs = (frm.doc.services || []).map((s) => s.service_package).filter(Boolean);
+
+		ism.parts.show_quick_importer({
+			service_package: row.service_package,
+			existing_services: existing_pkgs,
+			default_model: row.applicable_model || (frm.doc.vehicle_model || ""),
+			default_description: "",
+			side: row.service_position || "Both",
+			default_mode: "catalog",
+			callback: (created_items) => {
+				created_items.forEach((it) => {
+					const qty = flt(it.qty) || 1.0;
+					const rate = flt(it.unit_rate != null ? it.unit_rate : it.rate) || 0.0;
+					const s_num = it.slot_number != null ? it.slot_number : 1;
+					parts.push({
+						slot_number: s_num,
+						component_slot: it.component_slot || ism.parts.format_slot_label(s_num),
+						item_code: it.item_code,
+						item_name: it.item_name || it.item_code,
+						part_source: it.part_source || "OEM",
+						part_condition: it.part_condition || "New",
+						oem_part_number: it.oem_part_number || "",
+						warranty_period: it.warranty_period || "12 Months / 20,000 km",
+						qty: qty,
+						uom: it.stock_uom || "Nos",
+						rate: rate,
+						amount: qty * rate,
+						warehouse: (frappe.boot && frappe.boot.sysdefaults && frappe.boot.sysdefaults.default_warehouse) || "",
+						stock_qty: it.stock_qty || 0,
+					});
+				});
+
+				let new_parts_total = 0;
+				parts.forEach((it) => { new_parts_total += flt(it.amount); });
+				row.parts = JSON.stringify(parts);
+				row.parts_total = new_parts_total;
+				row.total_amount = flt(row.labor_amount) + new_parts_total;
+
+				recalculate_totals(frm);
+				frm.dirty();
+				render_services_tree_html(frm);
+			},
+		});
+	});
+
+	// Save Part to Service Package
+	$wrapper.find(".btn-tree-save-part-pkg").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const pidx = parseInt($(this).attr("data-pidx"), 10);
+		const row = frm.doc.services[sidx];
+		if (!row || !row.service_package) return;
+
+		let parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+		const p = parts[pidx];
+		if (!p) return;
+
+		const s_num = p.slot_number != null ? p.slot_number : ism.parts.parse_slot_number(p.component_slot);
+		frappe.call({
+			method: "ism.api.parts.save_part_to_service_package",
+			args: {
+				service_package: row.service_package,
+				slot_number: s_num,
+				component_slot: p.component_slot || ism.parts.format_slot_label(s_num),
+				item_code: p.item_code,
+				qty: p.qty,
+				rate: p.rate,
+			},
+			freeze: true,
+			freeze_message: __("Saving part to Service Package..."),
+			callback(r) {
+				if (r && r.message) {
+					frappe.show_alert({
+						message: __("Saved {0} as alternate to {1}", [p.item_code, row.service_package]),
+						indicator: "green",
+					});
+				}
+			},
+		});
+	});
+
+	// Remove Part
+	$wrapper.find(".btn-tree-remove-part").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const pidx = parseInt($(this).attr("data-pidx"), 10);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		let parts = typeof row.parts === "string" ? JSON.parse(row.parts) : (row.parts || []);
+		parts.splice(pidx, 1);
+
+		let new_parts_total = 0;
+		parts.forEach((it) => { new_parts_total += flt(it.amount); });
+		row.parts = JSON.stringify(parts);
+		row.parts_total = new_parts_total;
+		row.total_amount = flt(row.labor_amount) + new_parts_total;
+
+		recalculate_totals(frm);
+		frm.dirty();
+	});
+
+	// Remove Service
+	$wrapper.find(".btn-tree-remove-svc").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		frappe.confirm(__("Are you sure you want to remove this service and all its nested parts?"), () => {
+			frm.doc.services.splice(sidx, 1);
+			frm.refresh_field("services");
+			recalculate_totals(frm);
+			frm.dirty();
+		});
+	});
+
+	// Opposite Side
+	$wrapper.find(".btn-tree-opp-side").on("click", function (e) {
+		e.preventDefault();
+		const sidx = parseInt($(this).attr("data-sidx"), 10);
+		const row = frm.doc.services[sidx];
+		if (!row) return;
+
+		frm.call({
+			doc: frm.doc,
+			method: "duplicate_service_for_opposite_side",
+			args: { service_row_id: row.name },
+			freeze: true,
+			freeze_message: __("Adding opposite side service..."),
+			callback(r) {
+				if (r && r.message) {
+					frm.reload_doc();
+				}
+			},
+		});
+	});
+
+	// Add Service Package
+	$wrapper.find(".btn-tree-add-service").on("click", function (e) {
+		e.preventDefault();
+		const d = new frappe.ui.Dialog({
+			title: __("Add Service Package"),
+			fields: [
+				{
+					fieldname: "service_package",
+					fieldtype: "Link",
+					label: __("Service Package"),
+					options: "Service Package",
+					reqd: 1,
+				},
+				{
+					fieldname: "service_position",
+					fieldtype: "Select",
+					label: __("Side / Position"),
+					options: ["None", "LH", "RH"],
+					default: "None",
+				},
+			],
+			primary_action_label: __("Add Service"),
+			primary_action(values) {
+				frappe.call({
+					method: "ism.ism.doctype.repair_order.repair_order.get_service_package_details",
+					args: {
+						service_package: values.service_package,
+						side: values.service_position !== "None" ? values.service_position : null,
+					},
+					freeze: true,
+					freeze_message: __("Loading service package details..."),
+					callback(r) {
+						if (r && r.message) {
+							const pkg = r.message;
+							const row = frm.add_child("services");
+							row.service_package = values.service_package;
+							row.service_title = pkg.package_name || values.service_package;
+							row.applicable_model = pkg.applicable_model || "";
+							row.correction_code = pkg.correction_code || "";
+							row.service_position = values.service_position || "None";
+							row.labor_hours = flt(pkg.labor_hours || pkg.standard_labor_hours || 1.0);
+							row.labor_rate = flt(pkg.hourly_rate || 120.0);
+							row.labor_amount = flt(pkg.service_rate || row.labor_hours * row.labor_rate);
+							row.parts = JSON.stringify(pkg.parts || []);
+							row.parts_total = flt(pkg.parts_total || 0.0);
+							row.total_amount = row.labor_amount + row.parts_total;
+							row.status = "Estimating";
+
+							frm.refresh_field("services");
+							recalculate_totals(frm);
+							frm.dirty();
+							d.hide();
+						}
+					},
+				});
+			},
+		});
+		d.show();
+	});
+
+	// Add Custom Service / Labor
+	$wrapper.find(".btn-tree-add-custom-service").on("click", function (e) {
+		e.preventDefault();
+		const d = new frappe.ui.Dialog({
+			title: __("Add Custom Service / Labor"),
+			fields: [
+				{
+					fieldname: "service_title",
+					fieldtype: "Data",
+					label: __("Service Title / Operation"),
+					reqd: 1,
+				},
+				{
+					fieldname: "labor_hours",
+					fieldtype: "Float",
+					label: __("Labor Hours (FRT)"),
+					default: 1.0,
+				},
+				{
+					fieldname: "labor_rate",
+					fieldtype: "Currency",
+					label: __("Hourly Rate ($/hr)"),
+					default: 120.0,
+				},
+			],
+			primary_action_label: __("Add Service"),
+			primary_action(values) {
+				const row = frm.add_child("services");
+				row.service_title = values.service_title;
+				row.labor_hours = flt(values.labor_hours) || 1.0;
+				row.labor_rate = flt(values.labor_rate) || 120.0;
+				row.labor_amount = row.labor_hours * row.labor_rate;
+				row.parts = JSON.stringify([]);
+				row.parts_total = 0.0;
+				row.total_amount = row.labor_amount;
+				row.status = "Estimating";
+
+				frm.refresh_field("services");
+				recalculate_totals(frm);
+				frm.dirty();
+				d.hide();
+			},
+		});
+		d.show();
+	});
+
+	// Toggle Raw Grid
+	$wrapper.find(".btn-toggle-raw-grid").on("click", function (e) {
+		e.preventDefault();
+		if (frm.fields_dict.services && frm.fields_dict.services.$wrapper) {
+			frm.fields_dict.services.$wrapper.slideToggle();
+		}
+	});
 }
 
 function open_parts_editor(frm, cdt, cdn) {
@@ -2110,7 +2901,7 @@ function open_parts_editor(frm, cdt, cdn) {
 						uom: uom,
 						rate: rate,
 						amount: flt(qty * rate),
-						warehouse: "Stores - ISM",
+						warehouse: (frappe.boot && frappe.boot.sysdefaults && frappe.boot.sysdefaults.default_warehouse) || "",
 					});
 
 					d.set_value("item_code", "");
@@ -2412,3 +3203,51 @@ function execute_add_deferred_services(frm, items_to_add, d) {
 		});
 	}
 }
+
+// =========================================================================
+// ISM Parts Management API & Dialogs (Embedded for Zero-Latency & Cache-Proof Execution)
+// =========================================================================
+frappe.provide("ism.parts");
+ism.parts._version = 2;
+
+ism.parts.format_item_code = function (source, part_number, condition) {
+	const src = (source || "OEM").toUpperCase().startsWith("OEM") ? "OEM" : "AFT";
+	const cond_str = (condition || "New").toUpperCase().trim();
+	let cond = "NEW";
+	if (cond_str.includes("USE")) {
+		cond = "USED";
+	} else if (cond_str.includes("REC") || cond_str.includes("RECON") || cond_str.includes("RCN") || cond_str.includes("REB")) {
+		cond = "RCN";
+	}
+
+	const cleaned = (part_number || "").toUpperCase().replace(/[^A-Z0-9_\-]/g, "").trim();
+	return `${src}-${cleaned || "PART"}-${cond}`;
+};
+
+/**
+ * Render compact colored badge for vehicle model (Model 3, Model Y, etc.)
+ */
+ism.parts.get_model_badge = function (model, extra_class = "") {
+	if (!model) return "";
+	const m = String(model).trim();
+	if (!m) return "";
+	let bg = "#f1f5f9", color = "#334155", border = "#cbd5e1";
+	if (m.includes("Model 3")) {
+		bg = "#eff6ff"; color = "#1d4ed8"; border = "#bfdbfe";
+	} else if (m.includes("Model Y")) {
+		bg = "#ecfdf5"; color = "#047857"; border = "#a7f3d0";
+	} else if (m.includes("Model S")) {
+		bg = "#fef2f2"; color = "#b91c1c"; border = "#fecaca";
+	} else if (m.includes("Model X")) {
+		bg = "#f5f3ff"; color = "#6d28d9"; border = "#ddd6fe";
+	} else if (m.includes("Cybertruck")) {
+		bg = "#f8fafc"; color = "#0f172a"; border = "#94a3b8";
+	}
+	return `<span class="badge ${extra_class}" style="background-color: ${bg}; color: ${color}; border: 1px solid ${border}; font-size: 11px; padding: 2px 7px; border-radius: 4px; font-weight: 600;"><i class="fa fa-car mr-1" style="opacity: 0.7;"></i>${frappe.utils.escape_html(m)}</span>`;
+};
+
+// Global parts importer & alternates picker are defined in /assets/ism/js/parts_manager.js
+if (!ism.parts.show_quick_importer) {
+	frappe.require("/assets/ism/js/parts_manager.js");
+}
+

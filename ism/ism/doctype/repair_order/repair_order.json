@@ -30,6 +30,7 @@
   "customer_concern",
   "tab_estimate",
   "sec_services",
+  "services_tree_html",
   "services",
   "sec_totals",
   "taxes_and_charges",
@@ -240,6 +241,12 @@
    "fieldname": "sec_services",
    "fieldtype": "Section Break",
    "label": "Services & Nested Parts"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "services_tree_html",
+   "fieldtype": "HTML",
+   "label": "Itemized Services & Nested Parts"
   },
   {
    "allow_on_submit": 1,

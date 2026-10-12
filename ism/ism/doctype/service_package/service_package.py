@@ -47,6 +47,15 @@ class ServicePackage(Document):
 			if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', self.package_name, re.IGNORECASE):
 				self.is_symmetrical = 1
 
+		# Normalize slot numbers and component_slot labels
+		from ism.api.parts import parse_slot_number, format_slot_label
+		for row in (self.items or []):
+			slot_num = getattr(row, "slot_number", None)
+			if slot_num is None or slot_num == "":
+				slot_num = parse_slot_number(getattr(row, "component_slot", None))
+			row.slot_number = frappe.utils.cint(slot_num)
+			row.component_slot = format_slot_label(row.slot_number)
+
 		self.ensure_service_item()
 
 	def format_package_name(self):

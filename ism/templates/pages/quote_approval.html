@@ -264,10 +264,25 @@ canvas#sig-canvas {
 								<tbody>
 									{% for it in job_items %}
 									<tr>
-										<td>{{ it.item_name or it.item_code }}</td>
-										<td class="text-center">{{ it.qty }}</td>
-										<td class="text-right">${{ "{:,.2f}".format(it.rate) }}</td>
-										<td class="text-right">${{ "{:,.2f}".format(it.amount) }}</td>
+										<td>
+											<span class="font-weight-500">{{ it.item_name or it.item_code }}</span>
+											{% if it.part_source or it.part_condition %}
+											<div class="mt-1 d-flex align-items-center flex-wrap" style="gap: 4px;">
+												{% if it.part_source %}
+												<span class="badge badge-light border text-primary" style="font-size: 10px; font-weight: 600;">{{ it.part_source }}</span>
+												{% endif %}
+												{% if it.part_condition %}
+												<span class="badge {% if it.part_condition == 'New' %}badge-success{% elif it.part_condition == 'Used' %}badge-warning{% else %}badge-info{% endif %}" style="font-size: 10px; font-weight: 600;">{{ it.part_condition }}</span>
+												{% endif %}
+												{% if it.warranty_period %}
+												<span class="text-muted ml-1" style="font-size: 11px;"><i class="fa fa-shield text-secondary mr-1"></i>{{ it.warranty_period }}</span>
+												{% endif %}
+											</div>
+											{% endif %}
+										</td>
+										<td class="text-center align-middle">{{ it.qty }}</td>
+										<td class="text-right align-middle">${{ "{:,.2f}".format(it.rate) }}</td>
+										<td class="text-right align-middle">${{ "{:,.2f}".format(it.amount) }}</td>
 									</tr>
 									{% endfor %}
 								</tbody>

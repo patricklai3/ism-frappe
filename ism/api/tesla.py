@@ -18,6 +18,7 @@ from ism.utils.tesla_manual import (
 	detect_service_side,
 )
 from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate, _render_parts_html
+from ism.api.parts import get_default_warehouse
 
 
 @frappe.whitelist()
@@ -345,6 +346,7 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 				existing_service.parts_html = _render_parts_html(parts_list)
 			existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
 			existing_service.tesla_manual_url = proc_url
+			existing_service.applicable_model = getattr(pkg, "applicable_model", None) or proc_data.get("applicable_model", "")
 			existing_service.is_mobile_capable = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
 			if kwargs.get("advisor_notes"):
 				existing_service.advisor_notes = kwargs.get("advisor_notes")
@@ -352,6 +354,7 @@ def import_tesla_procedure(repair_order, url=None, data=None, allow_generation_m
 		else:
 			target_service = ro.append("services", {
 				"service_package": pkg.name,
+				"applicable_model": getattr(pkg, "applicable_model", None) or proc_data.get("applicable_model", ""),
 				"correction_code": op_code,
 				"service_title": op_title,
 				"service_position": op_side,
@@ -436,7 +439,7 @@ def _extract_parts_for_side(pkg, side="Both"):
 				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
 				"rate": rate,
 				"amount": amt,
-				"warehouse": frappe.db.get_single_value("Stock Settings", "default_warehouse") or "Stores - ISM",
+				"warehouse": get_default_warehouse(),
 			})
 
 	return parts_list, parts_total
@@ -483,6 +486,14 @@ def _upsert_service_package(proc_data, proc_url):
 	if not existing_pkg_name and pkg_name:
 		existing_pkg_name = frappe.db.get_value("Service Package", {"package_name": pkg_name}, "name")
 
+	model = proc_data.get("applicable_model")
+	generation = proc_data.get("applicable_generation")
+	if not model and proc_url:
+		url_meta = parse_tesla_manual_url(proc_url)
+		model = url_meta.get("applicable_model") or ""
+		if not generation:
+			generation = url_meta.get("matched_generation") or ""
+
 	# If found, update existing
 	if existing_pkg_name:
 		pkg = frappe.get_doc("Service Package", existing_pkg_name)
@@ -492,6 +503,10 @@ def _upsert_service_package(proc_data, proc_url):
 			pkg.standard_labor_hours = frt
 		if proc_url:
 			pkg.tesla_manual_url = proc_url
+		if model:
+			pkg.applicable_model = model
+		if generation:
+			pkg.applicable_generation = generation
 		if proc_data.get("doc_guid"):
 			pkg.doc_guid = proc_data.get("doc_guid")
 		if "is_mobile_capable" in proc_data:
@@ -507,6 +522,8 @@ def _upsert_service_package(proc_data, proc_url):
 	pkg = frappe.get_doc({
 		"doctype": "Service Package",
 		"package_name": pkg_name,
+		"applicable_model": model or "",
+		"applicable_generation": generation or "",
 		"correction_code": correction_code,
 		"standard_labor_hours": frt or 1.0,
 		"is_flat_rate": 0,
