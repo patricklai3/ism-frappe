@@ -220,7 +220,6 @@ def setup_item_custom_fields():
 	"""Ensure automotive compliance custom fields exist on Item DocType."""
 	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
-	meta = frappe.get_meta("Item")
 	fields = [
 		{
 			"fieldname": "is_vehicle_part",
@@ -262,9 +261,7 @@ def setup_item_custom_fields():
 		},
 	]
 
-	fields_to_add = [f for f in fields if not meta.has_field(f["fieldname"])]
-	if fields_to_add:
-		create_custom_fields({"Item": fields_to_add}, update=True)
+	create_custom_fields({"Item": fields}, update=True)
 
 
 
@@ -311,6 +308,12 @@ def after_migrate():
 	setup_parts_item_group()
 	setup_item_custom_fields()
 	backfill_service_package_models()
+
+
+def after_install():
+	"""Run installation tasks for ISM on fresh site installs."""
+	after_migrate()
+
 
 
 

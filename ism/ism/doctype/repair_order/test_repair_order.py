@@ -1588,9 +1588,9 @@ class TestRepairOrder(ISMTestCase):
 			"standard_labor_hours": 1.2,
 			"hourly_rate": 100.0,
 			"items": [
-				{"item_code": part_both.name, "qty": 2, "rate": 10, "side": "Both"},
-				{"item_code": part_lh.name, "qty": 1, "rate": 50, "side": "LH"},
-				{"item_code": part_rh.name, "qty": 1, "rate": 50, "side": "RH"},
+				{"item_code": part_both.name, "qty": 2, "rate": 10, "side": "Both", "slot_number": 1},
+				{"item_code": part_lh.name, "qty": 1, "rate": 50, "side": "LH", "slot_number": 2},
+				{"item_code": part_rh.name, "qty": 1, "rate": 50, "side": "RH", "slot_number": 2},
 			],
 		})
 		pkg.insert()

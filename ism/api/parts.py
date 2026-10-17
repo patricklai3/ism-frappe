@@ -196,6 +196,11 @@ def quick_create_part(
 	# Default warehouse
 	default_wh = get_default_warehouse()
 
+	# Ensure automotive compliance custom fields exist on Item
+	if not frappe.db.has_column("Item", "part_source"):
+		from ism.setup import setup_item_custom_fields
+		setup_item_custom_fields()
+
 	# Check or create Item
 	if not frappe.db.exists("Item", item_code):
 		item = frappe.new_doc("Item")
@@ -633,6 +638,11 @@ def save_part_to_service_package(
 
 	if not item_code or not frappe.db.exists("Item", item_code):
 		frappe.throw(_("Item '{0}' not found.").format(item_code))
+
+	# Ensure automotive compliance custom fields exist on Item before saving link
+	if not frappe.db.has_column("Item", "part_source"):
+		from ism.setup import setup_item_custom_fields
+		setup_item_custom_fields()
 
 	# Resolve slot number
 	if slot_number is not None and str(slot_number).strip() != "":

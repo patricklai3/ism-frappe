@@ -92,7 +92,7 @@ doctype_js = {
 # ------------
 
 # before_install = "ism.install.before_install"
-# after_install = "ism.install.after_install"
+after_install = "ism.setup.after_install"
 
 # Uninstallation
 # ------------
