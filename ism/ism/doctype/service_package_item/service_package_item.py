@@ -5,4 +5,7 @@ from frappe.model.document import Document
 
 
 class ServicePackageItem(Document):
-	pass
+	def validate(self):
+		if not self.side or str(self.side).strip().lower() in ("none", "null", "") or self.side not in ("Both", "LH", "RH"):
+			self.side = "Both"
+

@@ -47,14 +47,26 @@ class ServicePackage(Document):
 			if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', self.package_name, re.IGNORECASE):
 				self.is_symmetrical = 1
 
-		# Normalize slot numbers and component_slot labels
-		from ism.api.parts import parse_slot_number, format_slot_label
+		# Normalize slot numbers, component_slot labels, and side variants
+		from ism.api.parts import parse_slot_number, format_slot_label, has_lhrh_designation
+		is_symm = getattr(self, "is_symmetrical", 0)
 		for row in (self.items or []):
 			slot_num = getattr(row, "slot_number", None)
 			if slot_num is None or slot_num == "":
 				slot_num = parse_slot_number(getattr(row, "component_slot", None))
 			row.slot_number = frappe.utils.cint(slot_num)
 			row.component_slot = format_slot_label(row.slot_number)
+
+			# If package has no LH/RH designation and part has no LH/RH designation, side must be Both.
+			# Side must never be "None".
+			row_side = getattr(row, "side", None)
+			if not row_side or str(row_side).strip().lower() in ("none", "null", "") or row_side not in ("Both", "LH", "RH"):
+				row.side = "Both"
+			elif not is_symm:
+				part_ident = f"{row.item_code or ''} {getattr(row, 'item_name', '') or ''}"
+				if not has_lhrh_designation(part_ident):
+					row.side = "Both"
+
 
 		self.ensure_service_item()
 

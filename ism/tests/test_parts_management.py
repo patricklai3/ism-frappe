@@ -19,6 +19,9 @@ from ism.api.parts import (
 	format_slot_label,
 	get_service_package_slots,
 	assign_part_to_slot,
+	has_lhrh_designation,
+	detect_part_side,
+	resolve_part_side,
 )
 from ism.ism.doctype.repair_order.repair_order import get_service_package_details
 
@@ -712,6 +715,68 @@ class TestPartsManagement(ISMTestCase):
 		self.assertEqual(len(unassigned_parts), 1)
 		self.assertEqual(unassigned_parts[0]["item_code"], p_unassigned["item_code"])
 		self.assertEqual(unassigned_parts[0]["slot_number"], 0)
+
+	def test_has_lhrh_designation(self):
+		"""Verify LH/RH detection correctly identifies Left Hand/Right Hand but ignores driver/passenger side."""
+		self.assertTrue(has_lhrh_designation("Hub - Front - LH (Dual Motor) (Remove and Replace)"))
+		self.assertTrue(has_lhrh_designation("Door - Front - LH (Remove and Replace)"))
+		self.assertTrue(has_lhrh_designation("Mirror - Side - RH"))
+		self.assertTrue(has_lhrh_designation("Front Door - Left Hand"))
+		self.assertTrue(has_lhrh_designation("Front Door - Right Hand"))
+
+		# Driver side / passenger side must NOT be treated as LH/RH designation
+		self.assertFalse(has_lhrh_designation("Cabin Air Filter (Replace)"))
+		self.assertFalse(has_lhrh_designation("Driver's Seat Motor (Remove and Replace)"))
+		self.assertFalse(has_lhrh_designation("Wiper Blade - Driver Side"))
+		self.assertFalse(has_lhrh_designation("Passenger's Side Mirror Glass"))
+		self.assertFalse(has_lhrh_designation("Left and Right Wheel Bearing and Hub Assembly Set 2 Piece"))
+		self.assertFalse(has_lhrh_designation("Steering Rack (Left Hand Drive)"))
+
+	def test_resolve_part_side(self):
+		"""Verify resolve_part_side normalizes side and never returns 'None'."""
+		# Never return "None"
+		self.assertEqual(resolve_part_side(side="None"), "Both")
+		self.assertEqual(resolve_part_side(side=None), "Both")
+		self.assertEqual(resolve_part_side(side=""), "Both")
+
+		# Non-LHRH services always resolve to "Both"
+		self.assertEqual(resolve_part_side(side="None", service_package="Cabin Air Filter (Replace)"), "Both")
+		self.assertEqual(resolve_part_side(side="LH", service_package="Cabin Air Filter (Replace)"), "Both")
+		self.assertEqual(resolve_part_side(side="None", service_package="Driver's Seat Track (Replace)"), "Both")
+
+		# LHRH service
+		lh_pkg = "Hub - Front - LH (Dual Motor) (Remove and Replace)"
+		self.assertEqual(resolve_part_side(side="LH", service_package=lh_pkg), "LH")
+		self.assertEqual(resolve_part_side(side="None", service_package=lh_pkg), "Both")
+		self.assertEqual(resolve_part_side(side="Both", service_package=lh_pkg), "Both")
+
+		# Part explicit side takes precedence on LHRH service
+		self.assertEqual(resolve_part_side(side="Both", service_package=lh_pkg, part_name="Wheel Bearing LH"), "LH")
+		self.assertEqual(resolve_part_side(side="Both", service_package=lh_pkg, part_name="Wheel Bearing RH"), "RH")
+		self.assertEqual(resolve_part_side(side="None", service_package=lh_pkg, part_name="Left and Right Wheel Bearing Set"), "Both")
+
+	def test_quick_create_part_with_none_side_on_non_lhrh_service(self):
+		"""Verify importing a part with side='None' on a non-LHRH service does not crash and defaults to 'Both'."""
+		pkg = quick_create_service_package(
+			package_name=f"{TEST_PREFIX}Cabin_Filter_{frappe.generate_hash(length=4)}",
+		)
+		pkg_name = pkg["name"]
+		self.track(frappe.get_doc("Service Package", pkg_name))
+
+		# Import part with side="None"
+		res = quick_create_part(
+			part_number=f"{TEST_PREFIX}CABIN_FILT_01",
+			part_name="High Efficiency Cabin Filter Element",
+			service_package=pkg_name,
+			side="None",
+		)
+		self.track(frappe.get_doc("Item", res["item_code"]))
+		self.assertEqual(res["side"], "Both")
+
+		pkg_doc = frappe.get_doc("Service Package", pkg_name)
+		self.assertEqual(len(pkg_doc.items), 1)
+		self.assertEqual(pkg_doc.items[0].side, "Both")
+
 
 
 

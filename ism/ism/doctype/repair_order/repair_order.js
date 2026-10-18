@@ -656,7 +656,7 @@ frappe.ui.form.on("Repair Order", {
 				existing_services: existing_pkgs,
 				component_slot: row.service_title || "",
 				default_description: row.service_title || "",
-				side: row.service_position || "Both",
+				side: (row.service_position && row.service_position !== "None") ? row.service_position : "Both",
 				default_mode: "single",
 				callback: (created_items) => {
 					created_items.forEach((it) => {
@@ -2428,7 +2428,7 @@ function bind_tree_events(frm, $wrapper) {
 			existing_services: existing_pkgs,
 			default_model: row.applicable_model || (frm.doc.vehicle_model || ""),
 			default_description: "",
-			side: row.service_position || "Both",
+			side: (row.service_position && row.service_position !== "None") ? row.service_position : "Both",
 			default_mode: "single",
 			callback: (created_items) => {
 				created_items.forEach((it) => {
@@ -2481,7 +2481,7 @@ function bind_tree_events(frm, $wrapper) {
 			existing_services: existing_pkgs,
 			default_model: row.applicable_model || (frm.doc.vehicle_model || ""),
 			default_description: "",
-			side: row.service_position || "Both",
+			side: (row.service_position && row.service_position !== "None") ? row.service_position : "Both",
 			default_mode: "catalog",
 			callback: (created_items) => {
 				created_items.forEach((it) => {

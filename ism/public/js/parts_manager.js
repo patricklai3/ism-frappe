@@ -83,6 +83,19 @@ ism.parts.show_quick_importer = function (opts = {}) {
 		callback = null,
 	} = opts;
 
+	function has_lhrh_indicator(str) {
+		if (!str) return false;
+		return /\b(LH|RH)\b|\bLeft\s+Hand\b(?!\s*Drive)|\bRight\s+Hand\b(?!\s*Drive)/i.test(str);
+	}
+
+	let resolved_side = "Both";
+	if (side && String(side).trim().toLowerCase() !== "none") {
+		const s = String(side).trim().toUpperCase();
+		if (s === "LH" || s === "RH") {
+			resolved_side = s;
+		}
+	}
+
 	let current_mode = default_mode; // "single" | "catalog" | "bulk"
 
 	let selected_packages = [];
@@ -367,6 +380,7 @@ ism.parts.show_quick_importer = function (opts = {}) {
 						service_package: selected_packages[0],
 						slot_number: target_slot,
 						component_slot: target_slot_label,
+						side: resolved_side,
 					},
 					freeze: true,
 					freeze_message: __("Importing and linking parts..."),
@@ -413,6 +427,12 @@ ism.parts.show_quick_importer = function (opts = {}) {
 				const warranty = d.get_value("catalog_warranty") || "12 Months / 20,000 km";
 				const oem_num = d.get_value("catalog_oem_num") || "";
 
+				const pkg_name = selected_packages[0] || service_package || "";
+				let call_side = resolved_side;
+				if (!has_lhrh_indicator(pkg_name) && !has_lhrh_indicator(iname) && !has_lhrh_indicator(ic)) {
+					call_side = "Both";
+				}
+
 				const item_obj = {
 					slot_number: target_slot,
 					component_slot: target_slot_label,
@@ -428,6 +448,7 @@ ism.parts.show_quick_importer = function (opts = {}) {
 					amount: qty * rate,
 					stock_uom: "Nos",
 					service_packages: selected_packages,
+					side: call_side,
 				};
 
 				// Link to all selected Service Packages
@@ -440,7 +461,7 @@ ism.parts.show_quick_importer = function (opts = {}) {
 						component_slot: target_slot_label,
 						qty: qty,
 						rate: rate,
-						side: side,
+						side: call_side,
 					},
 					freeze: true,
 					freeze_message: __("Linking part to service packages..."),
@@ -463,11 +484,18 @@ ism.parts.show_quick_importer = function (opts = {}) {
 					return;
 				}
 
+				const pkg_name = selected_packages[0] || service_package || "";
+				const pname = d.get_value("part_name") || pnum;
+				let call_side = resolved_side;
+				if (!has_lhrh_indicator(pkg_name) && !has_lhrh_indicator(pname) && !has_lhrh_indicator(pnum)) {
+					call_side = "Both";
+				}
+
 				frappe.call({
 					method: "ism.api.parts.quick_create_part",
 					args: {
 						part_number: pnum,
-						part_name: d.get_value("part_name") || pnum,
+						part_name: pname,
 						part_source: d.get_value("part_source"),
 						part_condition: d.get_value("part_condition"),
 						slot_number: target_slot,
@@ -479,7 +507,7 @@ ism.parts.show_quick_importer = function (opts = {}) {
 						valuation_rate: d.get_value("valuation_rate"),
 						service_packages: selected_packages,
 						service_package: selected_packages[0],
-						side: side,
+						side: call_side,
 					},
 					freeze: true,
 					freeze_message: __("Creating and linking part..."),
@@ -491,6 +519,7 @@ ism.parts.show_quick_importer = function (opts = {}) {
 							item.service_packages = selected_packages;
 							item.slot_number = item.slot_number != null ? item.slot_number : target_slot;
 							item.component_slot = item.component_slot || target_slot_label;
+							item.side = item.side || call_side;
 
 							frappe.show_alert({
 								message: __("Created Part {0} in {1} and linked to {2} service(s)", [item.item_code, target_slot_label, selected_packages.length]),

@@ -59,6 +59,77 @@ def format_slot_label(slot_number):
 	return f"Slot {s_num}"
 
 
+LHRH_PATTERN = re.compile(r'\b(LH|RH)\b|\bLeft\s+Hand\b(?!\s*Drive)|\bRight\s+Hand\b(?!\s*Drive)', re.IGNORECASE)
+LH_ONLY_PATTERN = re.compile(r'\bLH\b|\bLeft\s+Hand\b(?!\s*Drive)', re.IGNORECASE)
+RH_ONLY_PATTERN = re.compile(r'\bRH\b|\bRight\s+Hand\b(?!\s*Drive)', re.IGNORECASE)
+
+
+def has_lhrh_designation(val):
+	"""Check if text contains explicit LH, RH, Left Hand, or Right Hand designation.
+	Phrases like "driver's side" or "passenger side" do NOT qualify.
+	"""
+	if not val:
+		return False
+	return bool(LHRH_PATTERN.search(str(val)))
+
+
+def detect_part_side(val):
+	"""Detect LH, RH, Both, or None from part text."""
+	if not val:
+		return None
+	s = str(val)
+	has_lh = bool(LH_ONLY_PATTERN.search(s))
+	has_rh = bool(RH_ONLY_PATTERN.search(s))
+	if has_lh and has_rh:
+		return "Both"
+	if has_lh:
+		return "LH"
+	if has_rh:
+		return "RH"
+	return None
+
+
+def resolve_part_side(side="Both", service_package=None, part_name=None, part_number=None):
+	"""Resolve Side / Variant for Service Package Item.
+	Must strictly return one of "Both", "LH", "RH". Never "None".
+	If neither service nor part has Left Hand / Right Hand designation, returns "Both".
+	"""
+	side_str = str(side or "").strip()
+	if side_str.lower() in ("none", "null", "both", ""):
+		candidate_side = "Both"
+	elif side_str.upper() == "LH":
+		candidate_side = "LH"
+	elif side_str.upper() == "RH":
+		candidate_side = "RH"
+	else:
+		candidate_side = "Both"
+
+	part_ident = f"{part_number or ''} {part_name or ''}".strip()
+	part_detected_side = detect_part_side(part_ident)
+
+	pkg_has_lhrh = False
+	if service_package:
+		if has_lhrh_designation(service_package):
+			pkg_has_lhrh = True
+		elif frappe.db.exists("Service Package", service_package):
+			is_symm = frappe.db.get_value("Service Package", service_package, "is_symmetrical")
+			if is_symm:
+				pkg_has_lhrh = True
+
+	# If neither service nor part has LH/RH designation, side is always Both
+	if not pkg_has_lhrh and not part_detected_side:
+		return "Both"
+
+	if part_detected_side:
+		return part_detected_side
+
+	if pkg_has_lhrh and candidate_side in ("LH", "RH"):
+		return candidate_side
+
+	return "Both"
+
+
+
 @frappe.whitelist()
 def generate_preview_item_code(part_source="OEM", part_number="", part_condition="New"):
 	"""Whitelisted helper for client-side live preview."""
@@ -277,11 +348,24 @@ def quick_create_part(
 		target_slot_num = 1
 
 	slot_label = format_slot_label(target_slot_num)
+	primary_pkg = packages_to_link[0] if packages_to_link else service_package
+	resolved_side = resolve_part_side(
+		side=side,
+		service_package=primary_pkg,
+		part_name=part_name,
+		part_number=part_number,
+	)
 
 	for idx, pkg_name in enumerate(packages_to_link):
 		if pkg_name and frappe.db.exists("Service Package", pkg_name):
 			# Primary package gets the specified slot; subsequent packages accommodate it as Unassigned (0)
 			pkg_slot = target_slot_num if idx == 0 else 0
+			pkg_side = resolve_part_side(
+				side=side,
+				service_package=pkg_name,
+				part_name=part_name,
+				part_number=part_number,
+			)
 			save_part_to_service_package(
 				service_package=pkg_name,
 				item_code=item_code,
@@ -290,7 +374,7 @@ def quick_create_part(
 				is_default=is_default if idx == 0 else 0,
 				qty=1.0,
 				rate=unit_rate or flt(item.standard_rate),
-				side=side,
+				side=pkg_side,
 			)
 
 	stock_qty = _get_item_stock_qty(item_code)
@@ -311,11 +395,12 @@ def quick_create_part(
 		"stock_qty": stock_qty,
 		"slot_number": target_slot_num,
 		"component_slot": slot_label,
+		"side": resolved_side,
 	}
 
 
 @frappe.whitelist()
-def bulk_import_parts(raw_text, service_package=None, service_packages=None, slot_number=None, component_slot=None, default_source="OEM", default_condition="New"):
+def bulk_import_parts(raw_text, service_package=None, service_packages=None, slot_number=None, component_slot=None, default_source="OEM", default_condition="New", side="Both"):
 	"""Parse pasted CSV, TSV, or pipe-delimited text and batch-create items.
 	Expected header/line format:
 	Part# | Description | Source | Condition | Rate | Cost | Qty | Revision | OEM#
@@ -379,6 +464,7 @@ def bulk_import_parts(raw_text, service_package=None, service_packages=None, slo
 				component_slot=component_slot,
 				service_package=service_package,
 				service_packages=service_packages,
+				side=side,
 				is_default=1 if len(created_items) == 0 else 0,
 			)
 			res["qty"] = qty
@@ -676,6 +762,13 @@ def save_part_to_service_package(
 			if row_snum == s_num and row.item_code != item_code:
 				row.is_default = 0
 
+	resolved_side = resolve_part_side(
+		side=side,
+		service_package=service_package,
+		part_name=getattr(item_doc, "item_name", None),
+		part_number=getattr(item_doc, "item_code", None),
+	)
+
 	if existing:
 		existing.slot_number = s_num
 		existing.component_slot = slot_label
@@ -685,8 +778,7 @@ def save_part_to_service_package(
 			existing.qty = flt(qty)
 		if rate:
 			existing.rate = flt(rate)
-		if side:
-			existing.side = side
+		existing.side = resolved_side
 	else:
 		pkg.append("items", {
 			"slot_number": s_num,
@@ -700,7 +792,7 @@ def save_part_to_service_package(
 			"warranty_period": getattr(item_doc, "warranty_period", "12 Months / 20,000 km") or "12 Months / 20,000 km",
 			"qty": flt(qty) or 1.0,
 			"rate": flt(rate) or flt(item_doc.standard_rate),
-			"side": side or "Both",
+			"side": resolved_side,
 		})
 
 	pkg.flags.ignore_permissions = True
@@ -709,6 +801,7 @@ def save_part_to_service_package(
 		"status": "success",
 		"slot_number": s_num,
 		"slot_label": slot_label,
+		"side": resolved_side,
 		"message": _("Saved {0} to {1} of Service Package {2}").format(item_code, slot_label, service_package),
 	}
 
