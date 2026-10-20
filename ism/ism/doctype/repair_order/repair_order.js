@@ -321,6 +321,24 @@ frappe.ui.form.on("Repair Order", {
 			frm.set_value("approval_status", "Estimating");
 		}
 
+		if (!frm.is_new() && frm.doc.status === "Waiting on Parts" && !frm._checking_stock) {
+			frm._checking_stock = true;
+			frappe.call({
+				method: "check_parts_stock_availability",
+				doc: frm.doc,
+				callback(r) {
+					frm._checking_stock = false;
+					if (r.message && r.message.updated) {
+						frappe.show_alert({
+							message: __("All required parts are now in stock. Status updated to Authorized - In Progress."),
+							indicator: "green",
+						});
+						frm.reload_doc();
+					}
+				},
+			});
+		}
+
 		if (frm.fields_dict.services && frm.fields_dict.services.grid) {
 			const grid = frm.fields_dict.services.grid;
 			const sp_col = grid.get_field("service_package");
@@ -503,31 +521,32 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Customer Approval"));
 			}
 
-			// 3. Procurement & Material Request (Gradual disclosure: only once customer authorization is on file)
+			// 3. Procurement (Purchase Orders & RFQ)
 			if (is_approved && !is_released) {
-				frm.add_custom_button(__("Create Material Request"), () => {
-					frm.call("create_material_request").then((r) => {
-						if (r && r.message && r.message.material_request) {
-							frappe.show_alert({
-								message: __("Material Request {0} created", [r.message.material_request]),
-								indicator: "green",
-							});
-						}
-					});
-				}, __("Inventory"));
+				frm.add_custom_button(__("Procure Parts"), () => {
+					open_procure_parts_dialog(frm);
+				}, __("Procurement"));
 			}
 
 			// 4. Bay Shop Floor Execution Buttons (Gradual disclosure: strictly only when customer approved)
 			if (is_approved && !is_released) {
 				if (frm.doc.vehicle_location !== "In Bay / Being Serviced") {
 					frm.add_custom_button(__("Pick Up Vehicle (Into Bay)"), () => {
-						frm.call({
-							doc: frm.doc,
-							method: "pick_up_vehicle",
-						}).then(() => {
-							frm._user_clicked_tab = null;
-							frm.reload_doc();
-						});
+						if (frm.doc.status === "Waiting on Parts") {
+							frappe.msgprint({
+								title: __("Parts Required"),
+								indicator: "orange",
+								message: __("Cannot pick up vehicle into bay while Waiting on Parts. Please procure and receive all required parts into inventory first.")
+							});
+						} else {
+							frm.call({
+								doc: frm.doc,
+								method: "pick_up_vehicle",
+							}).then(() => {
+								frm._user_clicked_tab = null;
+								frm.reload_doc();
+							});
+						}
 					}, __("Bay Execution"));
 				}
 
@@ -879,7 +898,7 @@ frappe.ui.form.on("Repair Order", {
 	},
 
 	render_services_tree_html(frm) {
-		render_services_tree_html(frm);
+		fetch_and_render_services_tree(frm);
 	},
 
 	render_workshop_tasks(frm) {
@@ -919,6 +938,26 @@ frappe.ui.form.on("Repair Order", {
 		const is_released = !!frm.doc.vehicle_released || frm.doc.status === "Closed / Released";
 
 		let html = `<div class="workshop-execution-board" style="padding: 4px 0 12px 0;">`;
+
+		if (frm.doc.status === "Waiting on Parts") {
+			html += `
+				<div class="parts-inventory-hold-banner" style="background: #fffbeb; border: 1px solid #fde68a; border-left: 5px solid #d97706; border-radius: 8px; padding: 14px 18px; margin-bottom: 16px;">
+					<div style="display: flex; align-items: flex-start; gap: 12px;">
+						<div style="font-size: 20px; color: #d97706; line-height: 1;">
+							<i class="fa fa-exclamation-triangle"></i>
+						</div>
+						<div>
+							<div style="font-size: 14px; font-weight: 700; color: #92400e; margin-bottom: 4px;">
+								${__("Parts Inventory Hold — Waiting on Parts")}
+							</div>
+							<div style="font-size: 12.5px; color: #b45309; line-height: 1.5;">
+								${__("One or more required parts currently show zero or insufficient stock in the inventory ledger. Vehicle pickup into the bay is blocked until all required parts have been received into inventory.")}
+							</div>
+						</div>
+					</div>
+				</div>
+			`;
+		}
 
 		// 1. Progress & Summary Bar
 		html += `
@@ -1213,6 +1252,14 @@ frappe.ui.form.on("Repair Order", {
 
 		$wrapper.find(".btn-board-pickup-vehicle").on("click", function (e) {
 			e.preventDefault();
+			if (frm.doc.status === "Waiting on Parts") {
+				frappe.msgprint({
+					title: __("Parts Required"),
+					indicator: "orange",
+					message: __("Cannot pick up vehicle into bay while Waiting on Parts. Please procure and receive all required parts into inventory first.")
+				});
+				return;
+			}
 			frm._user_clicked_tab = "tab_workshop";
 			frm.call({
 				doc: frm.doc,
@@ -2051,8 +2098,49 @@ function recalculate_totals(frm, rerender_tree = true) {
 	frm.set_value("outstanding_amount", grand - flt(frm.doc.paid_amount));
 
 	if (rerender_tree && frm.fields_dict.services_tree_html && frm.fields_dict.services_tree_html.$wrapper) {
-		render_services_tree_html(frm);
+		fetch_and_render_services_tree(frm);
 	}
+}
+
+function fetch_and_render_services_tree(frm) {
+	if (!frm.fields_dict.services_tree_html || !frm.fields_dict.services_tree_html.$wrapper) return;
+
+	render_services_tree_html(frm);
+
+	const services = frm.doc.services || [];
+	if (services.length === 0) return;
+
+	const item_codes = [];
+	services.forEach((s) => {
+		let parts = [];
+		try {
+			parts = typeof s.parts === "string" ? JSON.parse(s.parts) : (s.parts || []);
+		} catch (e) {
+			parts = [];
+		}
+		parts.forEach((p) => {
+			if (p.item_code && !item_codes.includes(p.item_code)) {
+				item_codes.push(p.item_code);
+			}
+		});
+	});
+
+	if (item_codes.length === 0) return;
+
+	frappe.call({
+		method: "ism.api.parts.get_repair_order_parts_stock",
+		args: {
+			ro_name: frm.is_new() ? null : frm.doc.name,
+			items: JSON.stringify(item_codes),
+			company: frm.doc.company,
+		},
+		callback(r) {
+			if (r.message) {
+				frm._parts_stock_cache = r.message;
+				render_services_tree_html(frm);
+			}
+		},
+	});
 }
 
 function render_services_tree_html(frm) {
@@ -2121,10 +2209,25 @@ function render_services_tree_html(frm) {
 				? `<span class="badge" style="background: #b45309; color: #fff; font-size: 10px; padding: 2px 6px;">Used</span>`
 				: `<span class="badge" style="background: #0e7490; color: #fff; font-size: 10px; padding: 2px 6px;">Recon</span>`;
 
-			const stock = flt(p.stock_qty || 0);
-			const stock_badge = stock > 0
-				? `<span class="badge" style="background: #dcfce7; color: #166534; font-size: 10px; border: 1px solid #bbf7d0;">${stock} in stock</span>`
-				: `<span class="badge" style="background: #f1f5f9; color: #64748b; font-size: 10px; border: 1px solid #e2e8f0;">0 in stock</span>`;
+			const cached = frm._parts_stock_cache && frm._parts_stock_cache[p.item_code];
+			const stock = cached ? flt(cached.available_qty) : flt(p.stock_qty || 0);
+			const committed = cached ? flt(cached.committed_qty) : flt(p.committed_qty || 0);
+			const committed_orders = (cached && cached.committed_orders) || [];
+
+			let stock_badge = "";
+			if (stock >= qty) {
+				stock_badge = `<span class="badge" style="background: #dcfce7; color: #166534; font-size: 10px; border: 1px solid #bbf7d0;" title="${__("Available in stock: {0}", [stock])}">${stock} in stock</span>`;
+			} else if (stock > 0) {
+				stock_badge = `<span class="badge" style="background: #fef9c3; color: #854d0e; font-size: 10px; border: 1px solid #fef08a;" title="${__("Partial stock available: {0} of {1}", [stock, qty])}">${stock} in stock (Short)</span>`;
+			} else if (committed > 0) {
+				const ro_names = committed_orders.map((o) => o.repair_order).join(", ");
+				const tip = ro_names
+					? __("0 available. {0} unit(s) committed to earlier Repair Order: {1}", [committed, ro_names])
+					: __("0 available. {0} unit(s) committed to earlier Repair Order(s)", [committed]);
+				stock_badge = `<span class="badge" style="background: #fee2e2; color: #991b1b; font-size: 10px; border: 1px solid #fca5a5;" title="${frappe.utils.escape_html(tip)}">0 in stock (${committed} committed)</span>`;
+			} else {
+				stock_badge = `<span class="badge" style="background: #f1f5f9; color: #64748b; font-size: 10px; border: 1px solid #e2e8f0;" title="${__("0 units in stock")}">0 in stock</span>`;
+			}
 
 			const warranty = p.warranty_period ? `<div style="font-size: 11px; color: #64748b; margin-top: 2px;"><i class="fa fa-shield text-muted mr-1"></i>${frappe.utils.escape_html(p.warranty_period)}</div>` : "";
 
@@ -3250,4 +3353,237 @@ ism.parts.get_model_badge = function (model, extra_class = "") {
 if (!ism.parts.show_quick_importer) {
 	frappe.require("/assets/ism/js/parts_manager.js");
 }
+
+
+function open_procure_parts_dialog(frm) {
+	frappe.call({
+		method: "ism.api.parts.get_repair_order_procurement_data",
+		args: { docname: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Loading approved parts..."),
+		callback(r) {
+			const data = r.message || {};
+			const parts = data.parts || [];
+			if (parts.length === 0) {
+				frappe.msgprint(__("No parts found in approved services on this Repair Order."));
+				return;
+			}
+
+			let rows_html = "";
+			parts.forEach((p, idx) => {
+				const is_deficit = p.stock_qty < p.qty;
+				const checked = is_deficit ? "checked" : "";
+				const badge_color = is_deficit ? "#dc2626" : "#16a34a";
+				const badge_bg = is_deficit ? "#fef2f2" : "#f0fdf4";
+				const badge_border = is_deficit ? "#fecaca" : "#bbf7d0";
+				let badge_text = is_deficit ? `${p.stock_qty} (${__("Short")})` : `${p.stock_qty} (${__("In Stock")})`;
+				if (is_deficit && flt(p.committed_qty) > 0) {
+					badge_text = `${p.stock_qty} (${p.committed_qty} committed)`;
+				}
+
+				rows_html += `
+					<tr class="procure-row" data-idx="${idx}" style="border-bottom: 1px solid #f1f5f9;">
+						<td style="padding: 10px 8px; text-align: center; vertical-align: middle;">
+							<input type="checkbox" class="part-select" data-idx="${idx}" ${checked} style="cursor: pointer; width: 16px; height: 16px;">
+						</td>
+						<td style="padding: 10px 8px; vertical-align: middle;">
+							<div style="font-weight: 600; font-size: 13px; color: #1e293b;">${frappe.utils.escape_html(p.item_code)}</div>
+							<div style="font-size: 11px; color: #64748b;">${frappe.utils.escape_html(p.item_name || "")}</div>
+						</td>
+						<td style="padding: 10px 8px; text-align: center; vertical-align: middle; font-weight: 600;">
+							${p.qty} ${p.uom}
+						</td>
+						<td style="padding: 10px 8px; text-align: center; vertical-align: middle;">
+							<span style="font-size: 11px; font-weight: 700; color: ${badge_color}; background: ${badge_bg}; border: 1px solid ${badge_border}; padding: 3px 8px; border-radius: 12px; white-space: nowrap;">
+								${badge_text}
+							</span>
+						</td>
+						<td class="procure-supplier-cell" style="padding: 6px 8px; vertical-align: middle; min-width: 220px;">
+							<div class="part-supplier-control" data-idx="${idx}"></div>
+						</td>
+						<td style="padding: 10px 8px; vertical-align: middle;">
+							<select class="form-control input-sm part-mode" data-idx="${idx}" style="height: 30px; font-size: 12px;">
+								<option value="Purchase Order" selected>${__("Purchase Order")}</option>
+								<option value="Request for Quotation">${__("Request for Quote (RFQ)")}</option>
+							</select>
+						</td>
+					</tr>
+				`;
+			});
+
+			const table_html = `
+				<style>
+					.procure-supplier-cell { position: relative; }
+					.procure-supplier-cell:focus-within { z-index: 50; }
+					.procure-supplier-cell .form-group { margin-bottom: 0px !important; }
+					.procure-supplier-cell .input-with-feedback { height: 30px !important; min-height: 30px !important; font-size: 12px !important; padding: 4px 8px !important; }
+				</style>
+				<div style="margin-bottom: 10px; font-size: 13px; color: #475569;">
+					${__("Select parts to procure. Purchase Orders will be directly submitted and linked to this Repair Order.")}
+				</div>
+				<div style="min-height: 240px; max-height: 420px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px;">
+					<table class="table table-bordered table-hover" style="margin: 0; font-size: 12.5px;">
+						<thead style="background: #f8fafc; font-size: 11.5px; text-transform: uppercase; color: #64748b;">
+							<tr>
+								<th style="width: 36px; text-align: center;"><input type="checkbox" id="select-all-parts" style="cursor: pointer;"></th>
+								<th>${__("Item")}</th>
+								<th style="width: 70px; text-align: center;">${__("Req")}</th>
+								<th style="width: 110px; text-align: center;">${__("Stock")}</th>
+								<th style="width: 240px;">${__("Supplier")}</th>
+								<th style="width: 170px;">${__("Mode")}</th>
+							</tr>
+						</thead>
+						<tbody>
+							${rows_html}
+						</tbody>
+					</table>
+				</div>
+			`;
+
+			const supplier_controls = {};
+
+			const d = new frappe.ui.Dialog({
+				title: __("Procure Parts & Supplies"),
+				size: "large",
+				fields: [
+					{
+						fieldtype: "Link",
+						fieldname: "bulk_supplier",
+						label: __("Default Supplier for All Parts"),
+						options: "Supplier",
+						placeholder: __("Select or add a supplier to apply across all rows..."),
+						change() {
+							const bulk_val = d.get_value("bulk_supplier");
+							if (bulk_val) {
+								parts.forEach((p, idx) => {
+									if (supplier_controls[idx]) {
+										supplier_controls[idx].set_value(bulk_val);
+									}
+								});
+							}
+						},
+					},
+					{
+						fieldtype: "HTML",
+						fieldname: "procure_html",
+						options: table_html,
+					},
+				],
+				primary_action_label: __("Submit Orders & RFQs"),
+				primary_action() {
+					const selected_parts = [];
+					let validation_error = null;
+
+					d.$wrapper.find(".part-select:checked").each(function () {
+						const idx = parseInt($(this).attr("data-idx"), 10);
+						const p = parts[idx];
+						let sup = "";
+						if (supplier_controls[idx]) {
+							sup = (supplier_controls[idx].get_value() || "").trim();
+							if (!sup && supplier_controls[idx].$input) {
+								sup = (supplier_controls[idx].$input.val() || "").trim();
+							}
+						}
+						const mode = d.$wrapper.find(`.part-mode[data-idx="${idx}"]`).val();
+
+						if (mode === "Purchase Order" && !sup) {
+							validation_error = __("Please specify a supplier for {0}").format(p.item_code);
+							return false;
+						}
+
+						selected_parts.push({
+							item_code: p.item_code,
+							item_name: p.item_name,
+							qty: p.qty,
+							rate: p.rate,
+							uom: p.uom,
+							supplier: sup,
+							order_mode: mode,
+						});
+					});
+
+					if (validation_error) {
+						frappe.msgprint(validation_error);
+						return;
+					}
+
+					if (selected_parts.length === 0) {
+						frappe.msgprint(__("Please select at least one part to order."));
+						return;
+					}
+
+					d.hide();
+					frappe.call({
+						method: "ism.api.parts.submit_procurement_orders",
+						args: {
+							repair_order: frm.doc.name,
+							parts_data: selected_parts,
+						},
+						freeze: true,
+						freeze_message: __("Creating and submitting procurement orders..."),
+						callback(res) {
+							if (res.message && res.message.status === "success") {
+								const pos = res.message.purchase_orders || [];
+								const rfqs = res.message.rfqs || [];
+								let msg = [];
+								if (pos.length > 0) {
+									msg.push(__("Created and submitted Purchase Orders: {0}").format(pos.map(p => `<a href="/app/purchase-order/${p}" target="_blank"><b>${p}</b></a>`).join(", ")));
+								}
+								if (rfqs.length > 0) {
+									msg.push(__("Created and submitted RFQs: {0}").format(rfqs.map(q => `<a href="/app/request-for-quotation/${q}" target="_blank"><b>${q}</b></a>`).join(", ")));
+								}
+								frappe.msgprint({
+									title: __("Orders Submitted"),
+									message: msg.join("<br>"),
+									indicator: "green",
+								});
+								frm.reload_doc();
+							}
+						},
+					});
+				},
+			});
+
+			d.show();
+
+			// Initialize native Frappe Link controls for Supplier on each row
+			parts.forEach((p, idx) => {
+				const $parent = d.$wrapper.find(`.part-supplier-control[data-idx="${idx}"]`);
+				if ($parent.length > 0) {
+					const ctrl = frappe.ui.form.make_control({
+						parent: $parent,
+						df: {
+							fieldtype: "Link",
+							fieldname: `supplier_${idx}`,
+							options: "Supplier",
+							placeholder: __("Select or Add Supplier"),
+						},
+						only_input: true,
+						render_input: true,
+					});
+					ctrl.refresh();
+
+					ctrl.$wrapper.find(".form-group").css({ "margin-bottom": "0", "padding": "0" });
+					ctrl.$wrapper.find(".input-with-feedback").css({
+						"height": "30px",
+						"min-height": "30px",
+						"font-size": "12px",
+						"padding": "4px 8px",
+					});
+
+					if (p.default_supplier) {
+						ctrl.set_value(p.default_supplier);
+					}
+					supplier_controls[idx] = ctrl;
+				}
+			});
+
+			d.$wrapper.find("#select-all-parts").on("change", function () {
+				const is_checked = $(this).is(":checked");
+				d.$wrapper.find(".part-select").prop("checked", is_checked);
+			});
+		},
+	});
+}
+
 

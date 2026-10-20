@@ -150,6 +150,18 @@ doc_events = {
 	"Customer": {
 		"on_trash": "ism.ism.doctype.repair_vehicle.repair_vehicle.on_customer_trash",
 	},
+	"Purchase Receipt": {
+		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
+	},
+	"Purchase Invoice": {
+		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
+	},
+	"Stock Entry": {
+		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
+	},
+	"Stock Reconciliation": {
+		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
+	},
 }
 
 # Scheduled Tasks

@@ -148,57 +148,221 @@ def setup_default_taxes_and_payments():
 		if updated_mop:
 			mop_doc.save(ignore_permissions=True)
 
-	# 2. For each company, ensure HST 13% account and 13% HST Sales Taxes and Charges Template
-	for comp in companies:
-		c_name = comp.name
-		abbr = comp.abbr or c_name
-		duties_and_taxes = (
-			frappe.db.get_value("Account", {"account_name": "Duties and Taxes", "company": c_name}, "name")
-			or f"Duties and Taxes - {abbr}"
-		)
+	# 2. Configure Accounts Settings to automatically pull taxes from template
+	try:
+		frappe.db.set_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template", 1)
+	except Exception:
+		pass
 
-		account_name = f"HST 13% - {abbr}"
-		if not frappe.db.exists("Account", account_name):
-			if frappe.db.exists("Account", duties_and_taxes):
+	# 3. For each company, ensure HST 13% account, Sales & Purchase Templates, Item Tax Template, and Tax Rules
+	for comp in companies:
+		ensure_company_13_percent_hst_setup(comp)
+
+
+def ensure_company_13_percent_hst_setup(comp):
+	"""Ensure 13% HST account, Sales and Purchase Taxes templates, Item Tax Template, and Tax Rules exist and are defaults."""
+	if isinstance(comp, str):
+		comp = frappe.get_cached_doc("Company", comp)
+	c_name = comp.name
+	abbr = comp.abbr or c_name
+	currency = comp.default_currency or "CAD"
+
+	# A. Account: HST 13% - {abbr} under Duties and Taxes
+	duties_and_taxes = (
+		frappe.db.get_value("Account", {"account_name": "Duties and Taxes", "company": c_name}, "name")
+		or f"Duties and Taxes - {abbr}"
+	)
+	account_name = f"HST 13% - {abbr}"
+	if not frappe.db.exists("Account", account_name):
+		if frappe.db.exists("Account", duties_and_taxes):
+			try:
 				acc = frappe.get_doc({
 					"doctype": "Account",
 					"account_name": "HST 13%",
 					"company": c_name,
 					"parent_account": duties_and_taxes,
 					"account_type": "Tax",
-					"currency": comp.default_currency or "CAD",
+					"currency": currency,
 				})
 				acc.insert(ignore_permissions=True)
+			except Exception:
+				pass
 
-		template_name = f"13% HST - {abbr}"
-		is_primary_company = comp.default_currency in ["CAD", None] or c_name == "I"
-		if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
-			if frappe.db.exists("Account", account_name):
-				tmpl = frappe.get_doc({
-					"doctype": "Sales Taxes and Charges Template",
-					"title": "13% HST",
-					"company": c_name,
-					"is_default": 1 if is_primary_company else 0,
-					"taxes": [
-						{
-							"charge_type": "On Net Total",
-							"account_head": account_name,
-							"rate": 13.0,
-							"description": "HST @ 13.0%",
-						}
-					],
-				})
-				tmpl.insert(ignore_permissions=True)
-		else:
-			if is_primary_company:
-				frappe.db.set_value("Sales Taxes and Charges Template", template_name, "is_default", 1)
+	tax_head = account_name if frappe.db.exists("Account", account_name) else duties_and_taxes
+	template_name = f"13% HST - {abbr}"
 
-		if is_primary_company:
-			for other in frappe.get_all(
-				"Sales Taxes and Charges Template",
-				filters={"company": c_name, "is_default": 1, "name": ["!=", template_name]},
-			):
-				frappe.db.set_value("Sales Taxes and Charges Template", other.name, "is_default", 0)
+	# B. Sales Taxes and Charges Template
+	if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
+		try:
+			tmpl = frappe.get_doc({
+				"doctype": "Sales Taxes and Charges Template",
+				"title": "13% HST",
+				"company": c_name,
+				"is_default": 1,
+				"taxes": [
+					{
+						"charge_type": "On Net Total",
+						"account_head": tax_head,
+						"rate": 13.0,
+						"description": "HST @ 13.0%",
+					}
+				],
+			})
+			tmpl.insert(ignore_permissions=True)
+		except Exception:
+			pass
+	else:
+		frappe.db.set_value("Sales Taxes and Charges Template", template_name, "is_default", 1)
+
+	for other in frappe.get_all(
+		"Sales Taxes and Charges Template",
+		filters={"company": c_name, "is_default": 1, "name": ["!=", template_name]},
+	):
+		frappe.db.set_value("Sales Taxes and Charges Template", other.name, "is_default", 0)
+
+	# C. Purchase Taxes and Charges Template
+	if not frappe.db.exists("Purchase Taxes and Charges Template", template_name):
+		try:
+			ptmpl = frappe.get_doc({
+				"doctype": "Purchase Taxes and Charges Template",
+				"title": "13% HST",
+				"company": c_name,
+				"is_default": 1,
+				"taxes": [
+					{
+						"category": "Total",
+						"add_deduct_tax": "Add",
+						"charge_type": "On Net Total",
+						"account_head": tax_head,
+						"rate": 13.0,
+						"description": "HST @ 13.0%",
+					}
+				],
+			})
+			ptmpl.insert(ignore_permissions=True)
+		except Exception:
+			pass
+	else:
+		frappe.db.set_value("Purchase Taxes and Charges Template", template_name, "is_default", 1)
+
+	for other in frappe.get_all(
+		"Purchase Taxes and Charges Template",
+		filters={"company": c_name, "is_default": 1, "name": ["!=", template_name]},
+	):
+		frappe.db.set_value("Purchase Taxes and Charges Template", other.name, "is_default", 0)
+
+	# D. Item Tax Template
+	item_tax_template_name = f"13% HST - {abbr}"
+	if not frappe.db.exists("Item Tax Template", item_tax_template_name):
+		try:
+			it_tmpl = frappe.get_doc({
+				"doctype": "Item Tax Template",
+				"title": "13% HST",
+				"company": c_name,
+				"taxes": [
+					{
+						"tax_type": tax_head,
+						"tax_rate": 13.0,
+					}
+				],
+			})
+			it_tmpl.insert(ignore_permissions=True)
+		except Exception:
+			pass
+
+	# E. Global Tax Rules for Sales & Purchase
+	_ensure_default_tax_rule("Sales", template_name, c_name)
+	_ensure_default_tax_rule("Purchase", template_name, c_name)
+
+
+def _ensure_default_tax_rule(tax_type, template_name, company):
+	"""Ensure a generic default Tax Rule exists for Sales or Purchase in this company."""
+	all_rules = frappe.get_all(
+		"Tax Rule",
+		filters={"company": company, "tax_type": tax_type},
+		fields=["name", "sales_tax_template", "purchase_tax_template", "customer", "customer_group", "supplier", "supplier_group", "item", "item_group", "tax_category"],
+	)
+
+	template_field = "sales_tax_template" if tax_type == "Sales" else "purchase_tax_template"
+	generic_rules = [
+		r for r in all_rules
+		if not r.get("customer") and not r.get("customer_group")
+		and not r.get("supplier") and not r.get("supplier_group")
+		and not r.get("item") and not r.get("item_group")
+		and not r.get("tax_category")
+	]
+
+	if generic_rules:
+		rule_name = generic_rules[0].name
+		if generic_rules[0].get(template_field) != template_name:
+			frappe.db.set_value("Tax Rule", rule_name, template_field, template_name)
+		for dup in generic_rules[1:]:
+			frappe.delete_doc("Tax Rule", dup.name, ignore_permissions=True)
+	else:
+		try:
+			rule = frappe.get_doc({
+				"doctype": "Tax Rule",
+				"tax_type": tax_type,
+				"company": company,
+				template_field: template_name,
+				"priority": 1,
+				"from_date": "2020-01-01",
+				"use_for_shopping_cart": 0,
+			})
+			rule.insert(ignore_permissions=True)
+		except Exception as e:
+			frappe.logger("ism").warning(f"Could not create default {tax_type} Tax Rule for {company}: {e}")
+
+
+def get_or_create_default_purchase_tax_template(company=None):
+	"""Return the default 13% HST Purchase Taxes and Charges Template for the company.
+	If not present, creates it along with required account and returns it.
+	"""
+	company = (
+		company
+		or frappe.defaults.get_user_default("Company")
+		or frappe.db.get_single_value("Global Defaults", "default_company")
+		or "Lightspeed"
+	)
+	abbr = frappe.db.get_value("Company", company, "abbr") or company
+	template_name = f"13% HST - {abbr}"
+
+	if not frappe.db.exists("Purchase Taxes and Charges Template", template_name):
+		ensure_company_13_percent_hst_setup(company)
+
+	if frappe.db.exists("Purchase Taxes and Charges Template", template_name):
+		return template_name
+
+	# Fallback to any default purchase template
+	return frappe.db.get_value(
+		"Purchase Taxes and Charges Template",
+		{"company": company, "is_default": 1},
+		"name",
+	)
+
+
+def get_or_create_default_sales_tax_template(company=None):
+	"""Return the default 13% HST Sales Taxes and Charges Template for the company."""
+	company = (
+		company
+		or frappe.defaults.get_user_default("Company")
+		or frappe.db.get_single_value("Global Defaults", "default_company")
+		or "Lightspeed"
+	)
+	abbr = frappe.db.get_value("Company", company, "abbr") or company
+	template_name = f"13% HST - {abbr}"
+
+	if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
+		ensure_company_13_percent_hst_setup(company)
+
+	if frappe.db.exists("Sales Taxes and Charges Template", template_name):
+		return template_name
+
+	return frappe.db.get_value(
+		"Sales Taxes and Charges Template",
+		{"company": company, "is_default": 1},
+		"name",
+	)
 
 
 def setup_parts_item_group():
@@ -298,6 +462,47 @@ def backfill_service_package_models():
 	return count
 
 
+def setup_procurement_custom_fields():
+	"""Ensure repair_order link custom fields exist on Purchase Order, Request for Quotation, and Sales Invoice DocTypes."""
+	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
+
+	po_fields = [
+		{
+			"fieldname": "repair_order",
+			"label": "Repair Order",
+			"fieldtype": "Link",
+			"options": "Repair Order",
+			"insert_after": "supplier",
+			"in_standard_filter": 1,
+		}
+	]
+	rfq_fields = [
+		{
+			"fieldname": "repair_order",
+			"label": "Repair Order",
+			"fieldtype": "Link",
+			"options": "Repair Order",
+			"insert_after": "company",
+			"in_standard_filter": 1,
+		}
+	]
+	si_fields = [
+		{
+			"fieldname": "repair_order",
+			"label": "Repair Order",
+			"fieldtype": "Link",
+			"options": "Repair Order",
+			"insert_after": "customer",
+			"in_standard_filter": 1,
+		}
+	]
+	create_custom_fields({
+		"Purchase Order": po_fields,
+		"Request for Quotation": rfq_fields,
+		"Sales Invoice": si_fields,
+	}, update=True)
+
+
 def after_migrate():
 	"""Run migrations and setup tasks for ISM."""
 	cleanup_legacy_custom_fields()
@@ -307,6 +512,7 @@ def after_migrate():
 	setup_default_taxes_and_payments()
 	setup_parts_item_group()
 	setup_item_custom_fields()
+	setup_procurement_custom_fields()
 	backfill_service_package_models()
 
 

@@ -22,8 +22,18 @@ from ism.api.parts import (
 	has_lhrh_designation,
 	detect_part_side,
 	resolve_part_side,
+	ensure_supplier_and_link_to_item,
+	get_repair_order_procurement_data,
+	submit_procurement_orders,
+	get_item_procurement_info,
+	get_repair_order_committed_qty,
+	get_item_available_stock,
+	get_repair_order_parts_stock,
 )
-from ism.ism.doctype.repair_order.repair_order import get_service_package_details
+from ism.ism.doctype.repair_order.repair_order import (
+	get_service_package_details,
+	on_stock_update_event,
+)
 
 
 class TestPartsManagement(ISMTestCase):
@@ -776,6 +786,542 @@ class TestPartsManagement(ISMTestCase):
 		pkg_doc = frappe.get_doc("Service Package", pkg_name)
 		self.assertEqual(len(pkg_doc.items), 1)
 		self.assertEqual(pkg_doc.items[0].side, "Both")
+
+	def _get_company(self):
+		return frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed EV"
+
+	def test_ensure_supplier_and_link_to_item(self):
+		"""Verify ensure_supplier_and_link_to_item creates supplier and populates Item.supplier_items child table."""
+		sup_name = f"{TEST_PREFIX}Supplier_{frappe.generate_hash(length=6)}"
+		part = quick_create_part(
+			part_number=f"{TEST_PREFIX}SP_TEST_01",
+			part_name="Supplier Link Test Part",
+			unit_rate=125.0,
+		)
+		p_code = part["item_code"]
+		self.track(frappe.get_doc("Item", p_code))
+
+		# Link new supplier
+		res_sup = ensure_supplier_and_link_to_item(sup_name, p_code, supplier_part_no="VEND-XYZ-01")
+		self.assertEqual(res_sup, sup_name)
+		self.assertTrue(frappe.db.exists("Supplier", sup_name))
+		self.track(frappe.get_doc("Supplier", sup_name))
+
+		item_doc = frappe.get_doc("Item", p_code)
+		self.assertTrue(any(row.supplier == sup_name and row.supplier_part_no == "VEND-XYZ-01" for row in item_doc.supplier_items))
+
+		# Calling again should not duplicate child table row
+		ensure_supplier_and_link_to_item(sup_name, p_code)
+		item_doc.reload()
+		supplier_rows = [r for r in item_doc.supplier_items if r.supplier == sup_name]
+		self.assertEqual(len(supplier_rows), 1)
+
+	def test_submit_procurement_orders_po_and_rfq(self):
+		"""Verify direct creation and submission of Purchase Orders (grouped by supplier) and RFQs."""
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+
+		p1 = quick_create_part(part_number=f"{TEST_PREFIX}PO_P1", part_name="PO Part 1", unit_rate=80.0)
+		p2 = quick_create_part(part_number=f"{TEST_PREFIX}PO_P2", part_name="PO Part 2", unit_rate=120.0)
+		p3 = quick_create_part(part_number=f"{TEST_PREFIX}RFQ_P3", part_name="RFQ High Value Part", unit_rate=1500.0)
+		self.track(frappe.get_doc("Item", p1["item_code"]))
+		self.track(frappe.get_doc("Item", p2["item_code"]))
+		self.track(frappe.get_doc("Item", p3["item_code"]))
+
+		sup_a = f"{TEST_PREFIX}Sup_A_{frappe.generate_hash(length=4)}"
+		sup_b = f"{TEST_PREFIX}Sup_B_{frappe.generate_hash(length=4)}"
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 12000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Suspension & Sensor Service",
+					"status": "Approved",
+					"labor_hours": 2.0,
+					"labor_rate": 120.0,
+					"labor_amount": 240.0,
+					"parts": json.dumps([
+						{"item_code": p1["item_code"], "item_name": "PO Part 1", "qty": 1.0, "rate": 80.0},
+						{"item_code": p2["item_code"], "item_name": "PO Part 2", "qty": 2.0, "rate": 120.0},
+						{"item_code": p3["item_code"], "item_name": "RFQ Part 3", "qty": 1.0, "rate": 1500.0},
+					]),
+					"parts_total": 1820.0,
+					"total_amount": 2060.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+
+		# Check procurement data extraction
+		proc_data = get_repair_order_procurement_data(ro.name)
+		self.assertEqual(len(proc_data["parts"]), 3)
+
+		parts_payload = [
+			{"item_code": p1["item_code"], "qty": 1.0, "rate": 80.0, "supplier": sup_a, "order_mode": "Purchase Order"},
+			{"item_code": p2["item_code"], "qty": 2.0, "rate": 120.0, "supplier": sup_a, "order_mode": "Purchase Order"},
+			{"item_code": p3["item_code"], "qty": 1.0, "rate": 1500.0, "supplier": sup_b, "order_mode": "Request for Quotation"},
+		]
+
+		res = submit_procurement_orders(ro.name, parts_payload)
+		self.assertEqual(res["status"], "success")
+		self.assertEqual(len(res["purchase_orders"]), 1)
+		self.assertEqual(len(res["rfqs"]), 1)
+
+		po_name = res["purchase_orders"][0]
+		po = frappe.get_doc("Purchase Order", po_name)
+		self.track(po)
+		self.assertEqual(po.docstatus, 1)  # Immediately submitted
+		self.assertEqual(po.supplier, sup_a)
+		self.assertEqual(len(po.items), 2)
+		self.assertEqual(getattr(po, "repair_order", None), ro.name)
+		self.assertTrue(po.taxes_and_charges and ("13" in po.taxes_and_charges or "HST" in po.taxes_and_charges))
+		self.assertAlmostEqual(flt(po.net_total), 320.0, places=2)
+		self.assertAlmostEqual(flt(po.total_taxes_and_charges), 41.60, places=2)
+		self.assertAlmostEqual(flt(po.grand_total), 361.60, places=2)
+
+		rfq_name = res["rfqs"][0]
+		rfq = frappe.get_doc("Request for Quotation", rfq_name)
+		self.track(rfq)
+		self.assertEqual(rfq.docstatus, 1)  # Immediately submitted
+		self.assertEqual(len(rfq.suppliers), 1)
+		self.assertEqual(rfq.suppliers[0].supplier, sup_b)
+		self.assertEqual(len(rfq.items), 1)
+		self.assertEqual(getattr(rfq, "repair_order", None), ro.name)
+
+		# Verify suppliers were linked into Item's supplier_items child table
+		p1_doc = frappe.get_doc("Item", p1["item_code"])
+		p3_doc = frappe.get_doc("Item", p3["item_code"])
+		self.assertTrue(any(row.supplier == sup_a for row in p1_doc.supplier_items))
+		self.assertTrue(any(row.supplier == sup_b for row in p3_doc.supplier_items))
+
+	def test_waiting_on_parts_status_assignment_and_override(self):
+		"""Verify zero-stock parts automatically set 'Waiting on Parts', block pickup, reject override, and unblock on stock receipt."""
+		from ism.ism.doctype.repair_order.repair_order import on_stock_update_event
+
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+
+		p = quick_create_part(part_number=f"{TEST_PREFIX}ZERO_STOCK_P", part_name="Zero Stock Part", unit_rate=200.0)
+		p_code = p["item_code"]
+		self.track(frappe.get_doc("Item", p_code))
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 15000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Heavy Mechanical Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": p_code, "item_name": "Zero Stock Part", "qty": 1.0, "rate": 200.0}
+					]),
+					"parts_total": 200.0,
+					"total_amount": 300.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+
+		# Since p_code has zero stock, status must automatically be "Waiting on Parts"
+		self.assertEqual(ro.status, "Waiting on Parts")
+
+		# Direct pick_up_vehicle must be strictly blocked
+		with self.assertRaises(frappe.ValidationError):
+			ro.pick_up_vehicle()
+
+		# Shop floor override is strictly disabled and throws ValidationError
+		with self.assertRaises(frappe.ValidationError):
+			ro.override_and_pick_up_vehicle(notes="Attempting override")
+
+		# Still in Waiting on Parts and Not in bay
+		ro.reload()
+		self.assertEqual(ro.status, "Waiting on Parts")
+		self.assertNotEqual(ro.vehicle_location, "In Bay / Being Serviced")
+
+		# Once parts are received into inventory, status transitions and pick-up succeeds
+		wh = get_default_warehouse(company)
+		se = frappe.get_doc({
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": company,
+			"items": [
+				{
+					"item_code": p_code,
+					"qty": 2.0,
+					"t_warehouse": wh,
+					"basic_rate": 200.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		se.submit()
+		self.track(se)
+
+		on_stock_update_event(se)
+		ro.reload()
+		self.assertEqual(ro.status, "Authorized - In Progress")
+
+		# Now vehicle pick-up into bay succeeds
+		pickup_res = ro.pick_up_vehicle()
+		self.assertEqual(pickup_res["status"], "success")
+		self.assertEqual(ro.vehicle_location, "In Bay / Being Serviced")
+
+	def test_on_stock_update_event_clears_waiting_on_parts(self):
+		"""Verify on_stock_update_event clears 'Waiting on Parts' when parts become available."""
+		from ism.ism.doctype.repair_order.repair_order import on_stock_update_event
+
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+
+		# Create an RO with zero-stock part
+		p = quick_create_part(part_number=f"{TEST_PREFIX}STOCK_ARRIVE_P", part_name="Arriving Part", unit_rate=95.0)
+		p_code = p["item_code"]
+		self.track(frappe.get_doc("Item", p_code))
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 18000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Brake Replacement",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": p_code, "item_name": "Arriving Part", "qty": 2.0, "rate": 95.0}
+					]),
+					"parts_total": 190.0,
+					"total_amount": 290.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+		self.assertEqual(ro.status, "Waiting on Parts")
+
+		# Create a Stock Entry to add stock
+		wh = get_default_warehouse(company)
+		se = frappe.get_doc({
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": company,
+			"items": [
+				{
+					"item_code": p_code,
+					"qty": 5.0,
+					"t_warehouse": wh,
+					"basic_rate": 95.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		se.submit()
+		self.track(se)
+
+		# Trigger stock update event
+		on_stock_update_event(se)
+
+		ro.reload()
+		self.assertEqual(ro.status, "Authorized - In Progress")
+
+	def test_purchase_invoice_with_update_stock_clears_waiting_on_parts(self):
+		"""Verify submitting a Purchase Invoice with update_stock=1 triggers hook and clears 'Waiting on Parts'."""
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+
+		p = quick_create_part(part_number=f"{TEST_PREFIX}PINV_P", part_name="PINV Arriving Part", unit_rate=60.0)
+		p_code = p["item_code"]
+		self.track(frappe.get_doc("Item", p_code))
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 19000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Cooling Valve Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": p_code, "item_name": "PINV Arriving Part", "qty": 1.0, "rate": 60.0}
+					]),
+					"parts_total": 60.0,
+					"total_amount": 160.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+		self.assertEqual(ro.status, "Waiting on Parts")
+
+		# Create supplier & Purchase Invoice with update_stock=1
+		sup_name = f"{TEST_PREFIX}PINV_Sup_{frappe.generate_hash(length=4)}"
+		ensure_supplier_and_link_to_item(sup_name, p_code)
+		self.track(frappe.get_doc("Supplier", sup_name))
+
+		wh = get_default_warehouse(company)
+		pinv = frappe.get_doc({
+			"doctype": "Purchase Invoice",
+			"company": company,
+			"supplier": sup_name,
+			"update_stock": 1,
+			"items": [
+				{
+					"item_code": p_code,
+					"qty": 2.0,
+					"rate": 60.0,
+					"expense_account": frappe.db.get_value("Company", company, "default_expense_account") or "Cost of Goods Sold - L",
+					"cost_center": frappe.db.get_value("Company", company, "cost_center") or "Main - L",
+				}
+			],
+		}).insert(ignore_permissions=True)
+		pinv.submit()
+		self.track(pinv)
+
+		ro.reload()
+		self.assertEqual(ro.status, "Authorized - In Progress")
+
+	def test_stock_allocation_across_repair_orders(self):
+		"""Verify that stock committed to an earlier active approved RO is deducted from available stock for later ROs."""
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle1 = self.create_test_vehicle(customer=customer.name)
+		vehicle2 = self.create_test_vehicle(customer=customer.name)
+
+		p = quick_create_part(part_number=f"{TEST_PREFIX}ALLOC_P", part_name="Allocated Widget", unit_rate=80.0)
+		p_code = p["item_code"]
+		self.track(frappe.get_doc("Item", p_code))
+		wh = get_default_warehouse(company)
+
+		# 1. Receive exactly 1 unit into warehouse
+		se1 = frappe.get_doc({
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": company,
+			"items": [
+				{
+					"item_code": p_code,
+					"qty": 1.0,
+					"t_warehouse": wh,
+					"basic_rate": 80.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		se1.submit()
+		self.track(se1)
+
+		# 2. Create first Repair Order RO1 and approve it
+		ro1 = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle1.name,
+			"odometer_in": 10000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Primary Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": p_code, "item_name": "Allocated Widget", "qty": 1.0, "rate": 80.0, "warehouse": wh}
+					]),
+					"parts_total": 80.0,
+					"total_amount": 180.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro1)
+
+		# RO1 should be in progress because 1 unit is available and allocated to it
+		self.assertEqual(ro1.status, "Authorized - In Progress")
+		stock_ro1 = get_item_available_stock(p_code, wh, ro1.name)
+		self.assertEqual(stock_ro1["available_qty"], 1.0)
+		self.assertEqual(stock_ro1["committed_qty"], 0.0)
+
+		# 3. Create second Repair Order RO2 (initially in Estimating)
+		ro2 = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle2.name,
+			"odometer_in": 12000,
+			"approval_status": "Estimating",
+			"services": [
+				{
+					"service_title": "Secondary Service",
+					"status": "Estimating",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": p_code, "item_name": "Allocated Widget", "qty": 1.0, "rate": 80.0, "warehouse": wh}
+					]),
+					"parts_total": 80.0,
+					"total_amount": 180.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro2)
+
+		# For RO2, the single unit is already committed to RO1, so available is 0!
+		stock_ro2 = get_item_available_stock(p_code, wh, ro2.name)
+		self.assertEqual(stock_ro2["available_qty"], 0.0)
+		self.assertEqual(stock_ro2["committed_qty"], 1.0)
+		self.assertEqual(len(stock_ro2["committed_orders"]), 1)
+		self.assertEqual(stock_ro2["committed_orders"][0]["repair_order"], ro1.name)
+
+		# 4. When customer approves RO2, it must transition to 'Waiting on Parts'!
+		ro2.approval_status = "Approved"
+		ro2.save(ignore_permissions=True)
+		self.assertEqual(ro2.status, "Waiting on Parts")
+
+		# Check procurement data for RO2
+		proc_data = get_repair_order_procurement_data(ro2.name)
+		self.assertEqual(len(proc_data["parts"]), 1)
+		self.assertEqual(proc_data["parts"][0]["is_deficit"], 1)
+		self.assertEqual(proc_data["parts"][0]["stock_qty"], 0.0)
+		self.assertEqual(proc_data["parts"][0]["committed_qty"], 1.0)
+
+		# 5. Receive 1 more unit into stock (total actual = 2.0)
+		se2 = frappe.get_doc({
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": company,
+			"items": [
+				{
+					"item_code": p_code,
+					"qty": 1.0,
+					"t_warehouse": wh,
+					"basic_rate": 80.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		se2.submit()
+		self.track(se2)
+
+		# Trigger stock arrival hook
+		on_stock_update_event(se2)
+
+		# RO2 should now automatically advance to 'Authorized - In Progress'!
+		ro2.reload()
+		self.assertEqual(ro2.status, "Authorized - In Progress")
+
+		# And stock check for RO2 now reports 1 available
+		stock_ro2_after = get_item_available_stock(p_code, wh, ro2.name)
+		self.assertEqual(stock_ro2_after["available_qty"], 1.0)
+
+	def test_get_repair_order_parts_stock_endpoint(self):
+		"""Verify get_repair_order_parts_stock endpoint returns live stock mapping for parts in an RO."""
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+
+		p1 = quick_create_part(part_number=f"{TEST_PREFIX}EP1", part_name="Endpoint Part 1", unit_rate=25.0)
+		p2 = quick_create_part(part_number=f"{TEST_PREFIX}EP2", part_name="Endpoint Part 2", unit_rate=35.0)
+		self.track(frappe.get_doc("Item", p1["item_code"]))
+		self.track(frappe.get_doc("Item", p2["item_code"]))
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 15000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Dual Part Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": p1["item_code"], "qty": 1.0, "rate": 25.0},
+						{"item_code": p2["item_code"], "qty": 2.0, "rate": 35.0},
+					]),
+					"parts_total": 95.0,
+					"total_amount": 195.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+
+		res = get_repair_order_parts_stock(ro_name=ro.name)
+		self.assertIn(p1["item_code"], res)
+		self.assertIn(p2["item_code"], res)
+		self.assertIn("available_qty", res[p1["item_code"]])
+		self.assertIn("committed_qty", res[p1["item_code"]])
+
+	def test_default_13_percent_tax_profiles_and_rules(self):
+		"""Verify 13% HST Sales & Purchase templates, item tax template, and Tax Rules are created and set as default."""
+		from ism.setup import (
+			setup_default_taxes_and_payments,
+			get_or_create_default_purchase_tax_template,
+			get_or_create_default_sales_tax_template,
+		)
+		setup_default_taxes_and_payments()
+
+		company = self._get_company()
+
+		# Sales Template
+		s_tmpl = get_or_create_default_sales_tax_template(company)
+		self.assertTrue(s_tmpl)
+		self.assertIn("13", s_tmpl)
+		self.assertEqual(frappe.db.get_value("Sales Taxes and Charges Template", s_tmpl, "is_default"), 1)
+
+		# Purchase Template
+		p_tmpl = get_or_create_default_purchase_tax_template(company)
+		self.assertTrue(p_tmpl)
+		self.assertIn("13", p_tmpl)
+		self.assertEqual(frappe.db.get_value("Purchase Taxes and Charges Template", p_tmpl, "is_default"), 1)
+
+		# Tax Rules
+		sales_rules = frappe.get_all(
+			"Tax Rule",
+			filters={"company": company, "tax_type": "Sales", "customer": ["in", ["", None]]},
+		)
+		self.assertTrue(len(sales_rules) > 0)
+
+		purchase_rules = frappe.get_all(
+			"Tax Rule",
+			filters={"company": company, "tax_type": "Purchase", "supplier": ["in", ["", None]]},
+		)
+		self.assertTrue(len(purchase_rules) > 0)
+
+		# Accounts Settings
+		self.assertEqual(
+			frappe.db.get_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template"),
+			1,
+		)
+
+
+
+
 
 
 

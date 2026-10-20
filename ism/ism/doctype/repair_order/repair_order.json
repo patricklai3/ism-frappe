@@ -63,6 +63,8 @@
   "total_billed_hours",
   "vehicle_released",
   "is_mobile_capable",
+  "has_shop_floor_override",
+  "override_notes",
   "sec_workshop_tasks",
   "workshop_tasks_html",
   "sec_time",
@@ -469,6 +471,22 @@
    "fieldtype": "Check",
    "label": "Mobile Capable Order",
    "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "has_shop_floor_override",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Has Shop Floor Override",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "override_notes",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Shop Floor Override Notes"
   },
   {
    "fieldname": "sec_workshop_tasks",

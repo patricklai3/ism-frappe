@@ -7,7 +7,7 @@ import json
 import re
 import frappe
 from frappe import _
-from frappe.utils import flt, cint
+from frappe.utils import flt, cint, today
 
 
 def format_item_code(part_source="OEM", part_number="", part_condition="New"):
@@ -155,6 +155,146 @@ def _get_item_stock_qty(item_code, warehouse=None):
 		return flt(val) if val is not None else 0.0
 	except Exception:
 		return 0.0
+
+
+def get_repair_order_committed_qty(item_code, warehouse=None, ro_name=None):
+	"""Calculate total quantity of item_code committed to active approved Repair Orders
+	that take priority over ro_name.
+
+	Priority:
+	- If ro_name is an active approved RO, priority is FIFO by (creation, name).
+	- If ro_name is unapproved/draft/estimating/new, ALL active approved ROs have priority.
+	"""
+	if not item_code:
+		return 0.0, []
+
+	ro_creation = None
+	is_ro_approved = False
+	if ro_name and frappe.db.exists("Repair Order", ro_name):
+		ro_data = frappe.db.get_value(
+			"Repair Order",
+			ro_name,
+			["creation", "approval_status", "status", "docstatus"],
+			as_dict=True,
+		)
+		if ro_data and cint(ro_data.docstatus) < 2:
+			ro_creation = ro_data.creation
+			is_ro_approved = (
+				ro_data.approval_status in ("Approved", "Partially Approved")
+				and ro_data.status not in ("Closed / Released", "Cancelled")
+			)
+
+	filters = {
+		"docstatus": ["<", 2],
+		"status": ["not in", ["Closed / Released", "Cancelled"]],
+		"approval_status": ["in", ["Approved", "Partially Approved"]],
+	}
+	if ro_name:
+		filters["name"] = ["!=", ro_name]
+
+	candidate_ros = frappe.get_all(
+		"Repair Order",
+		filters=filters,
+		fields=["name", "creation", "company"],
+		order_by="creation asc, name asc",
+	)
+
+	prior_ros = {}
+	for cro in candidate_ros:
+		if is_ro_approved and ro_creation:
+			if (cro.creation < ro_creation) or (cro.creation == ro_creation and cro.name < ro_name):
+				prior_ros[cro.name] = cro
+		else:
+			prior_ros[cro.name] = cro
+
+	if not prior_ros:
+		return 0.0, []
+
+	services = frappe.get_all(
+		"Repair Order Service",
+		filters={"parent": ["in", list(prior_ros.keys())], "status": "Approved"},
+		fields=["parent", "parts"],
+	)
+
+	committed_qty = 0.0
+	details_map = {}
+
+	for s in services:
+		parts = s.parts
+		if isinstance(parts, str):
+			try:
+				parts = json.loads(parts) if parts else []
+			except Exception:
+				parts = []
+		for p in parts or []:
+			if p.get("item_code") == item_code:
+				part_wh = p.get("warehouse")
+				if not part_wh and s.parent in prior_ros:
+					part_wh = get_default_warehouse(prior_ros[s.parent].company)
+				if warehouse and part_wh and part_wh != warehouse:
+					continue
+				p_qty = flt(p.get("qty", 1.0))
+				committed_qty += p_qty
+				if s.parent not in details_map:
+					details_map[s.parent] = 0.0
+				details_map[s.parent] += p_qty
+
+	details = [{"repair_order": ro, "qty": q} for ro, q in details_map.items()]
+	return committed_qty, details
+
+
+def get_item_available_stock(item_code, warehouse=None, ro_name=None):
+	"""Get live available stock for a Repair Order after deducting earlier commitments."""
+	actual_qty = _get_item_stock_qty(item_code, warehouse)
+	committed_qty, details = get_repair_order_committed_qty(item_code, warehouse, ro_name)
+	available_qty = max(0.0, flt(actual_qty) - flt(committed_qty))
+	return {
+		"item_code": item_code,
+		"warehouse": warehouse,
+		"actual_qty": flt(actual_qty),
+		"committed_qty": flt(committed_qty),
+		"available_qty": flt(available_qty),
+		"committed_orders": details,
+	}
+
+
+@frappe.whitelist()
+def get_repair_order_parts_stock(ro_name=None, items=None, company=None):
+	"""Whitelisted API to fetch live stock and commitment data for repair order parts."""
+	target_items = []
+	if items:
+		if isinstance(items, str):
+			try:
+				items = json.loads(items)
+			except Exception:
+				items = [s.strip() for s in items.split(",") if s.strip()]
+		if isinstance(items, (list, tuple, set)):
+			target_items = [str(x).strip() for x in items if str(x).strip()]
+
+	target_wh = get_default_warehouse(company)
+
+	if not target_items and ro_name and frappe.db.exists("Repair Order", ro_name):
+		ro = frappe.get_doc("Repair Order", ro_name)
+		if not target_wh:
+			target_wh = get_default_warehouse(ro.company)
+		for s in ro.services:
+			parts = s.parts
+			if isinstance(parts, str):
+				try:
+					parts = json.loads(parts) if parts else []
+				except Exception:
+					parts = []
+			for p in parts or []:
+				c = p.get("item_code")
+				if c and c not in target_items:
+					target_items.append(c)
+
+	result = {}
+	for code in target_items:
+		result[code] = get_item_available_stock(code, target_wh, ro_name)
+
+	return result
+
 
 
 
@@ -951,4 +1091,289 @@ def quick_create_service_package(
 	})
 	pkg.insert(ignore_permissions=True)
 	return pkg.as_dict()
+
+
+@frappe.whitelist()
+def ensure_supplier_and_link_to_item(supplier_name, item_code=None, supplier_part_no=None):
+	"""Ensure a Supplier exists, and link it to Item's supplier_items child table and default_supplier."""
+	if not supplier_name or not str(supplier_name).strip():
+		return None
+
+	s_name = str(supplier_name).strip()
+	if not frappe.db.exists("Supplier", s_name):
+		# Determine default supplier group
+		sup_group = frappe.db.get_single_value("Buying Settings", "supplier_group") or "All Supplier Groups"
+		if not frappe.db.exists("Supplier Group", sup_group):
+			first_group = frappe.db.get_value("Supplier Group", {}, "name")
+			sup_group = first_group or "All Supplier Groups"
+
+		sup = frappe.new_doc("Supplier")
+		sup.supplier_name = s_name
+		sup.supplier_group = sup_group
+		sup.flags.ignore_permissions = True
+		sup.insert()
+
+	if item_code and frappe.db.exists("Item", item_code):
+		item_doc = frappe.get_doc("Item", item_code)
+		existing_suppliers = [getattr(row, "supplier", None) for row in getattr(item_doc, "supplier_items", [])]
+		changed = False
+		if s_name not in existing_suppliers:
+			item_doc.append("supplier_items", {
+				"supplier": s_name,
+				"supplier_part_no": supplier_part_no or "",
+			})
+			changed = True
+
+		if hasattr(item_doc, "item_defaults"):
+			for d in item_doc.item_defaults:
+				if not getattr(d, "default_supplier", None):
+					d.default_supplier = s_name
+					changed = True
+
+		if changed:
+			item_doc.flags.ignore_permissions = True
+			item_doc.save()
+
+	return s_name
+
+
+@frappe.whitelist()
+def get_item_procurement_info(item_code, company=None, ro_name=None):
+	"""Query stock levels, known suppliers from Item Supplier child table, and default supplier for an Item."""
+	if not item_code or not frappe.db.exists("Item", item_code):
+		return {}
+
+	item_doc = frappe.get_cached_doc("Item", item_code)
+	wh = get_default_warehouse(company)
+	avail_info = get_item_available_stock(item_code, wh, ro_name)
+
+	known_suppliers = []
+	for row in getattr(item_doc, "supplier_items", []):
+		if row.supplier and row.supplier not in known_suppliers:
+			known_suppliers.append(row.supplier)
+
+	default_sup = None
+	if hasattr(item_doc, "item_defaults"):
+		for d in item_doc.item_defaults:
+			if getattr(d, "default_supplier", None):
+				default_sup = d.default_supplier
+				break
+	if not default_sup:
+		default_sup = known_suppliers[0] if known_suppliers else None
+
+	return {
+		"item_code": item_code,
+		"item_name": item_doc.item_name,
+		"stock_qty": flt(avail_info["available_qty"]),
+		"actual_qty": flt(avail_info["actual_qty"]),
+		"committed_qty": flt(avail_info["committed_qty"]),
+		"warehouse": wh,
+		"default_supplier": default_sup,
+		"known_suppliers": known_suppliers,
+		"rate": flt(getattr(item_doc, "standard_rate", 0.0) or getattr(item_doc, "valuation_rate", 0.0)),
+		"uom": getattr(item_doc, "stock_uom", "Nos"),
+	}
+
+
+@frappe.whitelist()
+def get_repair_order_procurement_data(docname):
+	"""Gather all required parts from approved services of a Repair Order with current stock & supplier details."""
+	if not docname or not frappe.db.exists("Repair Order", docname):
+		frappe.throw(_("Repair Order {0} not found").format(docname))
+
+	ro = frappe.get_doc("Repair Order", docname)
+	approved_services = [s for s in ro.services if s.status == "Approved"]
+	if not approved_services:
+		return {
+			"repair_order": docname,
+			"company": ro.company,
+			"parts": [],
+			"message": _("No approved services found on this Repair Order."),
+		}
+
+	# Aggregate quantities by item_code
+	items_map = {}
+	wh = get_default_warehouse(ro.company)
+
+	for s in approved_services:
+		parts = s.parts
+		if isinstance(parts, str):
+			try:
+				parts = json.loads(parts) if parts else []
+			except Exception:
+				parts = []
+		for p in parts or []:
+			code = p.get("item_code")
+			if not code or not frappe.db.exists("Item", code):
+				continue
+			req_qty = flt(p.get("qty", 1.0))
+			if code not in items_map:
+				item_doc = frappe.get_cached_doc("Item", code)
+				avail_info = get_item_available_stock(code, wh, docname)
+				known_sups = [r.supplier for r in getattr(item_doc, "supplier_items", []) if r.supplier]
+				def_sup = None
+				if hasattr(item_doc, "item_defaults"):
+					for d in item_doc.item_defaults:
+						if getattr(d, "default_supplier", None):
+							def_sup = d.default_supplier
+							break
+				if not def_sup:
+					def_sup = known_sups[0] if known_sups else None
+				items_map[code] = {
+					"item_code": code,
+					"item_name": p.get("item_name") or item_doc.item_name,
+					"qty": 0.0,
+					"stock_qty": flt(avail_info["available_qty"]),
+					"actual_qty": flt(avail_info["actual_qty"]),
+					"committed_qty": flt(avail_info["committed_qty"]),
+					"rate": flt(p.get("rate") or getattr(item_doc, "standard_rate", 0.0)),
+					"uom": p.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
+					"default_supplier": def_sup,
+					"known_suppliers": known_sups,
+					"order_mode": "Purchase Order",
+				}
+			items_map[code]["qty"] += req_qty
+
+	parts_list = list(items_map.values())
+	for p in parts_list:
+		p["is_deficit"] = 1 if p["stock_qty"] < p["qty"] else 0
+
+	return {
+		"repair_order": docname,
+		"company": ro.company,
+		"warehouse": wh,
+		"parts": parts_list,
+	}
+
+
+@frappe.whitelist()
+def submit_procurement_orders(repair_order, parts_data):
+	"""Directly create and submit Purchase Orders (grouped by supplier) and RFQs for a Repair Order."""
+	if not repair_order or not frappe.db.exists("Repair Order", repair_order):
+		frappe.throw(_("Repair Order {0} not found").format(repair_order))
+
+	ro = frappe.get_doc("Repair Order", repair_order)
+	if isinstance(parts_data, str):
+		try:
+			parts_data = json.loads(parts_data)
+		except Exception:
+			frappe.throw(_("Invalid parts data format."))
+
+	if not parts_data:
+		frappe.throw(_("No parts selected for procurement."))
+
+	company = ro.company or frappe.defaults.get_user_default("Company")
+	target_wh = get_default_warehouse(company)
+
+	po_parts_by_supplier = {}
+	rfq_parts = []
+	rfq_suppliers = set()
+
+	for item in parts_data:
+		code = item.get("item_code")
+		if not code or not frappe.db.exists("Item", code):
+			continue
+
+		sup = str(item.get("supplier") or "").strip()
+		mode = str(item.get("order_mode") or "Purchase Order").strip()
+
+		# Ensure supplier exists and is linked to Item
+		if sup:
+			ensure_supplier_and_link_to_item(sup, code, item.get("supplier_part_no"))
+
+		if mode == "Request for Quotation":
+			rfq_parts.append(item)
+			if sup:
+				rfq_suppliers.add(sup)
+		else:
+			if not sup:
+				frappe.throw(_("Supplier is required for Purchase Order on item {0}.").format(code))
+			if sup not in po_parts_by_supplier:
+				po_parts_by_supplier[sup] = []
+			po_parts_by_supplier[sup].append(item)
+
+	created_pos = []
+	created_rfqs = []
+
+	# 1. Create and submit Purchase Orders grouped by supplier
+	from ism.setup import get_or_create_default_purchase_tax_template
+	po_tax_template = get_or_create_default_purchase_tax_template(company)
+
+	for sup, items in po_parts_by_supplier.items():
+		po = frappe.new_doc("Purchase Order")
+		po.company = company
+		po.supplier = sup
+		po.transaction_date = today()
+		po.schedule_date = today()
+
+		if hasattr(po, "repair_order") or frappe.db.has_column("Purchase Order", "repair_order"):
+			po.repair_order = ro.name
+
+		for it in items:
+			item_doc = frappe.get_cached_doc("Item", it["item_code"])
+			rate = flt(it.get("rate") or getattr(item_doc, "standard_rate", 0.0) or getattr(item_doc, "valuation_rate", 0.0))
+			po.append("items", {
+				"item_code": it["item_code"],
+				"item_name": it.get("item_name") or item_doc.item_name,
+				"qty": flt(it.get("qty", 1.0)),
+				"rate": rate,
+				"uom": it.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
+				"stock_uom": getattr(item_doc, "stock_uom", "Nos"),
+				"conversion_factor": 1.0,
+				"warehouse": target_wh,
+				"schedule_date": today(),
+			})
+
+		if po_tax_template:
+			po.taxes_and_charges = po_tax_template
+			from erpnext.controllers.accounts_controller import get_taxes_and_charges
+			taxes = get_taxes_and_charges("Purchase Taxes and Charges Template", po_tax_template)
+			po.set("taxes", [])
+			for t in taxes:
+				po.append("taxes", t)
+
+		po.set_missing_values()
+		po.calculate_taxes_and_totals()
+		po.flags.ignore_permissions = True
+		po.insert()
+		po.submit()
+		created_pos.append(po.name)
+
+	# 2. Create and submit Request for Quotations
+	if rfq_parts:
+		rfq = frappe.new_doc("Request for Quotation")
+		rfq.company = company
+		rfq.transaction_date = today()
+
+		if hasattr(rfq, "repair_order") or frappe.db.has_column("Request for Quotation", "repair_order"):
+			rfq.repair_order = ro.name
+
+		for s in rfq_suppliers:
+			rfq.append("suppliers", {"supplier": s})
+
+		for it in rfq_parts:
+			item_doc = frappe.get_cached_doc("Item", it["item_code"])
+			rfq.append("items", {
+				"item_code": it["item_code"],
+				"item_name": it.get("item_name") or item_doc.item_name,
+				"qty": flt(it.get("qty", 1.0)),
+				"uom": it.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
+				"stock_uom": getattr(item_doc, "stock_uom", "Nos"),
+				"conversion_factor": 1.0,
+				"warehouse": target_wh,
+				"schedule_date": today(),
+			})
+
+		rfq.set_missing_values()
+		rfq.flags.ignore_permissions = True
+		rfq.insert()
+		rfq.submit()
+		created_rfqs.append(rfq.name)
+
+	return {
+		"status": "success",
+		"purchase_orders": created_pos,
+		"rfqs": created_rfqs,
+	}
+
 

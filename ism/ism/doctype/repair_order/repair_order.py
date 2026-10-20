@@ -17,7 +17,7 @@ from frappe.utils import (
 	time_diff_in_hours,
 	today,
 )
-from ism.api.parts import get_default_warehouse
+from ism.api.parts import get_default_warehouse, _get_item_stock_qty
 
 
 def _get_default_labor_rate():
@@ -30,85 +30,9 @@ def _get_default_labor_rate():
 
 
 def get_or_create_default_tax_template(company=None):
-	"""
-	Return the default 13% HST template for the company.
-	If not present, create the HST 13% account and 13% HST template and return it.
-	"""
-	company = company or frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company") or "I"
-	abbr = frappe.db.get_value("Company", company, "abbr") or company
-
-	# Look for an existing default template
-	default_tmpl = frappe.db.get_value(
-		"Sales Taxes and Charges Template",
-		{"company": company, "is_default": 1},
-		"name"
-	)
-	if default_tmpl and ("13" in default_tmpl or "HST" in default_tmpl):
-		return default_tmpl
-
-	# Check for any template with 13% or HST in title/name
-	hst_tmpl = frappe.db.get_value(
-		"Sales Taxes and Charges Template",
-		{"company": company, "title": ["like", "%HST%"]},
-		"name"
-	) or frappe.db.get_value(
-		"Sales Taxes and Charges Template",
-		{"company": company, "name": ["like", "%13%HST%"]},
-		"name"
-	)
-	if hst_tmpl:
-		return hst_tmpl
-
-	# Create Account & Template if needed
-	duties_and_taxes = (
-		frappe.db.get_value("Account", {"account_name": "Duties and Taxes", "company": company}, "name")
-		or f"Duties and Taxes - {abbr}"
-	)
-	account_name = f"HST 13% - {abbr}"
-	if not frappe.db.exists("Account", account_name):
-		if frappe.db.exists("Account", duties_and_taxes):
-			try:
-				acc = frappe.get_doc({
-					"doctype": "Account",
-					"account_name": "HST 13%",
-					"company": company,
-					"parent_account": duties_and_taxes,
-					"account_type": "Tax",
-					"currency": frappe.db.get_value("Company", company, "default_currency") or "CAD",
-				})
-				acc.insert(ignore_permissions=True)
-			except Exception:
-				pass
-
-	template_name = f"13% HST - {abbr}"
-	if not frappe.db.exists("Sales Taxes and Charges Template", template_name):
-		tax_head = account_name if frappe.db.exists("Account", account_name) else duties_and_taxes
-		try:
-			tmpl = frappe.get_doc({
-				"doctype": "Sales Taxes and Charges Template",
-				"title": "13% HST",
-				"company": company,
-				"is_default": 1,
-				"taxes": [
-					{
-						"charge_type": "On Net Total",
-						"account_head": tax_head,
-						"rate": 13.0,
-						"description": "HST @ 13.0%",
-					}
-				],
-			})
-			tmpl.insert(ignore_permissions=True)
-			for other in frappe.get_all(
-				"Sales Taxes and Charges Template",
-				filters={"company": company, "is_default": 1, "name": ["!=", template_name]},
-			):
-				frappe.db.set_value("Sales Taxes and Charges Template", other.name, "is_default", 0)
-			return tmpl.name
-		except Exception:
-			pass
-
-	return template_name if frappe.db.exists("Sales Taxes and Charges Template", template_name) else default_tmpl
+	"""Return the default 13% HST Sales Taxes and Charges Template for the company."""
+	from ism.setup import get_or_create_default_sales_tax_template
+	return get_or_create_default_sales_tax_template(company)
 
 
 def _render_parts_html(parts):
@@ -288,9 +212,67 @@ class RepairOrder(Document):
 						s.status = "Approved"
 						break
 
+		self._update_parts_waiting_status()
+
+	def _check_parts_stock_availability(self):
+		"""Check stock availability for all parts in approved services. Returns (is_all_available, deficit_items)."""
+		approved_services = [s for s in self.services if s.status == "Approved"]
+		if not approved_services:
+			return True, []
+
+		from ism.api.parts import get_item_available_stock
+		wh = get_default_warehouse(self.company)
+		deficit_items = []
+		item_reqs = {}
+		for s in approved_services:
+			parts = s.parts
+			if isinstance(parts, str):
+				try:
+					parts = json.loads(parts) if parts else []
+				except Exception:
+					parts = []
+			for p in parts or []:
+				code = p.get("item_code")
+				if code and frappe.db.exists("Item", code):
+					is_stock = frappe.db.get_value("Item", code, "is_stock_item")
+					if cint(is_stock):
+						item_reqs[code] = item_reqs.get(code, 0.0) + flt(p.get("qty", 1.0))
+
+		for code, req_qty in item_reqs.items():
+			avail_info = get_item_available_stock(code, wh, self.name)
+			avail_qty = flt(avail_info.get("available_qty", 0.0))
+			if avail_qty < req_qty:
+				deficit_items.append({
+					"item_code": code,
+					"required_qty": req_qty,
+					"available_qty": avail_qty,
+					"actual_qty": flt(avail_info.get("actual_qty", 0.0)),
+					"committed_qty": flt(avail_info.get("committed_qty", 0.0)),
+					"deficit": req_qty - avail_qty,
+				})
+
+		return len(deficit_items) == 0, deficit_items
+
+	@frappe.whitelist()
+	def check_parts_stock_availability(self):
+		all_avail, deficit = self._check_parts_stock_availability()
+		updated = False
+		if self.status == "Waiting on Parts" and all_avail:
+			self.status = "Authorized - In Progress"
+			self.flags.ignore_permissions = True
+			self.save()
+			updated = True
+		return {"all_available": all_avail, "deficit_items": deficit, "status": self.status, "updated": updated}
+
+	def _update_parts_waiting_status(self):
+		"""Update status between 'Waiting on Parts' and 'Authorized - In Progress' based on inventory."""
 		if self.approval_status in ["Approved", "Partially Approved"]:
-			if self.status in ["Draft Estimate", "Pending Authorization", "", None]:
-				self.status = "Authorized - In Progress"
+			if self.status in ["Draft Estimate", "Pending Authorization", "Waiting on Parts", "Authorized - In Progress", "", None]:
+				all_available, _ = self._check_parts_stock_availability()
+				if not all_available:
+					self.status = "Waiting on Parts"
+				else:
+					self.status = "Authorized - In Progress"
 
 	def on_trash(self):
 		if "System Manager" not in frappe.get_roles() and frappe.session.user != "Administrator":
@@ -414,10 +396,19 @@ class RepairOrder(Document):
 				part_wh = p.get("warehouse")
 				valid_wh = part_wh if (part_wh and frappe.db.exists("Warehouse", {**wh_filters, "name": part_wh})) else default_wh
 
+				code = p.get("item_code", "")
+				part_stock = 0.0
+				part_committed = 0.0
+				if code:
+					from ism.api.parts import get_item_available_stock
+					avail_info = get_item_available_stock(code, valid_wh, self.name)
+					part_stock = flt(avail_info.get("available_qty", 0.0))
+					part_committed = flt(avail_info.get("committed_qty", 0.0))
+
 				cleaned_parts.append({
-					"item_code": p.get("item_code", ""),
-					"item_name": p.get("item_name", p.get("item_code", "")),
-					"component_slot": p.get("component_slot") or p.get("item_name", p.get("item_code", "")),
+					"item_code": code,
+					"item_name": p.get("item_name", code),
+					"component_slot": p.get("component_slot") or p.get("item_name", code),
 					"part_source": p.get("part_source", ""),
 					"part_condition": p.get("part_condition", ""),
 					"oem_part_number": p.get("oem_part_number", ""),
@@ -428,6 +419,8 @@ class RepairOrder(Document):
 					"rate": rate,
 					"amount": amt,
 					"warehouse": valid_wh,
+					"stock_qty": part_stock,
+					"committed_qty": part_committed,
 				})
 
 			s.parts = json.dumps(cleaned_parts)
@@ -698,10 +691,21 @@ class RepairOrder(Document):
 					"Please obtain customer approval first."
 				)
 			)
+
+		if self.status == "Waiting on Parts":
+			all_avail, deficit = self._check_parts_stock_availability()
+			if not all_avail:
+				frappe.throw(
+					_(
+						"Cannot pick up vehicle into bay: Required parts have zero or insufficient stock in system. "
+						"Please procure and receive all required parts into inventory first."
+					)
+				)
+
 		self.picked_up_at = now_datetime()
 		self.picked_up_by = frappe.session.user
 		self.vehicle_location = "In Bay / Being Serviced"
-		if self.status in ["Draft Estimate", "Pending Authorization"]:
+		if self.status in ["Draft Estimate", "Pending Authorization", "Waiting on Parts"]:
 			self.status = "Authorized - In Progress"
 
 		if self.docstatus == 1:
@@ -712,6 +716,15 @@ class RepairOrder(Document):
 
 		self.save(ignore_permissions=True)
 		return {"status": "success", "vehicle_location": self.vehicle_location, "picked_up_at": self.picked_up_at}
+
+	@frappe.whitelist()
+	def override_and_pick_up_vehicle(self, notes=None, **kwargs):
+		"""Shop floor override has been removed in standard workflow."""
+		frappe.throw(
+			_(
+				"Shop floor override is disabled. All required parts must be received into inventory before vehicle pick-up."
+			)
+		)
 
 	@frappe.whitelist()
 	def park_vehicle(self):
@@ -908,9 +921,7 @@ class RepairOrder(Document):
 		else:
 			self.approval_status = "Pending Approval"
 
-		if self.approval_status in ["Approved", "Partially Approved"]:
-			if self.status in ["Draft Estimate", "Pending Authorization", "", None]:
-				self.status = "Authorized - In Progress"
+		self._update_parts_waiting_status()
 
 		current_timestamp = now_datetime()
 
@@ -1575,6 +1586,8 @@ class RepairOrder(Document):
 		si.update_stock = 1
 		si.disable_rounded_total = 1
 		si.taxes_and_charges = tax_template
+		if hasattr(si, "repair_order") or frappe.db.has_column("Sales Invoice", "repair_order"):
+			si.repair_order = self.name
 
 		# Add line items: labor and all nested parts from approved services
 		for s in approved_services:
@@ -2214,3 +2227,42 @@ def get_vehicle_customers(vehicle: str):
 			seen.add(row.customer)
 
 	return customers
+
+
+@frappe.whitelist()
+def override_and_pick_up_vehicle(docname=None, notes=None, **kwargs):
+	name = docname or _extract_docname_from_request()
+	if not name:
+		frappe.throw(_("Repair Order name is required"))
+	ro = frappe.get_doc("Repair Order", name)
+	return ro.override_and_pick_up_vehicle(notes=notes, **kwargs)
+
+
+@frappe.whitelist()
+def check_parts_stock_availability(docname=None, **kwargs):
+	name = docname or _extract_docname_from_request()
+	if not name:
+		frappe.throw(_("Repair Order name is required"))
+	ro = frappe.get_doc("Repair Order", name)
+	return ro.check_parts_stock_availability()
+
+
+def on_stock_update_event(doc, method=None):
+	"""Re-evaluate stock on Repair Orders in 'Waiting on Parts' when incoming inventory arrives."""
+	waiting_orders = frappe.get_all(
+		"Repair Order",
+		filters={"status": "Waiting on Parts"},
+		order_by="creation asc, name asc",
+		pluck="name",
+	)
+	for ro_name in waiting_orders:
+		try:
+			ro = frappe.get_doc("Repair Order", ro_name)
+			all_avail, _ = ro._check_parts_stock_availability()
+			if all_avail:
+				ro.status = "Authorized - In Progress"
+				ro.flags.ignore_permissions = True
+				ro.save()
+		except Exception:
+			pass
+
