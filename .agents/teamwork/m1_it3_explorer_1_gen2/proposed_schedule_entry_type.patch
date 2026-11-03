@@ -1,0 +1,38 @@
+--- a/ism/ism/doctype/schedule_entry_type/schedule_entry_type.py
++++ b/ism/ism/doctype/schedule_entry_type/schedule_entry_type.py
+@@ -23,6 +23,13 @@ class ScheduleEntryType(Document):
+ 		if not self.type_name:
+ 			frappe.throw(_("Type Name cannot be empty."), title=_("Validation Error"))
+ 
++	def before_rename(self, old_name, new_name, merge=False):
++		if old_name in STANDARD_SCHEDULE_ENTRY_TYPES:
++			frappe.throw(
++				_("Cannot rename standard Schedule Entry Type '{0}'.").format(old_name),
++				title=_("Standard Type Protected"),
++			)
++
+ 	def on_trash(self):
+ 		target_name = (self.type_name or self.name or "").strip()
+ 		if target_name in STANDARD_SCHEDULE_ENTRY_TYPES or self.name in STANDARD_SCHEDULE_ENTRY_TYPES:
+--- a/ism/ism/doctype/schedule_entry_type/schedule_entry_type.json
++++ b/ism/ism/doctype/schedule_entry_type/schedule_entry_type.json
+@@ -1,7 +1,7 @@
+ {
+  "actions": [],
+- "allow_rename": 1,
++ "allow_rename": 0,
+  "autoname": "field:type_name",
+--- a/ism/ism/doctype/schedule_entry_type/test_schedule_entry_type.py
++++ b/ism/ism/doctype/schedule_entry_type/test_schedule_entry_type.py
+@@ -69,6 +69,11 @@ class TestScheduleEntryType(ISMTestCase):
+ 			doc = frappe.get_doc("Schedule Entry Type", std_type)
+ 			self.assertRaises(frappe.ValidationError, doc.delete)
+ 
++	def test_rename_standard_schedule_entry_type_blocked(self):
++		"""Verify standard entry types cannot be renamed to bypass deletion protection."""
++		with self.assertRaises(frappe.ValidationError):
++			frappe.rename_doc("Schedule Entry Type", "Diagnostic", "Diagnostic_Renamed")
++
+ 	def test_delete_in_use_schedule_entry_type_blocked(self):
+ 		"""Verify custom entry type cannot be deleted while referenced by Schedule Entry."""
+ 		type_name = f"{TEST_PREFIX}InUseType"

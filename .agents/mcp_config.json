@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "C:\\Users\\real2\\AppData\\Local\\codegraph\\current\\bin\\codegraph.cmd",
+      "args": [
+        "serve",
+        "--mcp"
+      ]
+    }
+  }
+}

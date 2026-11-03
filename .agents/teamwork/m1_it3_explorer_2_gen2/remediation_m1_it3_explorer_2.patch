@@ -1,0 +1,135 @@
+diff --git a/ism/ism/doctype/schedule_entry_type/schedule_entry_type.py b/ism/ism/doctype/schedule_entry_type/schedule_entry_type.py
+index 2345678..3456789 100644
+--- a/ism/ism/doctype/schedule_entry_type/schedule_entry_type.py
++++ b/ism/ism/doctype/schedule_entry_type/schedule_entry_type.py
+@@ -20,6 +20,31 @@ class ScheduleEntryType(Document):
+ 			self.type_name = self.type_name.strip()
+ 		if not self.type_name:
+ 			frappe.throw(_("Type Name cannot be empty."), title=_("Validation Error"))
++
++		# Prevent direct renaming via doc.type_name = "new_name"; doc.save()
++		if not self.is_new() and self.name in STANDARD_SCHEDULE_ENTRY_TYPES:
++			if self.type_name != self.name:
++				frappe.throw(
++					_("Cannot rename standard Schedule Entry Type '{0}'.").format(self.name),
++					title=_("Standard Type Protected"),
++				)
++
++	def before_rename(self, old_name, new_name, merge=False):
++		target = (old_name or self.name or "").strip()
++		if target in STANDARD_SCHEDULE_ENTRY_TYPES or self.name in STANDARD_SCHEDULE_ENTRY_TYPES:
++			frappe.throw(
++				_("Cannot rename standard Schedule Entry Type '{0}'.").format(self.name or target),
++				title=_("Standard Type Protected"),
++			)
++
++		new_target = (new_name or "").strip()
++		if new_target in STANDARD_SCHEDULE_ENTRY_TYPES:
++			frappe.throw(
++				_("Cannot rename to standard Schedule Entry Type '{0}'.").format(new_name),
++				title=_("Standard Type Protected"),
++			)
++
++		return new_target
+ 
+ 	def on_trash(self):
+ 		target_name = (self.type_name or self.name or "").strip()
+diff --git a/ism/ism/doctype/schedule_entry_type/schedule_entry_type.json b/ism/ism/doctype/schedule_entry_type/schedule_entry_type.json
+index 4567890..5678901 100644
+--- a/ism/ism/doctype/schedule_entry_type/schedule_entry_type.json
++++ b/ism/ism/doctype/schedule_entry_type/schedule_entry_type.json
+@@ -1,6 +1,6 @@
+ {
+  "actions": [],
+- "allow_rename": 1,
++ "allow_rename": 0,
+  "autoname": "field:type_name",
+  "creation": "2026-10-26 12:00:00.000000",
+  "doctype": "DocType",
+diff --git a/ism/ism/doctype/ism_settings/ism_settings.json b/ism/ism/doctype/ism_settings/ism_settings.json
+index 6789012..7890123 100644
+--- a/ism/ism/doctype/ism_settings/ism_settings.json
++++ b/ism/ism/doctype/ism_settings/ism_settings.json
+@@ -217,6 +217,18 @@
+    "role": "System Manager",
+    "share": 1,
+    "write": 1
++  },
++  {
++   "create": 1,
++   "delete": 1,
++   "email": 1,
++   "export": 1,
++   "print": 1,
++   "read": 1,
++   "report": 1,
++   "role": "ISM Manager",
++   "share": 1,
++   "write": 1
+   }
+  ],
+  "row_format": "Dynamic",
+diff --git a/ism/ism/doctype/schedule_entry_type/test_schedule_entry_type.py b/ism/ism/doctype/schedule_entry_type/test_schedule_entry_type.py
+index 8901234..9012345 100644
+--- a/ism/ism/doctype/schedule_entry_type/test_schedule_entry_type.py
++++ b/ism/ism/doctype/schedule_entry_type/test_schedule_entry_type.py
+@@ -93,3 +93,59 @@ class TestScheduleEntryType(ISMTestCase):
+ 		se.delete()
+ 		custom_type.delete()
+ 		self.assertFalse(frappe.db.exists("Schedule Entry Type", type_name))
++
++	def test_rename_standard_schedule_entry_type_blocked(self):
++		"""Verify standard entry types cannot be renamed via rename_doc (even with force=True)."""
++		for std_type in ["Diagnostic", "Repair", "Maintenance", "Meeting", "Internal Service"]:
++			with self.assertRaises(frappe.ValidationError):
++				frappe.rename_doc(
++					"Schedule Entry Type",
++					std_type,
++					f"{std_type}_Renamed",
++					force=True,
++				)
++			# Ensure the standard type still exists with its original name
++			self.assertTrue(
++				frappe.db.exists("Schedule Entry Type", std_type),
++				f"Standard Schedule Entry Type '{std_type}' must remain intact in DB",
++			)
++
++	def test_rename_to_standard_schedule_entry_type_blocked(self):
++		"""Verify custom entry types cannot be renamed to adopt a standard type name."""
++		custom_name = f"{TEST_PREFIX}Custom_Rename_Target"
++		if frappe.db.exists("Schedule Entry Type", custom_name):
++			frappe.delete_doc("Schedule Entry Type", custom_name, force=True)
++
++		custom_doc = frappe.get_doc({
++			"doctype": "Schedule Entry Type",
++			"type_name": custom_name,
++			"requires_repair_order": 0,
++		}).insert()
++		self.track(custom_doc)
++
++		with self.assertRaises(frappe.ValidationError):
++			frappe.rename_doc(
++				"Schedule Entry Type",
++				custom_name,
++				"Diagnostic",
++				force=True,
++			)
++
++		custom_doc.delete()
++
++	def test_modify_standard_type_name_on_save_blocked(self):
++		"""Verify direct mutation of type_name on standard entry types is blocked on save."""
++		doc = frappe.get_doc("Schedule Entry Type", "Diagnostic")
++		doc.type_name = "Diagnostic_Mutated"
++		with self.assertRaises(frappe.ValidationError):
++			doc.save()
++
++	def test_rename_bypass_deletion_prevented(self):
++		"""Adversarial test: verify that attempting to rename and then delete a standard type fails."""
++		for std_type in ["Meeting", "Internal Service"]:
++			with self.assertRaises(frappe.ValidationError):
++				frappe.rename_doc("Schedule Entry Type", std_type, f"{std_type}_Bypass", force=True)
++			doc = frappe.get_doc("Schedule Entry Type", std_type)
++			with self.assertRaises(frappe.ValidationError):
++				doc.delete()
++			self.assertTrue(frappe.db.exists("Schedule Entry Type", std_type))

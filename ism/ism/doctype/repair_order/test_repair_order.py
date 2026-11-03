@@ -20,7 +20,6 @@ class TestRepairOrder(ISMTestCase):
 		super().setUp()
 		self.customer = self.create_test_customer(customer_name=f"{TEST_PREFIX}Repair_Cust")
 		self.vehicle = self.create_test_vehicle(
-			vin="5YJSA1E26CF000001",
 			license_plate="REPAIR-01",
 			customer=self.customer.name,
 		)
@@ -1144,7 +1143,10 @@ class TestRepairOrder(ISMTestCase):
 
 	def test_vehicle_checking_incorporated_into_repair_order(self):
 		"""Verify that vehicle checking, intake inspection, and customer linking work directly on Repair Order."""
-		# Create an inspection template
+		# 1. Create a new customer for vehicle linking test
+		new_customer = self.create_test_customer(f"{TEST_PREFIX}Intake_Driver")
+
+		# 2. Create an inspection template
 		template = frappe.get_doc({
 			"doctype": "Inspection Template",
 			"template_name": f"{TEST_PREFIX}Intake Checklist",
@@ -1155,9 +1157,6 @@ class TestRepairOrder(ISMTestCase):
 		})
 		template.insert()
 		self.track(template)
-
-		# Create a new customer for vehicle linking test
-		new_customer = self.create_test_customer(f"{TEST_PREFIX}Intake_Driver")
 
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",

@@ -16,6 +16,10 @@ def get_data():
 		},
 		"transactions": [
 			{
+				"label": "Scheduling",
+				"items": ["Schedule Entry"],
+			},
+			{
 				"label": "Procurement & Billing",
 				"items": ["Purchase Order", "Request for Quotation", "Sales Invoice"],
 			},

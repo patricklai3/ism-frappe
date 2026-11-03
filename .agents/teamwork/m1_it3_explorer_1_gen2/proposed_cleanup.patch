@@ -1,0 +1,69 @@
+--- a/ism/tests/cleanup.py
++++ b/ism/tests/cleanup.py
+@@ -40,11 +40,14 @@ def cleanup_all_test_data(verbose: bool = True):
+ 	# 4. Clean test Quotations
+ 	_cleanup_quotations(test_customers, log)
+ 
+-	# 5. Clean test Repair Orders
++	# 5. Clean test Schedule Entries (before Repair Orders to avoid orphaned constraints)
++	_cleanup_schedule_entries(test_customers, log)
++
++	# 6. Clean test Repair Orders
+ 	_cleanup_repair_orders(test_customers, log)
+ 
+-	# 6. Clean test Vehicle Check-ins
++	# 7. Clean test Vehicle Check-ins
+ 	_cleanup_vehicle_checkins(test_customers, log)
+ 
+-	# 7. Clean test Repair Vehicles
++	# 8. Clean test Repair Vehicles
+ 	_cleanup_repair_vehicles(test_customers, log)
+ 
+-	# 8. Clean child customer links and Customers
++	# 9. Clean child customer links and Customers
+ 	_cleanup_customers(test_customers, stub_customers_created, log)
+ 
+-	# 9. Clean test Service Packages
++	# 10. Clean test Service Packages
+ 	_cleanup_service_packages(log)
+ 
+-	# 10. Clean test Items
++	# 11. Clean test Items
+ 	_cleanup_items(log)
+ 
+-	# 11. Clean test Files and signatures
++	# 12. Clean test Files and signatures
+ 	_cleanup_files(log)
+ 
+ 	frappe.db.commit()
+ 	log("Cleanup of test data completed successfully.")
+ 
++
++def _cleanup_schedule_entries(test_customers, log):
++	"""Purge test and orphaned Schedule Entry records."""
++	if not frappe.db.exists("DocType", "Schedule Entry"):
++		return
++
++	entries = frappe.get_all(
++		"Schedule Entry",
++		fields=["name", "customer", "repair_vehicle", "repair_order", "title", "provisional_customer_name"],
++	)
++	for se in entries:
++		is_test = False
++		if se.customer and (se.customer in test_customers or any(se.customer.startswith(p) for p in TEST_CUST_PREFIXES)):
++			is_test = True
++		elif se.repair_vehicle and se.repair_vehicle in TEST_VINS:
++			is_test = True
++		elif se.provisional_customer_name and any(se.provisional_customer_name.startswith(p) for p in TEST_CUST_PREFIXES):
++			is_test = True
++		elif se.title and (TEST_PREFIX in se.title or any(se.title.startswith(p) for p in TEST_CUST_PREFIXES)):
++			is_test = True
++		elif se.repair_order and not frappe.db.exists("Repair Order", se.repair_order):
++			is_test = True
++
++		if is_test:
++			try:
++				frappe.delete_doc("Schedule Entry", se.name, force=True, ignore_permissions=True)
++				log(f"Deleted test Schedule Entry: {se.name}")
++			except Exception as e:
++				log(f"Failed deleting test Schedule Entry {se.name}: {e}")

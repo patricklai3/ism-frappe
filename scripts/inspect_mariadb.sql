@@ -1,0 +1,10 @@
+SELECT name, type_name, color, requires_repair_order, description FROM `tabSchedule Entry Type`;
+SELECT name, tag_name, description FROM `tabEquipment Tag`;
+SELECT name, bay_name, is_active FROM `tabService Bay`;
+SELECT parent, equipment_tag FROM `tabService Bay Equipment`;
+SELECT field, value FROM `tabSingles` WHERE doctype = 'ISM Settings' ORDER BY field;
+SELECT parent, role, `read`, `write`, `create`, `delete` FROM `tabDocPerm` WHERE parent = 'ISM Settings';
+SELECT count(*) AS count_schedule_entry FROM `tabSchedule Entry`;
+SELECT count(*) AS count_service_bay FROM `tabService Bay`;
+SELECT count(*) AS count_schedule_entry_type FROM `tabSchedule Entry Type`;
+SELECT count(*) AS count_equipment_tag FROM `tabEquipment Tag`;

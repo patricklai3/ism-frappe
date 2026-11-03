@@ -26,7 +26,10 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/ism/css/ism.css"
-app_include_js = ["/assets/ism/js/parts_manager.js"]
+app_include_js = [
+	"/assets/ism/js/parts_manager.js",
+	"/assets/ism/js/scheduling_modal.js?v=3",
+]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/ism/css/ism.css"
@@ -140,7 +143,7 @@ after_install = "ism.setup.after_install"
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
 # }
 
-after_migrate = ["ism.setup.after_migrate"]
+after_migrate = "ism.setup.after_migrate"
 
 website_route_rules = [
 	{"from_route": "/quote-approval", "to_route": "quote_approval"},
@@ -219,7 +222,7 @@ doc_events = {
 # Ignore links to specified DocTypes when deleting documents
 # -----------------------------------------------------------
 
-# ignore_links_on_delete = ["Communication", "ToDo"]
+ignore_links_on_delete = ["Repair Order Schedule Entry"]
 
 # Request Events
 # ----------------

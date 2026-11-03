@@ -13,7 +13,25 @@
   "sms_gateway_provider",
   "sms_gateway_endpoint",
   "sms_gateway_api_key",
-  "sms_sender_id"
+  "sms_sender_id",
+  "sb_scheduling",
+  "operating_hours_start",
+  "operating_hours_end",
+  "break_start",
+  "break_end",
+  "cb_scheduling",
+  "default_slot_interval",
+  "scheduling_horizon_days",
+  "holiday_list",
+  "sb_capacity",
+  "technician_designation",
+  "enable_technician_capacity",
+  "sb_estimation",
+  "estimation_percentile",
+  "estimation_sigma",
+  "cb_estimation",
+  "buffer_padding_minutes",
+  "default_diagnostic_duration"
  ],
  "fields": [
   {
@@ -72,11 +90,117 @@
    "fieldname": "sms_sender_id",
    "fieldtype": "Data",
    "label": "Sender ID / From Number"
+  },
+  {
+   "fieldname": "sb_scheduling",
+   "fieldtype": "Section Break",
+   "label": "Scheduling & Shop Hours"
+  },
+  {
+   "default": "08:00:00",
+   "fieldname": "operating_hours_start",
+   "fieldtype": "Time",
+   "label": "Operating Hours Start",
+   "reqd": 1
+  },
+  {
+   "default": "17:00:00",
+   "fieldname": "operating_hours_end",
+   "fieldtype": "Time",
+   "label": "Operating Hours End",
+   "reqd": 1
+  },
+  {
+   "default": "12:00:00",
+   "fieldname": "break_start",
+   "fieldtype": "Time",
+   "label": "Break Start"
+  },
+  {
+   "default": "12:30:00",
+   "fieldname": "break_end",
+   "fieldtype": "Time",
+   "label": "Break End"
+  },
+  {
+   "fieldname": "cb_scheduling",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "30",
+   "fieldname": "default_slot_interval",
+   "fieldtype": "Int",
+   "label": "Default Slot Interval (Minutes)",
+   "reqd": 1
+  },
+  {
+   "default": "30",
+   "fieldname": "scheduling_horizon_days",
+   "fieldtype": "Int",
+   "label": "Scheduling Horizon (Days)",
+   "reqd": 1
+  },
+  {
+   "fieldname": "holiday_list",
+   "fieldtype": "Link",
+   "label": "Holiday List",
+   "options": "Holiday List"
+  },
+  {
+   "fieldname": "sb_capacity",
+   "fieldtype": "Section Break",
+   "label": "Resource Capacity"
+  },
+  {
+   "default": "Technician",
+   "fieldname": "technician_designation",
+   "fieldtype": "Data",
+   "label": "Technician Designation"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_technician_capacity",
+   "fieldtype": "Check",
+   "label": "Enable Technician Capacity"
+  },
+  {
+   "fieldname": "sb_estimation",
+   "fieldtype": "Section Break",
+   "label": "Duration Estimation Tuning"
+  },
+  {
+   "default": "80.0",
+   "fieldname": "estimation_percentile",
+   "fieldtype": "Percent",
+   "label": "Estimation Percentile Target"
+  },
+  {
+   "default": "0.30",
+   "fieldname": "estimation_sigma",
+   "fieldtype": "Float",
+   "label": "Estimation Sigma (Dispersion)",
+   "precision": "2"
+  },
+  {
+   "fieldname": "cb_estimation",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "buffer_padding_minutes",
+   "fieldtype": "Int",
+   "label": "Buffer Padding (Minutes)"
+  },
+  {
+   "default": "60",
+   "fieldname": "default_diagnostic_duration",
+   "fieldtype": "Int",
+   "label": "Default Diagnostic Duration (Minutes)"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-06 00:00:00.000000",
+ "modified": "2026-10-26 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",
@@ -91,6 +215,18 @@
    "read": 1,
    "report": 1,
    "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
    "share": 1,
    "write": 1
   }

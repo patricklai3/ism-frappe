@@ -20,12 +20,14 @@ from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
 
 class TestTeslaIntegration(ISMTestCase):
 	def setUp(self):
+		frappe.db.rollback()
 		super().setUp()
 		_MANIFEST_CACHE.clear()
 
 	def tearDown(self):
 		_MANIFEST_CACHE.clear()
 		super().tearDown()
+		frappe.db.rollback()
 
 	def test_category_taxonomy_mapping(self):
 		# 00 -> INSPECTION AND SERVICE
@@ -229,7 +231,7 @@ class TestTeslaIntegration(ISMTestCase):
 			manufactured_month="05/22",
 		)
 		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name)
-		self.track(ro)
+
 
 		proc_payload = {
 			"title": "Basic Vehicle Inspection (Inspection)",

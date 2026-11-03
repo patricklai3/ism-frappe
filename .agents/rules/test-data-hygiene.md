@@ -1,6 +1,6 @@
 ---
 description: Test data cleanup and teardown rules to prevent records leaking into Desk lists
-globs: ["**/test_*.py", "**/tests/**"]
+globs: "**/test_*.py, **/tests/**"
 ---
 
 # Test Data Hygiene & Teardown Rules

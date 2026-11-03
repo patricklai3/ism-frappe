@@ -1,0 +1,44 @@
+--- a/ism/ism/doctype/ism_settings/test_ism_settings.py
++++ b/ism/ism/doctype/ism_settings/test_ism_settings.py
+@@ -32,12 +32,35 @@ class TestISMSettings(ISMTestCase):
+ 		if hasattr(frappe.db, "value_cache"):
+ 			frappe.db.value_cache.clear()
+ 
+-		# Establish deterministic canonical baseline state once per test class
+-		frappe.db.set_single_value("ISM Settings", CANONICAL_ISM_SETTINGS)
+-		frappe.clear_cache(doctype="ISM Settings")
+-		if hasattr(frappe.db, "value_cache"):
+-			frappe.db.value_cache.clear()
+-		frappe.db.commit()
++		# Zero-churn conditional baseline check: only update tabSingles if baseline diverged
++		current_settings = frappe.db.get_singles_dict("ISM Settings")
++		divergent = {}
++		for fieldname, expected_val in CANONICAL_ISM_SETTINGS.items():
++			curr_val = current_settings.get(fieldname) if current_settings else None
++			if curr_val is None:
++				divergent[fieldname] = expected_val
++			elif isinstance(expected_val, float):
++				try:
++					if abs(float(curr_val) - expected_val) > 1e-4:
++						divergent[fieldname] = expected_val
++				except (ValueError, TypeError):
++					divergent[fieldname] = expected_val
++			elif isinstance(expected_val, int):
++				try:
++					if int(curr_val) != expected_val:
++						divergent[fieldname] = expected_val
++				except (ValueError, TypeError):
++					divergent[fieldname] = expected_val
++			else:
++				if str(curr_val) != str(expected_val):
++					divergent[fieldname] = expected_val
++
++		if divergent:
++			frappe.db.set_single_value("ISM Settings", divergent)
++			frappe.clear_cache(doctype="ISM Settings")
++			if hasattr(frappe.db, "value_cache"):
++				frappe.db.value_cache.clear()
++			frappe.db.commit()
+ 
+ 	@classmethod
+ 	def tearDownClass(cls):

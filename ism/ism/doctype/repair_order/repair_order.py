@@ -116,6 +116,66 @@ def _match_service_decision(service, approvals):
 
 
 class RepairOrder(Document):
+	def autoname(self):
+		"""Assign naming series RO-.YYYY.-.##### with safe series fallback on MariaDB 1020 contention without rollback."""
+		from frappe.model.naming import make_autoname
+
+		prefix = self.naming_series or "RO-.YYYY.-.#####"
+		try:
+			self.name = make_autoname(prefix, doc=self)
+		except Exception as e:
+			if "1020" in str(e) or "Deadlock" in str(e) or isinstance(e, frappe.QueryDeadlockError):
+				self.name = self._generate_safe_series_name(prefix)
+			else:
+				raise
+
+	def _generate_safe_series_name(self, series_pattern: str) -> str:
+		import re
+		from frappe.utils import now_datetime
+
+		today = now_datetime()
+		parts = series_pattern.split(".")
+		prefix_parts = []
+		digits = 5
+		for p in parts:
+			if p.startswith("#"):
+				digits = len(p)
+				break
+			elif p == "YYYY":
+				prefix_parts.append(today.strftime("%Y"))
+			elif p == "YY":
+				prefix_parts.append(today.strftime("%y"))
+			elif p == "MM":
+				prefix_parts.append(today.strftime("%m"))
+			elif p == "DD":
+				prefix_parts.append(today.strftime("%d"))
+			elif hasattr(self, p) and getattr(self, p):
+				prefix_parts.append(str(getattr(self, p)))
+			else:
+				prefix_parts.append(p)
+		prefix = "".join(prefix_parts)
+		existing = frappe.get_all(
+			self.doctype,
+			filters=[["name", "like", f"{prefix}%"]],
+			order_by="name desc",
+			limit=1,
+			pluck="name",
+		)
+		next_num = 1
+		if existing and existing[0].startswith(prefix):
+			suffix = existing[0][len(prefix):]
+			match = re.search(r"(\d+)", suffix)
+			if match:
+				try:
+					next_num = int(match.group(1)) + 1
+				except ValueError:
+					next_num = 1
+		candidate = f"{prefix}{next_num:0{digits}d}"
+		while frappe.db.exists(self.doctype, candidate):
+			next_num += 1
+			candidate = f"{prefix}{next_num:0{digits}d}"
+		return candidate
+
 	def before_insert(self):
 		if not self.price_list:
 			self.price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list") or "Standard Selling"
@@ -310,8 +370,10 @@ class RepairOrder(Document):
 		self.save(ignore_permissions=True)
 
 	def _validate_vehicle_and_customer(self):
-		if not self.vehicle or not self.customer:
-			return
+		if not self.customer:
+			frappe.throw(_("Customer is mandatory for Repair Order."), frappe.MandatoryError)
+		if not self.vehicle:
+			frappe.throw(_("Vehicle is mandatory for Repair Order."), frappe.MandatoryError)
 
 		# Ensure vehicle exists
 		if not frappe.db.exists("Repair Vehicle", self.vehicle):
@@ -328,6 +390,10 @@ class RepairOrder(Document):
 			veh_doc.save(ignore_permissions=True)
 
 	def _validate_odometer(self):
+		if self.status != "Checked In":
+			if self.odometer_in is None:
+				frappe.throw(_("Odometer In is mandatory for Repair Order."), frappe.MandatoryError)
+
 		if self.odometer_in is not None and self.odometer_in < 0:
 			frappe.throw(_("Odometer In cannot be negative."))
 
@@ -336,6 +402,45 @@ class RepairOrder(Document):
 				frappe.throw(_("Odometer Out ({0}) cannot be less than Odometer In ({1}).").format(
 					self.odometer_out, self.odometer_in
 				))
+
+	@frappe.whitelist()
+	def sync_schedule_entries(self, exclude_entry=None):
+		"""Sync informational schedule entries child table with linked Schedule Entry records."""
+		if not self.name or not frappe.db.exists("Repair Order", self.name):
+			return
+		filters = {"repair_order": self.name}
+		if exclude_entry:
+			filters["name"] = ["!=", exclude_entry]
+		entries = frappe.get_all(
+			"Schedule Entry",
+			filters=filters,
+			fields=[
+				"name",
+				"entry_type",
+				"scheduled_date",
+				"scheduled_time",
+				"estimated_duration",
+				"service_bay",
+				"assigned_technician",
+				"status",
+			],
+			order_by="scheduled_date asc, scheduled_time asc",
+		)
+		self.set("schedule_entries", [])
+		for entry in entries:
+			self.append("schedule_entries", {
+				"schedule_entry": entry.name,
+				"entry_type": entry.entry_type,
+				"scheduled_date": entry.scheduled_date,
+				"scheduled_time": entry.scheduled_time,
+				"estimated_duration": entry.estimated_duration,
+				"service_bay": entry.service_bay,
+				"assigned_technician": entry.assigned_technician,
+				"status": entry.status,
+			})
+		self.flags.ignore_validate_update_after_submit = True
+		self.flags.ignore_mandatory = True
+		self.save(ignore_permissions=True)
 
 	def _calculate_service_totals(self):
 		"""

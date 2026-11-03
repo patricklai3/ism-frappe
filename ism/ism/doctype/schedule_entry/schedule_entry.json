@@ -1,0 +1,279 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "naming_series:",
+ "creation": "2026-10-26 12:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "entry_type",
+  "status",
+  "title",
+  "column_break_schedule",
+  "scheduled_date",
+  "scheduled_time",
+  "estimated_duration",
+  "section_break_ro",
+  "repair_order",
+  "column_break_customer",
+  "customer",
+  "provisional_customer_name",
+  "provisional_phone",
+  "provisional_email",
+  "section_break_vehicle",
+  "repair_vehicle",
+  "provisional_vehicle_info",
+  "column_break_assignment",
+  "service_bay",
+  "assigned_technician",
+  "section_break_notes",
+  "items_summary",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "SE-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "SE-.#####",
+   "set_only_once": 1
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "default": "Diagnostic",
+   "fieldname": "entry_type",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Entry Type",
+   "options": "Schedule Entry Type",
+   "reqd": 1
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nScheduled\nIn Progress\nCompleted\nCancelled",
+   "reqd": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Title",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_schedule",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "scheduled_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Scheduled Date",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "scheduled_time",
+   "fieldtype": "Time",
+   "in_list_view": 1,
+   "label": "Scheduled Time",
+   "reqd": 1
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "default": "60",
+   "fieldname": "estimated_duration",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Estimated Duration (mins)",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_ro",
+   "fieldtype": "Section Break",
+   "label": "Repair Order & Customer"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "repair_order",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Repair Order",
+   "options": "Repair Order",
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_customer",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "search_index": 1
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "depends_on": "eval:!doc.customer",
+   "fieldname": "provisional_customer_name",
+   "fieldtype": "Data",
+   "label": "Provisional Customer Name"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "depends_on": "eval:!doc.customer",
+   "fieldname": "provisional_phone",
+   "fieldtype": "Data",
+   "label": "Provisional Phone"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "depends_on": "eval:!doc.customer",
+   "fieldname": "provisional_email",
+   "fieldtype": "Data",
+   "label": "Provisional Email",
+   "options": "Email"
+  },
+  {
+   "fieldname": "section_break_vehicle",
+   "fieldtype": "Section Break",
+   "label": "Vehicle & Resources"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "repair_vehicle",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Repair Vehicle",
+   "options": "Repair Vehicle",
+   "search_index": 1
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_vehicle_info",
+   "fieldtype": "Data",
+   "label": "Provisional Vehicle Info"
+  },
+  {
+   "fieldname": "column_break_assignment",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "service_bay",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Service Bay",
+   "options": "Service Bay",
+   "search_index": 1
+  },
+  {
+   "allow_in_quick_entry": 1,
+   "fieldname": "assigned_technician",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Assigned Technician",
+   "options": "Employee",
+   "search_index": 1
+  },
+  {
+   "fieldname": "section_break_notes",
+   "fieldtype": "Section Break",
+   "label": "Summary & Notes"
+  },
+  {
+   "fieldname": "items_summary",
+   "fieldtype": "Long Text",
+   "label": "Items / Services Summary",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "is_calendar_and_gantt": 1,
+ "links": [],
+ "modified": "2026-10-26 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Schedule Entry",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Maintenance User",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "quick_entry": 0,
+ "row_format": "Dynamic",
+ "search_fields": "repair_order,customer,provisional_customer_name,repair_vehicle,service_bay,assigned_technician,status",
+ "show_name_in_global_search": 1,
+ "sort_field": "scheduled_date",
+ "sort_order": "DESC",
+ "title_field": "title",
+ "track_changes": 1
+}

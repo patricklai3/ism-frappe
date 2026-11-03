@@ -15,6 +15,7 @@ frappe.listview_settings["Repair Order"] = {
 	],
 	get_indicator: function (doc) {
 		const status_colors = {
+			"Checked In": "blue",
 			"Draft Estimate": "orange",
 			"Pending Authorization": "yellow",
 			"Authorized - In Progress": "blue",

@@ -88,18 +88,69 @@ def create_standard_inspection_template():
 def setup_default_ism_settings():
 	"""Initialize default ISM Settings if not populated."""
 	settings = frappe.get_single("ISM Settings")
+	changed = False
+
+	# Customer Approval Settings
 	if not settings.authorization_token_expiry_hours:
 		settings.authorization_token_expiry_hours = 48
+		changed = True
 	if not settings.cost_tolerance_percentage:
 		settings.cost_tolerance_percentage = 10.0
+		changed = True
 	if not settings.cost_tolerance_flat_amount:
 		settings.cost_tolerance_flat_amount = 50.0
+		changed = True
 	if not settings.disclaimer_text:
 		settings.disclaimer_text = (
 			"I hereby authorize the repair work listed above to be done along with the necessary materials. "
 			"You and your employees may operate the vehicle for purpose of testing, inspection, or delivery."
 		)
-	settings.save(ignore_permissions=True)
+		changed = True
+
+	# Scheduling & Shop Hours
+	if not settings.operating_hours_start:
+		settings.operating_hours_start = "08:00:00"
+		changed = True
+	if not settings.operating_hours_end:
+		settings.operating_hours_end = "17:00:00"
+		changed = True
+	if not settings.break_start:
+		settings.break_start = "12:00:00"
+		changed = True
+	if not settings.break_end:
+		settings.break_end = "12:30:00"
+		changed = True
+	if not settings.default_slot_interval:
+		settings.default_slot_interval = 30
+		changed = True
+	if not settings.scheduling_horizon_days:
+		settings.scheduling_horizon_days = 30
+		changed = True
+
+	# Resource Capacity
+	if not settings.technician_designation:
+		settings.technician_designation = "Technician"
+		changed = True
+	if settings.get("enable_technician_capacity") is None:
+		settings.enable_technician_capacity = 1
+		changed = True
+
+	# Duration Estimation Tuning
+	if not settings.estimation_percentile:
+		settings.estimation_percentile = 80.0
+		changed = True
+	if not settings.estimation_sigma:
+		settings.estimation_sigma = 0.30
+		changed = True
+	if settings.get("buffer_padding_minutes") is None:
+		settings.buffer_padding_minutes = 0
+		changed = True
+	if not settings.default_diagnostic_duration:
+		settings.default_diagnostic_duration = 60
+		changed = True
+
+	if changed or settings.is_new():
+		settings.save(ignore_permissions=True)
 
 
 def ensure_doctype_creation_enabled():
@@ -423,10 +474,16 @@ def setup_item_custom_fields():
 			"fieldtype": "Data",
 			"insert_after": "oem_part_number",
 		},
+		{
+			"fieldname": "custom_frt",
+			"label": "Flat Rate Time (Hours)",
+			"fieldtype": "Float",
+			"insert_after": "revision",
+		},
 	]
 
 	create_custom_fields({"Item": fields}, update=True)
-
+	frappe.db.commit()
 
 
 def backfill_service_package_models():
@@ -435,6 +492,8 @@ def backfill_service_package_models():
 
 	if not frappe.db.has_column("Service Package", "applicable_model"):
 		return 0
+
+	frappe.db.commit()
 
 	count = 0
 	packages = frappe.get_all("Service Package", fields=["name", "tesla_manual_url", "applicable_model", "applicable_generation"])
@@ -458,6 +517,7 @@ def backfill_service_package_models():
 			WHERE (ros.applicable_model IS NULL OR ros.applicable_model = '')
 			  AND (sp.applicable_model IS NOT NULL AND sp.applicable_model != '')
 		""")
+		frappe.db.commit()
 
 	return count
 
@@ -501,24 +561,149 @@ def setup_procurement_custom_fields():
 		"Request for Quotation": rfq_fields,
 		"Sales Invoice": si_fields,
 	}, update=True)
+	frappe.db.commit()
+
+
+DEFAULT_EQUIPMENT_TAGS = [
+	{
+		"tag_name": "Lift",
+		"description": "Standard automotive lift (2-post / 4-post)",
+	},
+	{
+		"tag_name": "EV High Voltage",
+		"description": "High voltage isolation and battery service equipment",
+	},
+	{
+		"tag_name": "Alignment Rack",
+		"description": "3D optical wheel alignment rack and sensor system",
+	},
+]
+
+
+def seed_equipment_tags():
+	"""Idempotently seed standard default Equipment Tag records."""
+	if not frappe.db.exists("DocType", "Equipment Tag"):
+		return
+	for tag in DEFAULT_EQUIPMENT_TAGS:
+		if not frappe.db.exists("Equipment Tag", tag["tag_name"]):
+			doc = frappe.get_doc({
+				"doctype": "Equipment Tag",
+				"tag_name": tag["tag_name"],
+				"description": tag["description"],
+			})
+			doc.insert(ignore_permissions=True)
+
+
+def ensure_ism_roles():
+	"""Ensure standard ISM roles exist with appropriate Desk access."""
+	roles = [
+		{"role_name": "ISM Manager", "desk_access": 1},
+	]
+	for r in roles:
+		if not frappe.db.exists("Role", r["role_name"]):
+			try:
+				doc = frappe.get_doc({
+					"doctype": "Role",
+					"role_name": r["role_name"],
+					"desk_access": r["desk_access"],
+				})
+				doc.insert(ignore_permissions=True)
+			except Exception as e:
+				frappe.logger("ism").warning(f"Could not seed role {r['role_name']}: {e}")
+
+
+STANDARD_SCHEDULE_ENTRY_TYPES = [
+	{
+		"type_name": "Diagnostic",
+		"color": "#1f538d",
+		"requires_repair_order": 0,
+		"description": "Initial vehicle inspection and diagnostic appointment",
+	},
+	{
+		"type_name": "Repair",
+		"color": "#2e7d32",
+		"requires_repair_order": 1,
+		"description": "Authorized vehicle repair service",
+	},
+	{
+		"type_name": "Maintenance",
+		"color": "#0284c7",
+		"requires_repair_order": 1,
+		"description": "Scheduled maintenance and inspection service",
+	},
+	{
+		"type_name": "Meeting",
+		"color": "#7b1fa2",
+		"requires_repair_order": 0,
+		"description": "Internal staff or shop meeting",
+	},
+	{
+		"type_name": "Internal Service",
+		"color": "#ef6c00",
+		"requires_repair_order": 0,
+		"description": "Internal shop vehicle service or bay maintenance",
+	},
+]
+
+
+def seed_schedule_entry_types():
+	"""Seed standard Schedule Entry Types idempotently."""
+	if not frappe.db.exists("DocType", "Schedule Entry Type"):
+		return
+
+	for item in STANDARD_SCHEDULE_ENTRY_TYPES:
+		if not frappe.db.exists("Schedule Entry Type", item["type_name"]):
+			doc = frappe.get_doc({
+				"doctype": "Schedule Entry Type",
+				"type_name": item["type_name"],
+				"requires_repair_order": item["requires_repair_order"],
+				"color": item["color"],
+				"description": item["description"],
+			})
+			doc.insert(ignore_permissions=True)
+		else:
+			existing = frappe.get_doc("Schedule Entry Type", item["type_name"])
+			updated = False
+			if existing.requires_repair_order != item["requires_repair_order"]:
+				existing.requires_repair_order = item["requires_repair_order"]
+				updated = True
+			if existing.color != item["color"]:
+				existing.color = item["color"]
+				updated = True
+			if existing.description != item["description"]:
+				existing.description = item["description"]
+				updated = True
+			if updated:
+				existing.save(ignore_permissions=True)
 
 
 def after_migrate():
 	"""Run migrations and setup tasks for ISM."""
-	cleanup_legacy_custom_fields()
-	create_standard_inspection_template()
+	# 1. Core Scheduling Seeders & ISM Settings (must execute first and idempotently)
+	ensure_ism_roles()
 	setup_default_ism_settings()
+	seed_equipment_tags()
+	seed_schedule_entry_types()
+
+	# 2. Master Setup & DocType Permissions
+	create_standard_inspection_template()
 	ensure_doctype_creation_enabled()
+
+	# 3. ERPNext Integration & Custom Field Definitions
+	cleanup_legacy_custom_fields()
 	setup_default_taxes_and_payments()
 	setup_parts_item_group()
 	setup_item_custom_fields()
 	setup_procurement_custom_fields()
+
+	# 4. Historical Data Backfills
 	backfill_service_package_models()
 
 
 def after_install():
 	"""Run installation tasks for ISM on fresh site installs."""
 	after_migrate()
+
 
 
 

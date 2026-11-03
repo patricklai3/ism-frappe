@@ -28,6 +28,7 @@
   "parts",
   "sec_execution",
   "assigned_technician",
+  "schedule_entry",
   "completed_at",
   "completed_by",
   "actual_duration_hours",
@@ -260,6 +261,14 @@
    "in_list_view": 1,
    "label": "Side / Position",
    "options": "None\nLH\nRH"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "schedule_entry",
+   "fieldtype": "Link",
+   "label": "Schedule Entry",
+   "options": "Schedule Entry",
+   "read_only": 1
   }
  ],
  "istable": 1,

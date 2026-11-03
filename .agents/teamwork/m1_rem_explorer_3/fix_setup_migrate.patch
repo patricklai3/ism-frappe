@@ -1,0 +1,61 @@
+--- a/ism/setup.py
++++ b/ism/setup.py
+@@ -476,6 +476,7 @@ def setup_item_custom_fields():
+ 	]
+ 
+ 	create_custom_fields({"Item": fields}, update=True)
++	frappe.db.commit()
+ 
+ 
+ def backfill_service_package_models():
+@@ -485,6 +486,8 @@ def backfill_service_package_models():
+ 	if not frappe.db.has_column("Service Package", "applicable_model"):
+ 		return 0
+ 
++	frappe.db.commit()
++
+ 	count = 0
+ 	packages = frappe.get_all("Service Package", fields=["name", "tesla_manual_url", "applicable_model", "applicable_generation"])
+ 	for p in packages:
+@@ -510,6 +513,7 @@ def backfill_service_package_models():
+ 			WHERE (ros.applicable_model IS NULL OR ros.applicable_model = '')
+ 			  AND (sp.applicable_model IS NOT NULL AND sp.applicable_model != '')
+ 		""")
++		frappe.db.commit()
+ 
+ 	return count
+ 
+@@ -552,6 +556,7 @@ def setup_procurement_custom_fields():
+ 		"Request for Quotation": rfq_fields,
+ 		"Sales Invoice": si_fields,
+ 	}, update=True)
++	frappe.db.commit()
+ 
+ 
+ DEFAULT_EQUIPMENT_TAGS = [
+@@ -670,15 +675,20 @@ def seed_schedule_entry_types():
+ def after_migrate():
+ 	"""Run migrations and setup tasks for ISM."""
++	# 1. Core Scheduling Seeders & ISM Settings (must execute first and idempotently)
+ 	ensure_ism_roles()
+-	cleanup_legacy_custom_fields()
+-	create_standard_inspection_template()
+ 	setup_default_ism_settings()
++	seed_equipment_tags()
++	seed_schedule_entry_types()
++
++	# 2. Master Setup & DocType Permissions
++	create_standard_inspection_template()
+ 	ensure_doctype_creation_enabled()
++
++	# 3. ERPNext Integration & Custom Field Definitions
++	cleanup_legacy_custom_fields()
+ 	setup_default_taxes_and_payments()
+ 	setup_parts_item_group()
+ 	setup_item_custom_fields()
+ 	setup_procurement_custom_fields()
++
++	# 4. Historical Data Backfills
+ 	backfill_service_package_models()
+-	seed_equipment_tags()
+-	seed_schedule_entry_types()

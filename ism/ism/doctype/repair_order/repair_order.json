@@ -28,6 +28,7 @@
   "inspection_items",
   "sec_concerns",
   "customer_concern",
+  "origin_schedule_entry",
   "tab_estimate",
   "sec_services",
   "services_tree_html",
@@ -67,6 +68,8 @@
   "override_notes",
   "sec_workshop_tasks",
   "workshop_tasks_html",
+  "sec_schedule_allocations",
+  "schedule_entries",
   "sec_time",
   "time_logs",
   "tab_billing",
@@ -159,7 +162,7 @@
    "fieldname": "odometer_in",
    "fieldtype": "Int",
    "label": "Odometer In",
-   "reqd": 1
+   "mandatory_depends_on": "eval:doc.status != 'Checked In'"
   },
   {
    "allow_on_submit": 1,
@@ -182,7 +185,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Draft Estimate\nPending Authorization\nAuthorized - In Progress\nWaiting on Parts\nWork Completed\nBilled / Paid\nClosed / Released\nCancelled",
+   "options": "Checked In\nDraft Estimate\nPending Authorization\nAuthorized - In Progress\nWaiting on Parts\nWork Completed\nBilled / Paid\nClosed / Released\nCancelled",
    "reqd": 1,
    "search_index": 1
   },
@@ -500,6 +503,22 @@
    "label": "Workshop Job Cards"
   },
   {
+   "collapsible": 1,
+   "fieldname": "sec_schedule_allocations",
+   "fieldtype": "Section Break",
+   "label": "Schedule Allocations"
+  },
+  {
+   "allow_on_submit": 1,
+   "cannot_add_rows": 1,
+   "cannot_delete_rows": 1,
+   "fieldname": "schedule_entries",
+   "fieldtype": "Table",
+   "label": "Schedule Allocations",
+   "options": "Repair Order Schedule Entry",
+   "read_only": 1
+  },
+  {
    "fieldname": "sec_time",
    "fieldtype": "Section Break",
    "label": "Bay Time Logs"
@@ -558,6 +577,14 @@
    "fieldtype": "Currency",
    "label": "Outstanding Amount",
    "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "origin_schedule_entry",
+   "fieldtype": "Link",
+   "label": "Origin Schedule Entry",
+   "options": "Schedule Entry",
+   "read_only": 1
   }
  ],
  "is_submittable": 0,
@@ -605,6 +632,10 @@
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": [
+  {
+   "color": "Blue",
+   "title": "Checked In"
+  },
   {
    "color": "Orange",
    "title": "Draft Estimate"

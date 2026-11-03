@@ -1,0 +1,104 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:bay_name",
+ "creation": "2026-10-26 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "bay_name",
+  "is_active",
+  "description",
+  "sb_equipment",
+  "equipment"
+ ],
+ "fields": [
+  {
+   "fieldname": "bay_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Bay Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Active"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "sb_equipment",
+   "fieldtype": "Section Break",
+   "label": "Equipment Tags"
+  },
+  {
+   "fieldname": "equipment",
+   "fieldtype": "Table",
+   "label": "Equipment Tags",
+   "options": "Service Bay Equipment"
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Service Bay",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Maintenance User"
+  },
+  {
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User"
+  }
+ ],
+ "quick_entry": 1,
+ "row_format": "Dynamic",
+ "show_name_in_global_search": 1,
+ "sort_field": "bay_name",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "bay_name",
+ "track_changes": 1
+}
