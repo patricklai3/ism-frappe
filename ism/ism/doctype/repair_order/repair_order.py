@@ -326,6 +326,8 @@ class RepairOrder(Document):
 
 	def _update_parts_waiting_status(self):
 		"""Update status between 'Waiting on Parts' and 'Authorized - In Progress' based on inventory."""
+		if getattr(self, "has_shop_floor_override", 0):
+			return
 		if self.approval_status in ["Approved", "Partially Approved"]:
 			if self.status in ["Draft Estimate", "Pending Authorization", "Waiting on Parts", "Authorized - In Progress", "", None]:
 				all_available, _ = self._check_parts_stock_availability()

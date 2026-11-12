@@ -305,9 +305,12 @@ def get_default_warehouse(company=None):
 	"""
 	if company:
 		# Check if Stock Settings default_warehouse belongs to this company
-		stock_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse")
-		if stock_wh and frappe.db.exists("Warehouse", {"name": stock_wh, "company": company, "is_group": 0}):
-			return stock_wh
+		try:
+			stock_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse")
+			if stock_wh and frappe.db.exists("Warehouse", {"name": stock_wh, "company": company, "is_group": 0}):
+				return stock_wh
+		except Exception:
+			pass
 
 		# Check default_warehouse in Company doc
 		try:
@@ -328,9 +331,12 @@ def get_default_warehouse(company=None):
 			return wh
 
 	# If no company provided or no warehouse found for specified company:
-	wh = frappe.db.get_single_value("Stock Settings", "default_warehouse")
-	if wh and frappe.db.exists("Warehouse", {"name": wh, "is_group": 0}):
-		return wh
+	try:
+		wh = frappe.db.get_single_value("Stock Settings", "default_warehouse")
+		if wh and frappe.db.exists("Warehouse", {"name": wh, "is_group": 0}):
+			return wh
+	except Exception:
+		pass
 
 	default_company = frappe.db.get_single_value("Global Defaults", "default_company")
 	if default_company:
@@ -338,9 +344,8 @@ def get_default_warehouse(company=None):
 		if wh:
 			return wh
 
-	wh = frappe.db.get_value("Warehouse", {"is_group": 0}, "name")
-	if wh:
-		return wh
+	# Fallback: any non-group warehouse in system
+	return frappe.db.get_value("Warehouse", {"is_group": 0}, "name")
 
 	return "Stores"
 
