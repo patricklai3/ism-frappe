@@ -26,36 +26,7 @@ frappe.ui.form.on("Service Package", {
 	},
 
 	open_parts_importer(frm) {
-		const launch = () => {
-			ism.parts.show_quick_importer({
-				service_package: frm.doc.name,
-				callback: (created_items) => {
-					created_items.forEach((it) => {
-						const row = frm.add_child("items");
-						const s_num = it.slot_number != null ? it.slot_number : 1;
-						row.slot_number = s_num;
-						row.component_slot = it.component_slot || (s_num > 0 ? `Slot ${s_num}` : "Unassigned");
-						row.item_code = it.item_code;
-						row.item_name = it.item_name;
-						row.part_source = it.part_source;
-						row.part_condition = it.part_condition;
-						row.oem_part_number = it.oem_part_number;
-						row.warranty_period = it.warranty_period;
-						row.qty = flt(it.qty) || 1.0;
-						row.rate = flt(it.unit_rate) || 0.0;
-						const slot_rows = (frm.doc.items || []).filter(r => r.slot_number === row.slot_number);
-						row.is_default = slot_rows.length <= 1 ? 1 : 0;
-					});
-					frm.refresh_field("items");
-				},
-			});
-		};
-
-		if (window.ism && ism.parts && ism.parts.show_quick_importer) {
-			launch();
-		} else {
-			frappe.require("/assets/ism/js/parts_manager.js", launch);
-		}
+		frappe.msgprint(__("Parts import is now handled via the Agent Layer (`import_supplier_catalog`). You can also add rows directly to the Items table below."));
 	},
 
 	btn_open_tesla_manual(frm) {

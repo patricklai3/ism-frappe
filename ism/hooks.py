@@ -27,7 +27,6 @@ app_license = "mit"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/ism/css/ism.css"
 app_include_js = [
-	"/assets/ism/js/parts_manager.js",
 	"/assets/ism/js/scheduling_modal.js?v=3",
 ]
 
@@ -46,13 +45,7 @@ app_include_js = [
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-doctype_js = {
-	"Material Request": "public/js/purchasing_parts_importer.js",
-	"Purchase Order": "public/js/purchasing_parts_importer.js",
-	"Purchase Receipt": "public/js/purchasing_parts_importer.js",
-	"Purchase Invoice": "public/js/purchasing_parts_importer.js",
-	"Supplier Quotation": "public/js/purchasing_parts_importer.js",
-}
+# doctype_js = {}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}

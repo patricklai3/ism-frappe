@@ -3350,10 +3350,7 @@ ism.parts.get_model_badge = function (model, extra_class = "") {
 	return `<span class="badge ${extra_class}" style="background-color: ${bg}; color: ${color}; border: 1px solid ${border}; font-size: 11px; padding: 2px 7px; border-radius: 4px; font-weight: 600;"><i class="fa fa-car mr-1" style="opacity: 0.7;"></i>${frappe.utils.escape_html(m)}</span>`;
 };
 
-// Global parts importer & alternates picker are defined in /assets/ism/js/parts_manager.js
-if (!ism.parts.show_quick_importer) {
-	frappe.require("/assets/ism/js/parts_manager.js");
-}
+// Decommissioned parts_manager.js - parts ingestion handled by Agent Layer
 
 
 function open_procure_parts_dialog(frm) {
