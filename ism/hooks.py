@@ -26,9 +26,7 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/ism/css/ism.css"
-app_include_js = [
-	"/assets/ism/js/scheduling_modal.js?v=3",
-]
+# app_include_js = []
 
 # include js, css files in header of web template
 # web_include_css = "/assets/ism/css/ism.css"

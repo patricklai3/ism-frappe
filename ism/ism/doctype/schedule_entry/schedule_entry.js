@@ -5,39 +5,6 @@ frappe.ui.form.on('Schedule Entry', {
 	refresh(frm) {
 		frm.trigger('setup_field_visibility');
 		frm.trigger('setup_buttons');
-		frm.trigger('setup_scheduler_prompt');
-	},
-
-	setup_scheduler_prompt(frm) {
-		if (frm.is_new()) {
-			frm.dashboard.set_headline(
-				__('Need to reserve shop bay and technician capacity? Open the <a class="btn-open-scheduler font-weight-bold" style="text-decoration: underline; cursor: pointer;">Shop Capacity Allocation Assistant</a>.'),
-				'blue'
-			);
-			frm.dashboard.headline.find('.btn-open-scheduler').on('click', () => {
-				frm.trigger('open_scheduling_dialog');
-			});
-		}
-	},
-
-	open_scheduling_dialog(frm) {
-		if (typeof ism !== "undefined" && ism.SchedulingDialog) {
-			new ism.SchedulingDialog({
-				frm: frm,
-				repair_order: frm.doc.repair_order,
-				scheduled_date: frm.doc.scheduled_date,
-				scheduled_time: frm.doc.scheduled_time,
-				estimated_duration: frm.doc.estimated_duration,
-				on_success: (doc) => {
-					if (frm.is_new()) {
-						frm.dirty(false);
-						frappe.set_route('Form', 'Schedule Entry', doc.name);
-					} else {
-						frm.reload_doc();
-					}
-				},
-			}).show();
-		}
 	},
 
 	entry_type(frm) {
@@ -84,10 +51,6 @@ frappe.ui.form.on('Schedule Entry', {
 	},
 
 	setup_buttons(frm) {
-		frm.add_custom_button(__('Schedule Work Allocation'), function () {
-			frm.trigger('open_scheduling_dialog');
-		});
-
 		if (!frm.is_new()) {
 			if (frm.doc.repair_order) {
 				frm.add_custom_button(__('Open Repair Order'), function () {

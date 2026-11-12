@@ -141,14 +141,26 @@ class ScheduleEntry(Document):
 			sync_repair_order_schedule_entries(prev_ro)
 		if self.repair_order:
 			sync_repair_order_schedule_entries(self.repair_order)
+		frappe.publish_realtime(
+			"ism_calendar_update",
+			{"schedule_entry": self.name, "bay": self.service_bay, "date": str(self.scheduled_date)},
+		)
 
 	def on_cancel(self):
 		if self.repair_order:
 			sync_repair_order_schedule_entries(self.repair_order)
+		frappe.publish_realtime(
+			"ism_calendar_update",
+			{"schedule_entry": self.name, "bay": self.service_bay, "date": str(self.scheduled_date)},
+		)
 
 	def on_trash(self):
 		if self.repair_order:
 			sync_repair_order_schedule_entries(self.repair_order, exclude_entry=self.name)
+		frappe.publish_realtime(
+			"ism_calendar_update",
+			{"schedule_entry": self.name, "bay": self.service_bay, "date": str(self.scheduled_date)},
+		)
 
 	@property
 	def end_time(self) -> timedelta:

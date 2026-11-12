@@ -30,19 +30,14 @@ frappe.views.calendar["Schedule Entry"] = {
 		editable: false,
 		selectable: true,
 		select: function (selectionInfo) {
-			if (typeof ism !== "undefined" && ism.SchedulingDialog) {
-				const start_date = selectionInfo.startStr ? selectionInfo.startStr.split("T")[0] : frappe.datetime.get_today();
-				const start_time = selectionInfo.startStr && selectionInfo.startStr.includes("T")
-					? selectionInfo.startStr.split("T")[1].slice(0, 8)
-					: "09:00:00";
-				new ism.SchedulingDialog({
-					scheduled_date: start_date,
-					scheduled_time: start_time,
-					on_success: () => {
-						if (window.cur_calendar) window.cur_calendar.refresh();
-					},
-				}).show();
-			}
+			const start_date = selectionInfo.startStr ? selectionInfo.startStr.split("T")[0] : frappe.datetime.get_today();
+			const start_time = selectionInfo.startStr && selectionInfo.startStr.includes("T")
+				? selectionInfo.startStr.split("T")[1].slice(0, 8)
+				: "09:00:00";
+			frappe.new_doc("Schedule Entry", {
+				scheduled_date: start_date,
+				scheduled_time: start_time,
+			});
 		},
 		eventDidMount: function (info) {
 			const event = info.event;
@@ -105,3 +100,13 @@ frappe.views.calendar["Schedule Entry"] = {
 		},
 	},
 };
+
+// Ambient Realtime synchronization: automatically refetch events when an appointment is booked or moved
+if (frappe.realtime) {
+	frappe.realtime.off("ism_calendar_update");
+	frappe.realtime.on("ism_calendar_update", function (data) {
+		if (window.cur_calendar) {
+			window.cur_calendar.refresh();
+		}
+	});
+}
