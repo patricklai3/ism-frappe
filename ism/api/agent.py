@@ -32,9 +32,19 @@ def _build_agent_envelope(
 		"success": success,
 		"message": message or ("Operation succeeded" if success else "Operation failed"),
 		"summary_card": summary_card,
+		"summary_markdown": summary_card,
 		"urls": urls or {},
 		"data": data or {},
 	}
+	if data and isinstance(data, dict):
+		# Flatten common top-level query keys for convenient client access
+		for k in ("name", "repair_order", "quote_id", "token", "slots", "summary", "total_services"):
+			if k in data and k not in payload:
+				payload[k] = data[k]
+		if "name" in data and "repair_order" not in payload:
+			payload["repair_order"] = data["name"]
+			payload["quote_id"] = data["name"]
+
 	if error:
 		payload["error"] = error
 	return payload
@@ -105,17 +115,29 @@ def _resolve_vehicle(vehicle_identifier: str, customer_name: str) -> str:
 
 @frappe.whitelist()
 def create_quote(
-	customer_name: str,
-	vehicle_identifier: str,
+	customer_name: Optional[str] = None,
+	vehicle_identifier: Optional[str] = None,
+	customer: Optional[str] = None,
+	vehicle: Optional[str] = None,
 	services: Optional[Union[List[Any], str]] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
+	concern: Optional[str] = None,
 	customer_phone: Optional[str] = None,
 	customer_email: Optional[str] = None,
 	company: Optional[str] = None,
 	odometer_in: Optional[int] = None,
 ) -> Dict[str, Any]:
 	"""Create a new Repair Order in Draft Estimate state with deterministic totals and estimation."""
+	cust_in = customer_name or customer
+	veh_in = vehicle_identifier or vehicle
+	notes_in = notes or concern
+
+	if not cust_in:
+		frappe.throw(_("Customer name or customer identifier is required."))
+	if not veh_in:
+		frappe.throw(_("Vehicle identifier is required."))
+
 	if isinstance(services, str):
 		try:
 			services = json.loads(services)
@@ -129,8 +151,8 @@ def create_quote(
 			parts = []
 
 	comp = company or _get_default_company()
-	cust = _resolve_customer(customer_name, phone=customer_phone, email=customer_email)
-	veh = _resolve_vehicle(vehicle_identifier, cust)
+	cust = _resolve_customer(cust_in, phone=customer_phone, email=customer_email)
+	veh = _resolve_vehicle(veh_in, cust)
 
 	ro = frappe.new_doc("Repair Order")
 	ro.company = comp
@@ -138,7 +160,7 @@ def create_quote(
 	ro.vehicle = veh
 	ro.status = "Draft Estimate"
 	ro.approval_status = "Draft"
-	ro.customer_concern = notes or ""
+	ro.customer_concern = notes_in or ""
 	ro.posting_date = today()
 
 	# Resolve odometer_in
@@ -226,7 +248,7 @@ def create_quote(
 	lines.append(f"[📄 View Legal Print Preview]({print_url})  •  [✏️ Open in Frappe Desk]({desk_url})")
 
 	card = "\n".join(lines)
-	urls = {"desk": desk_url, "print": print_url}
+	urls = {"desk": desk_url, "print": print_url, "repair_order": desk_url, "print_view": print_url}
 
 	return _build_agent_envelope(
 		success=True,
@@ -277,9 +299,11 @@ def amend_quote(
 			if isinstance(s, str):
 				s_data = {"service_title": s, "labor_hours": 1.0, "labor_rate": default_labor_rate}
 			elif isinstance(s, dict):
+				pkg = s.get("service_package")
+				valid_pkg = pkg if (pkg and frappe.db.exists("Service Package", pkg)) else None
 				s_data = {
-					"service_title": s.get("service_title") or s.get("title") or "Service Operation",
-					"service_package": s.get("service_package"),
+					"service_title": s.get("service_title") or s.get("title") or pkg or "Service Operation",
+					"service_package": valid_pkg,
 					"labor_hours": flt(s.get("labor_hours") or 1.0),
 					"labor_rate": flt(s.get("labor_rate") or default_labor_rate),
 					"is_flat_rate": cint(s.get("is_flat_rate", 0)),
@@ -307,11 +331,13 @@ def amend_quote(
 		f"**Subtotal**: `${flt(ro.net_total):,.2f}` | **HST (13%)**: `${flt(ro.total_taxes_and_charges):,.2f}` | **Grand Total**: `${flt(ro.grand_total):,.2f}`\n\n"
 		f"[📄 View Legal Print Preview]({print_url})  •  [✏️ Open in Frappe Desk]({desk_url})"
 	)
+	res_data = ro.as_dict()
+	res_data["total_services"] = len(ro.services)
 	return _build_agent_envelope(
 		success=True,
 		summary_card=card,
 		urls={"desk": desk_url, "print": print_url},
-		data=ro.as_dict(),
+		data=res_data,
 		message=_("Quote {0} updated successfully.").format(ro.name),
 	)
 
@@ -321,6 +347,7 @@ def find_available_slots(
 	repair_order: Optional[str] = None,
 	duration_minutes: Optional[int] = None,
 	start_date: Optional[str] = None,
+	target_date: Optional[str] = None,
 	days_ahead: int = 5,
 	equipment_tags: Optional[Union[List[str], str]] = None,
 ) -> Dict[str, Any]:
@@ -338,10 +365,10 @@ def find_available_slots(
 		except Exception:
 			equipment_tags = [equipment_tags]
 
-	target_date = start_date or today()
+	target_dt = start_date or target_date or today()
 	results = []
 
-	cur_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+	cur_dt = datetime.strptime(target_dt, "%Y-%m-%d").date()
 	for i in range(max(1, int(days_ahead))):
 		date_str = cur_dt.strftime("%Y-%m-%d")
 		day_slots = get_available_slots(date=date_str, duration_minutes=dur, required_tags=equipment_tags)
@@ -371,7 +398,7 @@ def find_available_slots(
 
 	card = "\n".join(lines)
 	return _build_agent_envelope(
-		success=bool(results),
+		success=True,
 		summary_card=card,
 		data={"duration_minutes": dur, "slots": results},
 		message=_("Found {0} available slots.").format(len(results)),
@@ -598,6 +625,12 @@ def get_shop_floor_status(date: Optional[str] = None) -> Dict[str, Any]:
 			"technicians_on_duty": len(active_techs),
 			"appointments_count": len(entries),
 			"active_ros_count": len(active_ros),
+			"summary": {
+				"active_bays": len(bays),
+				"active_technicians": len(active_techs),
+				"active_repair_orders": len(active_ros),
+				"scheduled_appointments": len(entries),
+			},
 		},
 	)
 
