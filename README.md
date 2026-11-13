@@ -28,6 +28,20 @@ Pre-commit is configured to use the following tools for checking and formatting 
 - prettier
 - pyupgrade
 
+### Agent OS Integration
+
+This repository includes [ism-agent-os](./ism-agent-os) as a Git submodule. Clone with submodules to load the shop skills, safety rules, and MCP server:
+
+```bash
+git clone --recurse-submodules <URL_OF_THIS_REPO>
+```
+
+Configure Frappe API credentials in `ism-agent-os/.env` (from `ism-agent-os/.env.example`) and verify connectivity:
+
+```bash
+python ism-agent-os/tools/ism_mcp_server.py --test
+```
+
 ### License
 
 mit
