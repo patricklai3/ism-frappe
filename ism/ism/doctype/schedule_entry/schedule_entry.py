@@ -117,10 +117,12 @@ class ScheduleEntry(Document):
 			self.title = f"{customer} ({entry_type_str})"
 
 	def before_insert(self):
+		self.update_working_span()
 		self.populate_from_repair_order()
 		self.set_title()
 
 	def before_save(self):
+		self.update_working_span()
 		self._prev_repair_order = (
 			frappe.db.get_value("Schedule Entry", self.name, "repair_order")
 			if self.name and frappe.db.exists("Schedule Entry", self.name)
@@ -128,6 +130,27 @@ class ScheduleEntry(Document):
 		)
 		self.populate_from_repair_order()
 		self.set_title()
+
+	def update_working_span(self):
+		"""Calculate and persist completion_date and completion_time."""
+		if not self.scheduled_date or not self.scheduled_time:
+			return
+		try:
+			from ism.api.scheduling import calculate_working_span
+
+			span = calculate_working_span(
+				self.scheduled_date,
+				self.scheduled_time,
+				self.estimated_duration or 60,
+			)
+			self.completion_date = span["completion_date"]
+			self.completion_time = span["completion_time"]
+		except Exception:
+			from ism.scheduling.time_utils import to_timedelta
+
+			self.completion_date = self.scheduled_date
+			end_td = to_timedelta(self.scheduled_time) + timedelta(minutes=self.estimated_duration or 60)
+			self.completion_time = str(end_td)
 
 	def on_update(self):
 		prev_ro = getattr(self, "_prev_repair_order", None)
@@ -169,6 +192,7 @@ class ScheduleEntry(Document):
 
 	def validate(self):
 		self.flags.scheduling_warnings = []
+		self.update_working_span()
 		self.validate_estimated_duration()
 		self.validate_repair_order_requirement()
 		self.validate_bay_availability()
@@ -253,9 +277,12 @@ class ScheduleEntry(Document):
 		)
 
 		if not is_available:
+			s_time_short = str(self.scheduled_time)[:5]
+			c_date = self.completion_date or self.scheduled_date
+			c_time_short = str(self.completion_time or "")[:5]
 			frappe.throw(
-				_("Service Bay '{0}' is already occupied during the requested time window on {1}.").format(
-					self.service_bay, self.scheduled_date
+				_("Service Bay '{0}' is already occupied during the requested time window ({1} {2} to {3} {4}).").format(
+					self.service_bay, self.scheduled_date, s_time_short, c_date, c_time_short
 				),
 				frappe.ValidationError,
 			)

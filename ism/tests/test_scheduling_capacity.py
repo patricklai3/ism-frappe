@@ -21,6 +21,7 @@ from ism.tests.test_fixtures import (
 try:
 	from ism.api.scheduling import (
 		effective_end_time,
+		calculate_working_span,
 		check_bay_availability,
 		auto_assign_bay,
 		get_available_slots,
@@ -32,6 +33,7 @@ try:
 	)
 except ImportError:
 	effective_end_time = None
+	calculate_working_span = None
 	check_bay_availability = None
 	auto_assign_bay = None
 	get_available_slots = None
@@ -384,15 +386,20 @@ class TestSchedulingCapacity(ISMTestCase):
 			slot = slots[0]
 			self.assertIn(slot.get("bottleneck"), ["bay", "technician", "none", None])
 
-	def test_tier1_f10_slots_past_closing_suppressed(self):
-		"""F10: Slot whose effective end time exceeds operating_hours_end is suppressed."""
+	def test_tier1_f10_slots_past_closing_spans_next_day(self):
+		"""F10: Slot whose naive end exceeds operating_hours_end spans overnight to next day."""
 		self._require_sched_api()
 		target_date = today()
-		# 120 min duration at 16:30 would finish at 18:30 (past 17:00)
+		# 120 min duration at 16:30 finishes at 09:30 on next working day
 		slots = get_available_slots(target_date, 120)
-		slot_times = [s["start_time"] for s in slots]
-		self.assertNotIn("16:30", slot_times)
-		self.assertNotIn("16:30:00", slot_times)
+		slot_map = {s["start_time"]: s for s in slots}
+		self.assertIn("16:30", slot_map)
+		s1630 = slot_map["16:30"]
+		self.assertTrue(s1630["is_available"])
+		self.assertTrue(s1630["is_multi_day"])
+		self.assertEqual(s1630["spans_days"], 2)
+		self.assertEqual(s1630["completion_time"], "09:30")
+		self.assertIn("+1 Day", s1630["badge_label"])
 
 	# --- Feature 11: Technician Designation Roster ---
 	def test_tier1_f11_technician_roster_active(self):
@@ -853,3 +860,300 @@ class TestSchedulingCapacity(ISMTestCase):
 		# Verify RO child table was synced
 		self.assertEqual(len(ro.schedule_entries), 1)
 		self.assertEqual(ro.schedule_entries[0].schedule_entry, se.name)
+
+	def test_tier1_slot_filtering_by_technician_overlap(self):
+		"""Test that get_available_slots filters out slots where the specified technician is booked."""
+		self._require_sched_api()
+		self._require_tech_api()
+		self._require_doctype("Schedule Entry")
+		target_date = today()
+		ensure_ism_settings(enable_technician_capacity=1)
+
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:00:00",
+			estimated_duration=180,
+			service_bay=self.bay1,
+			assigned_technician=self.tech1_id,
+		)
+		self.track(se)
+
+		all_slots = get_available_slots(target_date, 60)
+		all_times = [s["start_time"] for s in all_slots]
+		self.assertIn("08:00", all_times)
+
+		tech1_slots = get_available_slots(target_date, 60, technician=self.tech1_id)
+		tech1_times = [s["start_time"] for s in tech1_slots]
+		for blocked in ("08:00", "08:30", "09:00", "09:30", "10:00", "10:30"):
+			self.assertNotIn(blocked, tech1_times)
+		self.assertIn("11:00", tech1_times)
+
+		tech2_slots = get_available_slots(target_date, 60, technician=self.tech2_id)
+		tech2_times = [s["start_time"] for s in tech2_slots]
+		self.assertIn("08:00", tech2_times)
+
+	def test_tier1_slot_filtering_by_technician_leave(self):
+		"""Test that get_available_slots excludes slots when technician is on approved leave."""
+		self._require_sched_api()
+		self._require_tech_api()
+		if not self.tech1_id:
+			self.skipTest("Tech 1 not available")
+		target_date = add_days(today(), 12)
+		leave_type = frappe.db.get_value("Leave Type", {}, "name") or "Casual Leave"
+		leave = frappe.get_doc({
+			"doctype": "Leave Application",
+			"employee": self.tech1_id,
+			"leave_type": leave_type,
+			"from_date": target_date,
+			"to_date": target_date,
+			"status": "Approved",
+			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+		})
+		leave.flags.ignore_validate = True
+		leave.flags.ignore_mandatory = True
+		leave.insert(ignore_permissions=True)
+		frappe.db.set_value("Leave Application", leave.name, "docstatus", 1)
+		self.track(leave)
+
+		tech1_slots = get_available_slots(target_date, 60, technician=self.tech1_id)
+		self.assertEqual(len(tech1_slots), 0)
+
+		tech2_slots = get_available_slots(target_date, 60, technician=self.tech2_id)
+		self.assertGreater(len(tech2_slots), 0)
+
+	def test_find_next_available_slot_technician_filtering(self):
+		"""Test find_next_available_slot specifically finds dates where the technician is free."""
+		self._require_sched_api()
+		self._require_tech_api()
+		target_date = today()
+		res = find_next_available_slot(from_date=target_date, duration_minutes=60, technician=self.tech1_id)
+		self.assertIsNotNone(res)
+		self.assertIn("date", res)
+		self.assertIn("first_slot", res)
+
+	def test_allocate_schedule_entry_technician_overlap_guard(self):
+		"""Test allocate_schedule_entry raises ValidationError on technician overlap unless explicitly allowed."""
+		self._require_sched_api()
+		self._require_tech_api()
+		self._require_doctype("Schedule Entry")
+		target_date = today()
+
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:00:00",
+			estimated_duration=120,
+			service_bay=self.bay1,
+			assigned_technician=self.tech1_id,
+		)
+		self.track(se)
+
+		with self.assertRaises(frappe.ValidationError):
+			allocate_schedule_entry(
+				repair_order=self.test_ro1.name,
+				scheduled_date=target_date,
+				scheduled_time="08:30:00",
+				estimated_duration=60,
+				service_bay=self.bay2,
+				assigned_technician=self.tech1_id,
+				allow_technician_overlap=0,
+			)
+
+		res = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:30:00",
+			estimated_duration=60,
+			service_bay=self.bay2,
+			assigned_technician=self.tech1_id,
+			allow_technician_overlap=1,
+		)
+		self.assertIsNotNone(res.get("name"))
+		self.track("Schedule Entry", res["name"])
+
+	def test_tier1_slot_highlighting_with_include_all(self):
+		"""Test that get_available_slots with include_all=1 highlights unavailable slots with reasons."""
+		self._require_sched_api()
+		self._require_tech_api()
+		self._require_doctype("Schedule Entry")
+		target_date = today()
+		ensure_ism_settings(enable_technician_capacity=1)
+
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:00:00",
+			estimated_duration=90,
+			service_bay=self.bay1,
+			assigned_technician=self.tech1_id,
+		)
+		self.track(se)
+
+		all_slots = get_available_slots(
+			date=target_date,
+			duration_minutes=60,
+			technician=self.tech1_id,
+			service_bay=self.bay2,
+			include_all=1,
+		)
+
+		slot_map = {s["start_time"]: s for s in all_slots}
+
+		self.assertIn("08:00", slot_map)
+		s0800 = slot_map["08:00"]
+		self.assertFalse(s0800["is_available"])
+		self.assertEqual(s0800["badge_label"], "Tech Busy")
+		self.assertFalse(s0800["technician_available"])
+		self.assertTrue(s0800["bay_available"])
+
+		self.assertIn("08:30", slot_map)
+		s0830 = slot_map["08:30"]
+		self.assertFalse(s0830["is_available"])
+		self.assertEqual(s0830["badge_label"], "Tech Busy")
+
+		self.assertIn("09:30", slot_map)
+		s0930 = slot_map["09:30"]
+		self.assertTrue(s0930["is_available"])
+		self.assertEqual(s0930["badge_label"], "1 open")
+		self.assertTrue(s0930["technician_available"])
+		self.assertTrue(s0930["bay_available"])
+
+	# =========================================================================
+	# TIER 4: NON-CONTINUOUS ALLOCATION & MULTI-DAY SPANNING TESTS
+	# =========================================================================
+
+	def test_calculate_working_span_lunch_pause(self):
+		"""Span Test: Job starting at 11:30 for 60 mins pauses across lunch and finishes at 13:00."""
+		self._require_sched_api()
+		ensure_ism_settings(
+			operating_hours_start="08:00:00",
+			operating_hours_end="17:00:00",
+			break_start="12:00:00",
+			break_end="12:30:00",
+		)
+		target_date = today()
+		span = calculate_working_span(target_date, "11:30:00", 60)
+		self.assertEqual(span["completion_date"], target_date)
+		self.assertEqual(span["completion_time"], "13:00")
+		self.assertFalse(span["is_multi_day"])
+		self.assertTrue(span["spans_lunch"])
+		self.assertEqual(len(span["segments"]), 2)
+		self.assertEqual(span["segments"][0]["duration"], 30)
+		self.assertEqual(span["segments"][1]["duration"], 30)
+
+	def test_calculate_working_span_overnight(self):
+		"""Span Test: Job starting at 15:00 for 240 mins (4 hours) spans overnight to next day at 10:00."""
+		self._require_sched_api()
+		ensure_ism_settings(
+			operating_hours_start="08:00:00",
+			operating_hours_end="17:00:00",
+			break_start="12:00:00",
+			break_end="12:30:00",
+		)
+		target_date = today()
+		span = calculate_working_span(target_date, "15:00:00", 240)
+		self.assertTrue(span["is_multi_day"])
+		self.assertEqual(span["spans_days"], 2)
+		self.assertEqual(span["completion_time"], "10:00")
+		self.assertEqual(len(span["segments"]), 2)
+		self.assertEqual(span["segments"][0]["duration"], 120)
+		self.assertEqual(span["segments"][1]["duration"], 120)
+
+	def test_bay_collision_overnight_span(self):
+		"""Span Test: Vehicle holding Bay 1 from 15:00 Day 1 to 10:00 Day 2 blocks 08:30 Day 2 on Bay 1."""
+		self._require_sched_api()
+		self._require_doctype("Schedule Entry")
+		day1 = today()
+		day2 = add_days(day1, 1)
+
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=day1,
+			scheduled_time="15:00:00",
+			estimated_duration=240,
+			service_bay=self.bay1,
+		)
+		self.track(se)
+
+		self.assertFalse(check_bay_availability(self.bay1, day2, "08:30:00", 60))
+		self.assertTrue(check_bay_availability(self.bay2, day2, "08:30:00", 60))
+		self.assertTrue(check_bay_availability(self.bay1, day2, "10:30:00", 60))
+
+	def test_technician_collision_overnight_span(self):
+		"""Span Test: Technician allocated 15:00 Day 1 to 10:00 Day 2 is conflicted at 08:30 Day 2."""
+		self._require_sched_api()
+		self._require_tech_api()
+		self._require_doctype("Schedule Entry")
+		if not self.tech1_id:
+			self.skipTest("Tech 1 not available")
+
+		day1 = today()
+		day2 = add_days(day1, 1)
+
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=day1,
+			scheduled_time="15:00:00",
+			estimated_duration=240,
+			service_bay=self.bay1,
+			assigned_technician=self.tech1_id,
+		)
+		self.track(se)
+
+		chk = check_technician_availability(self.tech1_id, day2, "08:30:00", 60)
+		self.assertFalse(chk["is_available"])
+		self.assertEqual(chk.get("reason"), "overlap")
+
+		chk_free = check_technician_availability(self.tech1_id, day2, "10:30:00", 60)
+		self.assertTrue(chk_free["is_available"])
+
+	def test_technician_leave_on_span_day_2(self):
+		"""Span Test: Technician with approved leave on Day 2 cannot be booked for overnight job starting Day 1."""
+		self._require_sched_api()
+		self._require_tech_api()
+		self._require_doctype("Schedule Entry")
+		if not self.tech1_id:
+			self.skipTest("Tech 1 not available")
+
+		day1 = today()
+		day2 = add_days(day1, 1)
+
+		leave_type = frappe.db.get_value("Leave Type", {}, "name") or "Casual Leave"
+		leave = frappe.get_doc({
+			"doctype": "Leave Application",
+			"employee": self.tech1_id,
+			"leave_type": leave_type,
+			"from_date": day2,
+			"to_date": day2,
+			"status": "Approved",
+			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+		})
+		leave.flags.ignore_validate = True
+		leave.flags.ignore_mandatory = True
+		leave.insert(ignore_permissions=True)
+		frappe.db.set_value("Leave Application", leave.name, "docstatus", 1)
+		self.track(leave)
+
+		chk = check_technician_availability(self.tech1_id, day1, "15:00:00", 240)
+		self.assertFalse(chk["is_available"])
+		self.assertEqual(chk.get("reason"), "on_leave")
+
+	def test_schedule_entry_persists_completion_fields(self):
+		"""Span Test: Schedule Entry computes and persists completion_date and completion_time."""
+		self._require_sched_api()
+		self._require_doctype("Schedule Entry")
+		day1 = today()
+
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=day1,
+			scheduled_time="15:00:00",
+			estimated_duration=240,
+			service_bay=self.bay1,
+		)
+		self.track(se)
+		se.reload()
+		span = calculate_working_span(day1, "15:00:00", 240)
+		self.assertEqual(str(se.completion_date), span["completion_date"])
+		self.assertIn(span["completion_time"][:5], str(se.completion_time))

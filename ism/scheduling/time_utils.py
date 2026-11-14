@@ -1,11 +1,11 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-from datetime import time, timedelta
-from typing import Any, Dict, Union
+from datetime import date, datetime, time, timedelta
+from typing import Any, Callable, Dict, Optional, Union
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import add_days, cint, getdate
 
 DEFAULT_SHOP_SETTINGS: Dict[str, Any] = {
 	"operating_hours_start": timedelta(hours=8),
@@ -120,3 +120,156 @@ def effective_end_time(
 			return start_td + duration_td + break_duration
 
 	return start_td + duration_td
+
+
+def _default_is_holiday(target_date: date, holiday_list: Optional[str]) -> bool:
+	if not holiday_list or not frappe.db.exists("DocType", "Holiday"):
+		return False
+	return bool(frappe.db.exists("Holiday", {"parent": holiday_list, "holiday_date": str(target_date)}))
+
+
+def calculate_working_span(
+	start_date: Union[str, date, datetime],
+	start_time: Union[str, time, timedelta],
+	duration_minutes: Union[int, float],
+	is_holiday_fn: Optional[Callable[[date], bool]] = None,
+) -> Dict[str, Any]:
+	"""Calculate active working segments and completion datetime across lunch, overnight, and holidays."""
+	settings = get_shop_settings()
+	op_start = settings["operating_hours_start"]
+	op_end = settings["operating_hours_end"]
+	bs_td = settings["break_start"]
+	be_td = settings["break_end"]
+
+	s_date = getdate(start_date)
+	s_time = to_timedelta(start_time)
+	duration_val = float(duration_minutes or 0)
+	if duration_val <= 0:
+		duration_val = float(settings.get("default_diagnostic_duration") or 60)
+
+	if not op_start or not op_end or op_start >= op_end:
+		end_td = s_time + timedelta(minutes=duration_val)
+		end_clock = format_timedelta(end_td)
+		start_clock = format_timedelta(s_time)
+		return {
+			"start_date": str(s_date),
+			"start_time": start_clock,
+			"completion_date": str(s_date),
+			"completion_time": end_clock,
+			"spans_days": 1,
+			"is_multi_day": False,
+			"spans_lunch": False,
+			"segments": [{
+				"date": str(s_date),
+				"start_time": start_clock,
+				"end_time": end_clock,
+				"duration": duration_val,
+			}],
+			"bay_window": {
+				"start_date": str(s_date),
+				"start_time": start_clock,
+				"end_date": str(s_date),
+				"end_time": end_clock,
+			},
+		}
+
+	curr_date = s_date
+	curr_time = s_time
+	if curr_time < op_start:
+		curr_time = op_start
+	elif curr_time >= op_end:
+		curr_date = add_days(curr_date, 1)
+		curr_time = op_start
+
+	holiday_list = settings.get("holiday_list")
+	has_lunch = bool(bs_td and be_td and op_start < bs_td < be_td < op_end)
+	rem_minutes = duration_val
+	segments = []
+	spans_lunch = False
+	days_checked = 0
+
+	while rem_minutes > 0 and days_checked < 60:
+		days_checked += 1
+		is_hol = is_holiday_fn(curr_date) if is_holiday_fn else _default_is_holiday(curr_date, holiday_list)
+		if is_hol:
+			curr_date = add_days(curr_date, 1)
+			curr_time = op_start
+			continue
+
+		if has_lunch and bs_td <= curr_time < be_td:
+			curr_time = be_td
+			spans_lunch = True
+
+		if has_lunch and curr_time < bs_td:
+			avail_morning = (bs_td - curr_time).total_seconds() / 60.0
+			if avail_morning > 0:
+				if rem_minutes <= avail_morning:
+					seg_end = curr_time + timedelta(minutes=rem_minutes)
+					segments.append({
+						"date": str(curr_date),
+						"start_time": format_timedelta(curr_time),
+						"end_time": format_timedelta(seg_end),
+						"duration": rem_minutes,
+					})
+					curr_time = seg_end
+					rem_minutes = 0
+					break
+				segments.append({
+					"date": str(curr_date),
+					"start_time": format_timedelta(curr_time),
+					"end_time": format_timedelta(bs_td),
+					"duration": avail_morning,
+				})
+				rem_minutes -= avail_morning
+				curr_time = be_td
+				spans_lunch = True
+
+		if rem_minutes > 0 and curr_time < op_end:
+			avail_afternoon = (op_end - curr_time).total_seconds() / 60.0
+			if avail_afternoon > 0:
+				if rem_minutes <= avail_afternoon:
+					seg_end = curr_time + timedelta(minutes=rem_minutes)
+					segments.append({
+						"date": str(curr_date),
+						"start_time": format_timedelta(curr_time),
+						"end_time": format_timedelta(seg_end),
+						"duration": rem_minutes,
+					})
+					curr_time = seg_end
+					rem_minutes = 0
+					break
+				segments.append({
+					"date": str(curr_date),
+					"start_time": format_timedelta(curr_time),
+					"end_time": format_timedelta(op_end),
+					"duration": avail_afternoon,
+				})
+				rem_minutes -= avail_afternoon
+				curr_date = add_days(curr_date, 1)
+				curr_time = op_start
+				continue
+
+		curr_date = add_days(curr_date, 1)
+		curr_time = op_start
+
+	spans_days = (curr_date - s_date).days + 1
+	is_multi = spans_days > 1 or curr_date > s_date
+	start_clock = format_timedelta(s_time)
+	comp_clock = format_timedelta(curr_time)
+
+	return {
+		"start_date": str(s_date),
+		"start_time": start_clock,
+		"completion_date": str(curr_date),
+		"completion_time": comp_clock,
+		"spans_days": spans_days,
+		"is_multi_day": is_multi,
+		"spans_lunch": spans_lunch,
+		"segments": segments,
+		"bay_window": {
+			"start_date": str(s_date),
+			"start_time": start_clock,
+			"end_date": str(curr_date),
+			"end_time": comp_clock,
+		},
+	}

@@ -7,7 +7,7 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
-from ism.scheduling.time_utils import effective_end_time, get_shop_settings, to_timedelta
+from ism.scheduling.time_utils import calculate_working_span, effective_end_time, get_shop_settings, to_timedelta
 
 STATUS_COLORS = {
 	"Draft": "#9e9e9e",
@@ -36,7 +36,6 @@ def get_calendar_events(start, end, filters=None):
 		filters = {}
 
 	query_filters = [
-		["scheduled_date", ">=", getdate(start)],
 		["scheduled_date", "<=", getdate(end)],
 	]
 
@@ -62,6 +61,8 @@ def get_calendar_events(start, end, filters=None):
 			"scheduled_date",
 			"scheduled_time",
 			"estimated_duration",
+			"completion_date",
+			"completion_time",
 			"status",
 			"service_bay",
 			"assigned_technician",
@@ -75,19 +76,26 @@ def get_calendar_events(start, end, filters=None):
 		order_by="scheduled_date asc, scheduled_time asc",
 	)
 
-	shop_settings = get_shop_settings()
-	bs_td = shop_settings.get("break_start")
-	be_td = shop_settings.get("break_end")
-
 	events = []
 	for entry in entries:
 		start_td = to_timedelta(entry.scheduled_time)
 		duration = entry.estimated_duration or 60
-		end_td = effective_end_time(start_td, duration, bs_td, be_td)
-
 		sched_date_str = str(entry.scheduled_date)
 		start_str = f"{sched_date_str} {str(start_td):>08}"
-		end_str = f"{sched_date_str} {str(end_td):>08}"
+
+		if entry.get("completion_date") and entry.get("completion_time"):
+			comp_date = getdate(entry.completion_date)
+			comp_td = to_timedelta(entry.completion_time)
+			comp_date_str = str(entry.completion_date)
+		else:
+			sp = calculate_working_span(entry.scheduled_date, entry.scheduled_time, duration)
+			comp_date = getdate(sp["completion_date"])
+			comp_td = to_timedelta(sp["completion_time"])
+			comp_date_str = sp["completion_date"]
+
+		if comp_date < getdate(start):
+			continue
+		end_str = f"{comp_date_str} {str(comp_td):>08}"
 
 		color = STATUS_COLORS.get(entry.status, "#2196f3")
 		title = entry.title or f"{entry.name} ({entry.entry_type or 'Appointment'})"

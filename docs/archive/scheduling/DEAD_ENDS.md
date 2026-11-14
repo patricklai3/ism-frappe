@@ -1,0 +1,8 @@
+# Dead Ends Tracking: ISM Scheduling Project
+
+| Iteration | Approach Tried | Why It Failed | Files Touched |
+|---|---|---|---|
+| 1 | Standard `unittest.TestCase` without transaction rollback in `setUp`/`tearDown` | `TestISMSettings` left open transactions with active `SELECT ... FOR UPDATE` locks on `tabSingles`, resulting in MariaDB OperationalError (1020). | `ism/ism/doctype/ism_settings/test_ism_settings.py` |
+| 2 | Subclass `ISMTestCase` with snapshot restoration in `tearDown()`, mid-test `frappe.db.commit()` in test methods, and `try...except Exception: frappe.db.rollback()` in `tearDown()` | MariaDB 11 InnoDB REPEATABLE READ isolation causes MariaDB 1020 when concurrent reads or `SELECT ... FOR UPDATE` inspect deleted/re-inserted rows in `tabSingles`. Swallowing exceptions in `tearDown()` leaves mutated values (`45`, `85.0`, `0`) committed in `tabSingles`, corrupting subsequent test runs with `AssertionError: 45 != 30` or `0 != 1`. | `ism/ism/doctype/ism_settings/test_ism_settings.py` |
+| 3 | Calling `frappe.db.set_single_value("ISM Settings", CANONICAL_ISM_SETTINGS)` and committing in both `setUp()` and `tearDown()` of every test method | In Frappe, `set_single_value(dict)` executes a bulk `DELETE FROM tabSingles` followed by multi-row `INSERT`. In an 8-test suite, this executes 16 discrete range deletions and insertions per run on an unkeyed table (`tabSingles`). Under MariaDB 11 InnoDB REPEATABLE READ, this causes intermittent secondary index scan deadlocks (error 1020 `ER_CHECKREAD`) during rapid multi-run stress testing. | `ism/ism/doctype/ism_settings/test_ism_settings.py` |
+

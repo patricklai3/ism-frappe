@@ -13,6 +13,7 @@ All scripts detect the repository root dynamically relative to their location. T
 - [start-remote-tunnel.ps1](start-remote-tunnel.ps1): Exposes dev site on port 8000 via Cloudflare Tunnel with custom domain or quick URL and mobile QR code.
 - [stop-remote-tunnel.ps1](stop-remote-tunnel.ps1): Stops active Cloudflare Tunnel processes.
 - [verify_mcp_agent.py](../ism/scripts/verify_mcp_agent.py): Verification suite for `ism.api.agent` via Frappe v16 native MCP protocol (`bench --site <site> execute ism.scripts.verify_mcp_agent.run`).
+- [frappe_mcp_bridge.py](frappe_mcp_bridge.py): Zero-dependency Stdio JSON-RPC 2.0 MCP server bridge forwarding to Frappe v16's `/api/v2/mcp` endpoint.
 - [ism-agent-os](../ism-agent-os/tools/cli.py): Python package (`ism_agent_os`) and REST/CLI adapters for Frappe v16 + ISM.
 - [.tunnel-config.example.json](.tunnel-config.example.json): Configuration template for your Cloudflare custom domain and tunnel token.
 

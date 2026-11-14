@@ -15,6 +15,8 @@
   "scheduled_date",
   "scheduled_time",
   "estimated_duration",
+  "completion_date",
+  "completion_time",
   "section_break_ro",
   "repair_order",
   "column_break_customer",
@@ -100,6 +102,19 @@
    "in_list_view": 1,
    "label": "Estimated Duration (mins)",
    "reqd": 1
+  },
+  {
+   "fieldname": "completion_date",
+   "fieldtype": "Date",
+   "label": "Completion Date",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "completion_time",
+   "fieldtype": "Time",
+   "label": "Completion Time",
+   "read_only": 1
   },
   {
    "fieldname": "section_break_ro",

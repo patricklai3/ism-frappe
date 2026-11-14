@@ -129,7 +129,7 @@ def get_technician_pool_availability(
 ) -> Dict[str, Any]:
 	"""
 	Pool-level capacity gating function.
-	Checks total, on-duty, occupied, and available technicians for the proposed time window.
+	Checks total, on-duty, occupied, and available technicians across all working segments.
 	"""
 	frappe.has_permission("Schedule Entry", "read", throw=True)
 	if exclude_entry is not None and not isinstance(exclude_entry, str):
@@ -158,61 +158,94 @@ def get_technician_pool_availability(
 			"is_available": False,
 		}
 
-	bs_td = settings.get("break_start")
-	be_td = settings.get("break_end")
-	prop_start = to_timedelta(start_time)
-	prop_end = effective_end_time(prop_start, duration_minutes, bs_td, be_td)
+	from frappe.utils import add_days, getdate
+	from ism.api.scheduling import calculate_working_span
 
-	on_leave_count = 0
-	on_duty_techs = []
+	span = calculate_working_span(date, start_time, duration_minutes)
+	seg_dates = [s["date"] for s in span["segments"]] or [target_date]
+	min_date = str(add_days(getdate(min(seg_dates)), -30))
+	max_date = max(seg_dates)
 
-	for tech in technicians:
-		emp_id = tech["employee"]
-		if tech.get("on_leave"):
-			on_leave_count += 1
-		else:
-			on_duty_techs.append(emp_id)
+	tech_ids = [t["employee"] for t in technicians]
+	filters = [
+		["assigned_technician", "in", tech_ids],
+		["scheduled_date", "<=", max_date],
+		["scheduled_date", ">=", min_date],
+		["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
+	]
+	if exclude_entry:
+		filters.append(["name", "!=", exclude_entry])
 
-	on_duty_count = len(on_duty_techs)
-	occupied_count = 0
+	all_entries = frappe.get_all(
+		"Schedule Entry",
+		filters=filters,
+		fields=["name", "assigned_technician", "scheduled_date", "scheduled_time", "estimated_duration"],
+	)
 
-	occupied_techs = set()
-	if on_duty_techs:
-		filters = [
-			["assigned_technician", "in", on_duty_techs],
-			["scheduled_date", "=", target_date],
-			["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
-		]
-		if exclude_entry:
-			filters.append(["name", "!=", exclude_entry])
+	entry_segments_by_tech: Dict[str, List[Dict[str, Any]]] = {}
+	for ent in all_entries:
+		tid = ent.get("assigned_technician")
+		if not tid:
+			continue
+		e_dur = ent.get("estimated_duration") or 0
+		e_span = calculate_working_span(ent.scheduled_date, ent.scheduled_time, e_dur)
+		tech_segs = entry_segments_by_tech.setdefault(tid, [])
+		for s in e_span["segments"]:
+			tech_segs.append({
+				"date": s["date"],
+				"start": to_timedelta(s["start_time"]),
+				"end": to_timedelta(s["end_time"]),
+			})
 
-		entries = frappe.get_all(
-			"Schedule Entry",
-			filters=filters,
-			fields=["assigned_technician", "scheduled_time", "estimated_duration"],
-		)
+	min_available = total_techs
+	max_occupied = 0
+	max_on_leave = 0
+	min_on_duty = total_techs
+	available_tech_ids = list(tech_ids)
 
-		for entry in entries:
-			ex_start = to_timedelta(entry.get("scheduled_time"))
-			ex_duration = entry.get("estimated_duration") or 0
-			ex_end = effective_end_time(ex_start, ex_duration, bs_td, be_td)
+	for prop_seg in span["segments"]:
+		seg_date = prop_seg["date"]
+		seg_start = to_timedelta(prop_seg["start_time"])
+		seg_end = to_timedelta(prop_seg["end_time"])
+		seg_dur = prop_seg["duration"]
 
-			if max(prop_start, ex_start) < min(prop_end, ex_end):
-				occupied_techs.add(entry.get("assigned_technician"))
+		on_duty_in_seg = []
+		on_leave_in_seg = 0
+		for tech in technicians:
+			emp_id = tech["employee"]
+			leave_res = check_employee_leave(emp_id, seg_date, seg_start, seg_dur)
+			if leave_res["on_leave"]:
+				on_leave_in_seg += 1
+			else:
+				on_duty_in_seg.append(emp_id)
 
-		occupied_count = len(occupied_techs)
+		occupied_in_seg = set()
+		for emp_id in on_duty_in_seg:
+			for ts in entry_segments_by_tech.get(emp_id, ()):
+				if ts["date"] == seg_date and max(seg_start, ts["start"]) < min(seg_end, ts["end"]):
+					occupied_in_seg.add(emp_id)
+					break
 
-	available_tech_ids = [t for t in on_duty_techs if t not in occupied_techs]
-	available_count = max(0, on_duty_count - occupied_count)
+		free_in_seg = [emp_id for emp_id in on_duty_in_seg if emp_id not in occupied_in_seg]
+		available_tech_ids = [emp_id for emp_id in available_tech_ids if emp_id in free_in_seg]
+		avail_in_seg = len(free_in_seg)
+		if avail_in_seg < min_available:
+			min_available = avail_in_seg
+		if len(occupied_in_seg) > max_occupied:
+			max_occupied = len(occupied_in_seg)
+		if on_leave_in_seg > max_on_leave:
+			max_on_leave = on_leave_in_seg
+		if len(on_duty_in_seg) < min_on_duty:
+			min_on_duty = len(on_duty_in_seg)
 
 	return {
 		"total_technicians": total_techs,
-		"on_leave": on_leave_count,
-		"on_duty": on_duty_count,
-		"occupied": occupied_count,
-		"available": available_count,
+		"on_leave": max_on_leave,
+		"on_duty": min_on_duty,
+		"occupied": max_occupied,
+		"available": min_available,
 		"available_technicians": available_tech_ids,
-		"is_available": available_count > 0,
+		"is_available": min_available > 0,
 	}
 
 
@@ -226,7 +259,7 @@ def check_technician_availability(
 ) -> Dict[str, Any]:
 	"""
 	Checks availability of a specific technician for a given date/time window.
-	Returns details on leave status, overlaps, and availability.
+	Returns details on leave status, overlaps, and availability across active working segments.
 	"""
 	frappe.has_permission("Schedule Entry", "read", throw=True)
 	if not employee or not isinstance(employee, str) or not date:
@@ -268,28 +301,30 @@ def check_technician_availability(
 			"conflicts": [],
 		}
 
-	target_date = str(date)
+	from frappe.utils import add_days, getdate
+	from ism.api.scheduling import calculate_working_span
 
-	# Check leave status
-	leave_res = check_employee_leave(employee, target_date, start_time, duration_minutes)
-	if leave_res["on_leave"]:
-		return {
-			"is_available": False,
-			"reason": "on_leave",
-			"on_leave": True,
-			"half_day": leave_res["half_day"],
-			"conflicts": [],
-		}
+	span = calculate_working_span(date, start_time, duration_minutes)
 
-	# Check overlapping schedule entries
-	bs_td = settings.get("break_start")
-	be_td = settings.get("break_end")
-	prop_start = to_timedelta(start_time)
-	prop_end = effective_end_time(prop_start, duration_minutes, bs_td, be_td)
+	for seg in span["segments"]:
+		leave_res = check_employee_leave(employee, seg["date"], seg["start_time"], seg["duration"])
+		if leave_res["on_leave"]:
+			return {
+				"is_available": False,
+				"reason": "on_leave",
+				"on_leave": True,
+				"half_day": leave_res["half_day"],
+				"conflicts": [],
+			}
+
+	seg_dates = [s["date"] for s in span["segments"]] or [str(date)]
+	min_date = str(add_days(getdate(min(seg_dates)), -30))
+	max_date = max(seg_dates)
 
 	filters = [
 		["assigned_technician", "=", employee],
-		["scheduled_date", "=", target_date],
+		["scheduled_date", "<=", max_date],
+		["scheduled_date", ">=", min_date],
 		["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
 	]
 	if exclude_entry:
@@ -298,25 +333,47 @@ def check_technician_availability(
 	existing_entries = frappe.get_all(
 		"Schedule Entry",
 		filters=filters,
-		fields=["name", "scheduled_time", "estimated_duration", "customer", "service_bay", "repair_order"],
+		fields=[
+			"name",
+			"scheduled_date",
+			"scheduled_time",
+			"estimated_duration",
+			"completion_date",
+			"completion_time",
+			"customer",
+			"service_bay",
+			"repair_order",
+		],
 	)
 
 	conflicts = []
 	for entry in existing_entries:
-		ex_start = to_timedelta(entry.get("scheduled_time"))
-		ex_duration = entry.get("estimated_duration") or 0
-		ex_end = effective_end_time(ex_start, ex_duration, bs_td, be_td)
-
-		if max(prop_start, ex_start) < min(prop_end, ex_end):
-			conflicts.append({
-				"name": entry.get("name"),
-				"scheduled_time": format_timedelta(ex_start),
-				"estimated_duration": ex_duration,
-				"effective_end_time": format_timedelta(ex_end),
-				"customer": entry.get("customer"),
-				"service_bay": entry.get("service_bay"),
-				"repair_order": entry.get("repair_order"),
-			})
+		ex_dur = entry.get("estimated_duration") or 0
+		ex_span = calculate_working_span(entry.scheduled_date, entry.scheduled_time, ex_dur)
+		conflict_found = False
+		for prop_seg in span["segments"]:
+			p_date = prop_seg["date"]
+			p_start = to_timedelta(prop_seg["start_time"])
+			p_end = to_timedelta(prop_seg["end_time"])
+			for ex_seg in ex_span["segments"]:
+				if ex_seg["date"] == p_date:
+					e_start = to_timedelta(ex_seg["start_time"])
+					e_end = to_timedelta(ex_seg["end_time"])
+					if max(p_start, e_start) < min(p_end, e_end):
+						conflicts.append({
+							"name": entry.get("name"),
+							"scheduled_date": str(entry.get("scheduled_date")),
+							"scheduled_time": format_timedelta(to_timedelta(entry.get("scheduled_time"))),
+							"estimated_duration": ex_dur,
+							"effective_end_time": format_timedelta(to_timedelta(ex_span["completion_time"])),
+							"customer": entry.get("customer"),
+							"service_bay": entry.get("service_bay"),
+							"repair_order": entry.get("repair_order"),
+						})
+						conflict_found = True
+						break
+			if conflict_found:
+				break
 
 	if conflicts:
 		return {

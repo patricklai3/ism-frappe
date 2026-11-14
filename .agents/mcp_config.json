@@ -6,6 +6,18 @@
         "serve",
         "--mcp"
       ]
+    },
+    "frappe": {
+      "command": "C:\\Windows\\py.exe",
+      "args": [
+        "-3",
+        "C:\\Users\\real2\\.gemini\\config\\scripts\\frappe_mcp_bridge.py"
+      ],
+      "env": {
+        "FRAPPE_URL": "http://localhost:8000",
+        "FRAPPE_API_KEY": "53e6659484dcc74",
+        "FRAPPE_API_SECRET": "f259e4d2239015d"
+      }
     }
   }
 }
