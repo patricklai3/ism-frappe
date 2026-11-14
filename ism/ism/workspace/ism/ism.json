@@ -52,9 +52,19 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "Vehicle Deferred Service",
+   "label": "Schedule Entry",
    "link_count": 0,
-   "link_to": "Vehicle Deferred Service",
+   "link_to": "Schedule Entry",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Shop Action Item",
+   "link_count": 0,
+   "link_to": "Shop Action Item",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
@@ -90,6 +100,26 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Service Bay",
+   "link_count": 0,
+   "link_to": "Service Bay",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Schedule Entry Type",
+   "link_count": 0,
+   "link_to": "Schedule Entry Type",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "ISM Settings",
    "link_count": 0,
    "link_to": "ISM Settings",
@@ -117,6 +147,22 @@
    "label": "Active Repair Orders",
    "link_to": "Repair Order",
    "stats_filter": "[[\"Repair Order\",\"status\",\"=\",\"Authorized - In Progress\"]]",
+   "type": "DocType"
+  },
+  {
+   "color": "Green",
+   "doc_view": "Calendar",
+   "label": "Shop Calendar",
+   "link_to": "Schedule Entry",
+   "type": "DocType"
+  },
+  {
+   "color": "Orange",
+   "doc_view": "List",
+   "format": "{} Open",
+   "label": "Open Action Items",
+   "link_to": "Shop Action Item",
+   "stats_filter": "[[\"Shop Action Item\",\"status\",\"=\",\"Open\"]]",
    "type": "DocType"
   },
   {

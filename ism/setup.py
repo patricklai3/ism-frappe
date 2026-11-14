@@ -1,10 +1,7 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-import json
-import os
 import frappe
-from frappe.modules.export_file import export_to_files
 
 LEGACY_FIELDS_TO_REMOVE = {
 	"Quotation": [
@@ -149,6 +146,16 @@ def setup_default_ism_settings():
 		settings.default_diagnostic_duration = 60
 		changed = True
 
+	# Pricing Defaults
+	if not settings.default_labor_rate:
+		settings.default_labor_rate = 140.0
+		changed = True
+
+	# SMS Gateway Provider (coerce removed Twilio option or empty value to Disabled)
+	if not settings.sms_gateway_provider or settings.sms_gateway_provider == "Twilio":
+		settings.sms_gateway_provider = "Disabled"
+		changed = True
+
 	if changed or settings.is_new():
 		settings.save(ignore_permissions=True)
 
@@ -159,13 +166,31 @@ def ensure_doctype_creation_enabled():
 	Note: In Frappe, DocType.in_create is the database column for 'User Cannot Create'.
 	Setting in_create = 1 blocks document creation and hides the '+ Add' button.
 	"""
-	frappe.db.sql("UPDATE `tabDocType` SET in_create = 0 WHERE module = 'ISM'")
+	if not frappe.db.count("DocType", {"module": "ISM", "in_create": 1}):
+		return
+	frappe.db.sql("UPDATE `tabDocType` SET in_create = 0 WHERE module = 'ISM' AND in_create = 1")
 	frappe.db.commit()
 	frappe.clear_cache()
 
 
-def setup_default_taxes_and_payments():
+def _company_has_default_hst_setup(comp):
+	abbr = comp.abbr or comp.name
+	template_name = f"13% HST - {abbr}"
+	return bool(
+		frappe.db.exists("Sales Taxes and Charges Template", template_name)
+		and frappe.db.exists("Purchase Taxes and Charges Template", template_name)
+		and frappe.db.exists("Item Tax Template", template_name)
+	)
+
+
+def setup_default_taxes_and_payments(only_if_missing=False):
 	"""Ensure 13% HST Sales Taxes and Charges Template and Debit / Interac Mode of Payment exist."""
+	companies = frappe.get_all("Company", fields=["name", "abbr", "default_currency"])
+
+	if only_if_missing and frappe.db.exists("Mode of Payment", "Debit / Interac"):
+		if all(_company_has_default_hst_setup(comp) for comp in companies):
+			return
+
 	# 1. Mode of Payment: Debit / Interac
 	if not frappe.db.exists("Mode of Payment", "Debit / Interac"):
 		mop = frappe.get_doc({
@@ -175,8 +200,6 @@ def setup_default_taxes_and_payments():
 			"enabled": 1,
 		})
 		mop.insert(ignore_permissions=True)
-
-	companies = frappe.get_all("Company", fields=["name", "abbr", "default_currency"])
 
 	# Ensure Mode of Payment Account for Debit / Interac
 	if frappe.db.exists("Mode of Payment", "Debit / Interac"):
@@ -431,10 +454,26 @@ def setup_parts_item_group():
 			pass
 
 
-def setup_item_custom_fields():
-	"""Ensure automotive compliance custom fields exist on Item DocType."""
+def _ensure_custom_fields_present(custom_fields_by_doctype, force_update=False):
+	"""Create custom fields only when missing unless force_update is requested."""
+	if not force_update:
+		missing = False
+		for dt, fields in custom_fields_by_doctype.items():
+			existing = set(frappe.get_all("Custom Field", filters={"dt": dt}, pluck="fieldname"))
+			if any(f["fieldname"] not in existing for f in fields):
+				missing = True
+				break
+		if not missing:
+			return
+
 	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 
+	create_custom_fields(custom_fields_by_doctype, update=True)
+	frappe.db.commit()
+
+
+def setup_item_custom_fields(force_update=False):
+	"""Ensure automotive compliance custom fields exist on Item DocType."""
 	fields = [
 		{
 			"fieldname": "is_vehicle_part",
@@ -482,8 +521,7 @@ def setup_item_custom_fields():
 		},
 	]
 
-	create_custom_fields({"Item": fields}, update=True)
-	frappe.db.commit()
+	_ensure_custom_fields_present({"Item": fields}, force_update=force_update)
 
 
 def backfill_service_package_models():
@@ -522,10 +560,8 @@ def backfill_service_package_models():
 	return count
 
 
-def setup_procurement_custom_fields():
+def setup_procurement_custom_fields(force_update=False):
 	"""Ensure repair_order link custom fields exist on Purchase Order, Request for Quotation, and Sales Invoice DocTypes."""
-	from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-
 	po_fields = [
 		{
 			"fieldname": "repair_order",
@@ -556,12 +592,14 @@ def setup_procurement_custom_fields():
 			"in_standard_filter": 1,
 		}
 	]
-	create_custom_fields({
-		"Purchase Order": po_fields,
-		"Request for Quotation": rfq_fields,
-		"Sales Invoice": si_fields,
-	}, update=True)
-	frappe.db.commit()
+	_ensure_custom_fields_present(
+		{
+			"Purchase Order": po_fields,
+			"Request for Quotation": rfq_fields,
+			"Sales Invoice": si_fields,
+		},
+		force_update=force_update,
+	)
 
 
 DEFAULT_EQUIPMENT_TAGS = [
@@ -584,8 +622,9 @@ def seed_equipment_tags():
 	"""Idempotently seed standard default Equipment Tag records."""
 	if not frappe.db.exists("DocType", "Equipment Tag"):
 		return
+	existing = set(frappe.get_all("Equipment Tag", pluck="name"))
 	for tag in DEFAULT_EQUIPMENT_TAGS:
-		if not frappe.db.exists("Equipment Tag", tag["tag_name"]):
+		if tag["tag_name"] not in existing:
 			doc = frappe.get_doc({
 				"doctype": "Equipment Tag",
 				"tag_name": tag["tag_name"],
@@ -651,8 +690,17 @@ def seed_schedule_entry_types():
 	if not frappe.db.exists("DocType", "Schedule Entry Type"):
 		return
 
+	existing_rows = {
+		row.name: row
+		for row in frappe.get_all(
+			"Schedule Entry Type",
+			fields=["name", "requires_repair_order", "color", "description"],
+		)
+	}
+
 	for item in STANDARD_SCHEDULE_ENTRY_TYPES:
-		if not frappe.db.exists("Schedule Entry Type", item["type_name"]):
+		row = existing_rows.get(item["type_name"])
+		if not row:
 			doc = frappe.get_doc({
 				"doctype": "Schedule Entry Type",
 				"type_name": item["type_name"],
@@ -661,48 +709,43 @@ def seed_schedule_entry_types():
 				"description": item["description"],
 			})
 			doc.insert(ignore_permissions=True)
-		else:
+			continue
+
+		needs_update = (
+			int(row.get("requires_repair_order") or 0) != item["requires_repair_order"]
+			or (row.get("color") or "") != item["color"]
+			or (row.get("description") or "") != item["description"]
+		)
+		if needs_update:
 			existing = frappe.get_doc("Schedule Entry Type", item["type_name"])
-			updated = False
-			if existing.requires_repair_order != item["requires_repair_order"]:
-				existing.requires_repair_order = item["requires_repair_order"]
-				updated = True
-			if existing.color != item["color"]:
-				existing.color = item["color"]
-				updated = True
-			if existing.description != item["description"]:
-				existing.description = item["description"]
-				updated = True
-			if updated:
-				existing.save(ignore_permissions=True)
+			existing.requires_repair_order = item["requires_repair_order"]
+			existing.color = item["color"]
+			existing.description = item["description"]
+			existing.save(ignore_permissions=True)
 
 
-def after_migrate():
-	"""Run migrations and setup tasks for ISM."""
-	# 1. Core Scheduling Seeders & ISM Settings (must execute first and idempotently)
+def _run_setup_tasks(full=False):
+	"""Execute idempotent setup steps; full=True forces tax and custom field refresh."""
 	ensure_ism_roles()
 	setup_default_ism_settings()
 	seed_equipment_tags()
 	seed_schedule_entry_types()
-
-	# 2. Master Setup & DocType Permissions
 	create_standard_inspection_template()
 	ensure_doctype_creation_enabled()
-
-	# 3. ERPNext Integration & Custom Field Definitions
-	cleanup_legacy_custom_fields()
-	setup_default_taxes_and_payments()
+	setup_default_taxes_and_payments(only_if_missing=not full)
 	setup_parts_item_group()
-	setup_item_custom_fields()
-	setup_procurement_custom_fields()
+	setup_item_custom_fields(force_update=full)
+	setup_procurement_custom_fields(force_update=full)
 
-	# 4. Historical Data Backfills
-	backfill_service_package_models()
+
+def after_migrate():
+	"""Run lean idempotent setup tasks for ISM on site migrations."""
+	_run_setup_tasks(full=False)
 
 
 def after_install():
-	"""Run installation tasks for ISM on fresh site installs."""
-	after_migrate()
+	"""Run full installation tasks for ISM on fresh site installs."""
+	_run_setup_tasks(full=True)
 
 
 

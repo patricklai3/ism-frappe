@@ -640,9 +640,7 @@ class TestRepairOrder(ISMTestCase):
 			ro.save()
 
 	def test_module_level_authorize_jobs_and_guards(self):
-		"""Verify module-level authorize_jobs endpoint works, syncs services, and unblocks execution."""
-		from ism.ism.doctype.repair_order.repair_order import authorize_jobs
-
+		"""Verify authorize_jobs instance method works, syncs services, and unblocks execution."""
 		item = self.create_test_item("TEST-ALIGN-P", is_stock_item=0, standard_rate=120)
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
@@ -663,8 +661,7 @@ class TestRepairOrder(ISMTestCase):
 		self.track(ro)
 
 		fake_signature = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-		res = authorize_jobs(
-			docname=ro.name,
+		res = ro.authorize_jobs(
 			approvals={"1": "Approved"},
 			channel="In-Person Signature",
 			signer_name="Alice Smith",
@@ -839,13 +836,11 @@ class TestRepairOrder(ISMTestCase):
 			"pick_up_vehicle",
 			"park_vehicle",
 			"toggle_service_completion",
-			"toggle_job_completion",
 			"generate_approval_token",
 			"add_service_package",
 			"add_supplement",
 			"save_service_as_package",
 			"process_payment_and_release",
-			"create_material_request",
 		]
 
 		for method_name in methods_to_check:
@@ -986,25 +981,31 @@ class TestRepairOrder(ISMTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			submit_customer_approval(valid_token, portal_approvals, "Portal Tester", fake_sig)
 
-	def test_parts_html_xss_escaping(self):
-		"""Verify _render_parts_html escapes malicious user input to prevent XSS."""
-		from ism.ism.doctype.repair_order.repair_order import _render_parts_html
+	def test_no_parts_html_or_stock_bloat_on_save(self):
+		"""Verify RepairOrder.validate does not generate parts_html or persist ephemeral stock_qty in s.parts."""
+		part = self.create_test_item("TEST-LEAN-PART", is_stock_item=1, standard_rate=40)
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 20000,
+			"services": [
+				{
+					"service_title": "Lean Service",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": part.name, "item_name": "Lean Part", "qty": 2, "rate": 40}]),
+				}
+			],
+		}).insert()
+		self.track(ro)
 
-		malicious_parts = [
-			{
-				"item_code": '<script>alert("xss")</script>',
-				"item_name": '<img src=x onerror=alert(1)>',
-				"qty": 2,
-				"uom": "<b>Nos</b>",
-				"rate": 10.0,
-			}
-		]
-		html = _render_parts_html(malicious_parts)
-		self.assertNotIn("<script>", html)
-		self.assertNotIn("<img src=x", html)
-		self.assertIn("&lt;script&gt;", html)
-		self.assertIn("&lt;img src=x", html)
-		self.assertIn("&lt;b&gt;Nos&lt;/b&gt;", html)
+		saved_parts = json.loads(ro.services[0].parts)
+		self.assertEqual(len(saved_parts), 1)
+		self.assertNotIn("stock_qty", saved_parts[0])
+		self.assertNotIn("committed_qty", saved_parts[0])
+		self.assertEqual(flt(ro.services[0].parts_total), 80.0)
+		self.assertEqual(flt(ro.services[0].total_amount), 180.0)
 
 	def test_on_cancel_persists_status_cancelled(self):
 		"""Verify cancelling a submitted Repair Order sets status = 'Cancelled' in the database."""
@@ -1132,12 +1133,9 @@ class TestRepairOrder(ISMTestCase):
 		self.assertLess(auth_idx, workshop_tab_idx, "Customer authorization must be inside tab_estimate before tab_workshop.")
 		# sec_bay must be inside tab_workshop (before tab_billing)
 		self.assertLess(bay_sec_idx, billing_tab_idx, "Workshop Bay execution must be inside tab_workshop before tab_billing.")
-		# sec_workshop_tasks must be inside tab_workshop (before tab_billing)
-		self.assertIn("sec_workshop_tasks", field_names)
-		self.assertIn("workshop_tasks_html", field_names)
-		tasks_sec_idx = field_names.index("sec_workshop_tasks")
-		self.assertLess(workshop_tab_idx, tasks_sec_idx, "Workshop tasks section must be inside tab_workshop.")
-		self.assertLess(tasks_sec_idx, billing_tab_idx, "Workshop tasks section must precede billing tab.")
+		# Legacy HTML-blob workshop task fields must stay removed from Repair Order schema
+		self.assertNotIn("sec_workshop_tasks", field_names)
+		self.assertNotIn("workshop_tasks_html", field_names)
 		# sec_payment must be after tab_billing
 		self.assertGreater(payment_sec_idx, billing_tab_idx, "Payment settlement must be inside tab_billing.")
 
@@ -1660,6 +1658,110 @@ class TestRepairOrder(ISMTestCase):
 		# Duplicate attempt should raise error
 		with self.assertRaises(frappe.ValidationError):
 			ro2.duplicate_service_for_opposite_side(ro2.services[0].name)
+
+	def test_validate_does_not_mutate_catalog_service_package(self):
+		"""Saving a Repair Order with custom extra parts must not mutate the linked Service Package catalog."""
+		base_part = self.create_test_item("CAT-BASE-1", is_stock_item=0, standard_rate=30)
+		extra_part = self.create_test_item("RO-ONLY-1", is_stock_item=0, standard_rate=45)
+
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": f"{TEST_PREFIX}Catalog Immutable Pkg",
+			"standard_labor_hours": 1.0,
+			"hourly_rate": 100.0,
+			"items": [{"item_code": base_part.name, "qty": 1, "rate": 30, "slot_number": 1}],
+		}).insert()
+		self.track(pkg)
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 41000,
+			"services": [
+				{
+					"service_package": pkg.name,
+					"service_title": pkg.package_name,
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([
+						{"item_code": base_part.name, "qty": 1, "rate": 30},
+						{"item_code": extra_part.name, "qty": 1, "rate": 45},
+					]),
+				}
+			],
+		}).insert()
+		self.track(ro)
+
+		pkg.reload()
+		self.assertEqual([it.item_code for it in pkg.items], [base_part.name])
+
+	def test_add_supplement_uses_default_labor_rate_when_omitted(self):
+		"""Verify add_supplement resolves server default labor rate instead of a hardcoded rate."""
+		from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 42000,
+			"approval_status": "Approved",
+			"services": [{"service_title": "Base Check", "status": "Approved", "labor_hours": 1.0, "labor_rate": 100.0}],
+		}).insert()
+		self.track(ro)
+
+		ro.add_supplement(service_title="Extra Finding", labor_hours=1.5)
+		ro.reload()
+		self.assertEqual(flt(ro.services[1].labor_rate), flt(_get_default_labor_rate()))
+
+	def test_print_formats_render_repair_vehicle_and_services_cleanly(self):
+		"""Verify Automotive Repair Invoice and Technician Bay Job Card render services, parts JSON, and vehicle fields."""
+		frappe.db.set_value("Repair Vehicle", self.vehicle.name, {
+			"model_year": 2024,
+			"manufacturer": "Tesla",
+			"model": "Model Y",
+		})
+		part = self.create_test_item("PRT-FMT-1", is_stock_item=0, standard_rate=95)
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 51000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "Control Arm Replacement",
+					"status": "Approved",
+					"labor_hours": 1.5,
+					"labor_rate": 120.0,
+					"parts": json.dumps([
+						{
+							"item_code": part.name,
+							"item_name": "Upper Control Arm",
+							"part_source": "OEM",
+							"part_condition": "New",
+							"qty": 1,
+							"rate": 95.0,
+						}
+					]),
+				}
+			],
+		}).insert()
+		self.track(ro)
+
+		invoice_html = frappe.get_print("Repair Order", ro.name, print_format="Automotive Repair Invoice")
+		self.assertIn("2024", invoice_html)
+		self.assertIn("Tesla", invoice_html)
+		self.assertIn("Model Y", invoice_html)
+		self.assertIn("Control Arm Replacement", invoice_html)
+		self.assertIn("Upper Control Arm", invoice_html)
+
+		job_card_html = frappe.get_print("Repair Order", ro.name, print_format="Technician Bay Job Card")
+		self.assertIn("2024", job_card_html)
+		self.assertIn("Control Arm Replacement", job_card_html)
+		self.assertIn("Upper Control Arm", job_card_html)
+		self.assertIn(part.name, job_card_html)
+
 
 
 

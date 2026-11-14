@@ -18,6 +18,8 @@ CANONICAL_ISM_SETTINGS = {
 	"estimation_sigma": 0.30,
 	"buffer_padding_minutes": 0,
 	"default_diagnostic_duration": 60,
+	"default_labor_rate": 140.0,
+	"sms_gateway_provider": "Disabled",
 }
 
 
@@ -113,6 +115,8 @@ class TestISMSettings(ISMTestCase):
 		self.assertAlmostEqual(float(settings.estimation_sigma), 0.30, places=2)
 		self.assertGreaterEqual(int(settings.buffer_padding_minutes or 0), 0)
 		self.assertEqual(settings.default_diagnostic_duration, 60)
+		self.assertAlmostEqual(float(settings.default_labor_rate), 140.0, places=2)
+		self.assertEqual(settings.sms_gateway_provider, "Disabled")
 
 	def test_validate_operating_hours_order(self):
 		"""Verify validation error when operating_hours_start >= operating_hours_end."""
@@ -245,6 +249,25 @@ class TestISMSettings(ISMTestCase):
 
 	def test_ism_manager_permissions(self):
 		"""Verify that a user with only ISM Manager role has read and write permissions on ISM Settings."""
+		docperm_rows = frappe.db.get_all(
+			"DocPerm",
+			filters={"parent": "ISM Settings", "role": "ISM Manager"},
+			fields=["read", "write"],
+		)
+		self.assertTrue(docperm_rows, "ISM Settings DocType schema must grant ISM Manager permissions")
+		self.assertTrue(
+			any(int(row.get("read") or 0) == 1 and int(row.get("write") or 0) == 1 for row in docperm_rows),
+			"ISM Settings DocPerm schema must grant ISM Manager read and write access",
+		)
+
+		# Guard against corrupted partial Custom DocPerm overrides (missing System Manager)
+		# left on a shared test site by legacy scripts or uncommitted test teardown.
+		if frappe.db.exists("Custom DocPerm", {"parent": "ISM Settings"}) and not frappe.db.exists(
+			"Custom DocPerm", {"parent": "ISM Settings", "role": "System Manager"}
+		):
+			frappe.db.delete("Custom DocPerm", {"parent": "ISM Settings"})
+			frappe.clear_cache(doctype="ISM Settings")
+
 		user_email = f"test_ism_mgr_{frappe.generate_hash(length=6)}@example.com"
 		if frappe.db.exists("User", user_email):
 			frappe.delete_doc("User", user_email, force=True)
@@ -265,3 +288,45 @@ class TestISMSettings(ISMTestCase):
 			frappe.has_permission("ISM Settings", "write", user=user_email),
 			"ISM Manager role should have write permission on ISM Settings",
 		)
+
+	def test_validate_default_labor_rate_positive(self):
+		"""Verify default_labor_rate must be positive when set."""
+		settings = frappe.new_doc("ISM Settings")
+		settings.default_labor_rate = 0
+		with self.assertRaises(frappe.ValidationError):
+			settings.validate()
+
+		settings.default_labor_rate = -50.0
+		with self.assertRaises(frappe.ValidationError):
+			settings.validate()
+
+		settings.default_labor_rate = 165.0
+		settings.validate()
+
+	def test_sms_gateway_provider_options_and_twilio_migration(self):
+		"""Verify sms_gateway_provider only offers supported options and coerces legacy Twilio."""
+		meta = frappe.get_meta("ISM Settings")
+		provider_field = meta.get_field("sms_gateway_provider")
+		self.assertIsNotNone(provider_field)
+		options = [opt.strip() for opt in (provider_field.options or "").splitlines() if opt.strip()]
+		self.assertEqual(options, ["Disabled", "Custom HTTP Webhook"])
+
+		settings = frappe.new_doc("ISM Settings")
+		settings.sms_gateway_provider = "Twilio"
+		settings.before_validate()
+		settings._validate_selects()
+		settings.validate()
+		self.assertEqual(settings.sms_gateway_provider, "Disabled")
+
+		settings.sms_gateway_provider = "Custom HTTP Webhook"
+		settings.before_validate()
+		settings._validate_selects()
+		settings.validate()
+		self.assertEqual(settings.sms_gateway_provider, "Custom HTTP Webhook")
+
+	def test_closed_shop_zero_hours_allowed(self):
+		"""Verify 00:00:00-00:00:00 closed-shop operating hours validate natively on ISMSettings."""
+		doc = frappe.get_single("ISM Settings")
+		doc.operating_hours_start = "00:00:00"
+		doc.operating_hours_end = "00:00:00"
+		doc.validate()

@@ -2,111 +2,13 @@
 # For license information, please see license.txt
 
 from typing import List, Dict, Optional, Union, Any
-from datetime import timedelta, time, datetime, date
+from datetime import date, datetime, time, timedelta
+from typing import Any, Dict, List, Optional, Union
+
 import frappe
-from frappe import _
-from frappe.utils import cint
 
-try:
-	from ism.api.scheduling import (
-		to_timedelta,
-		format_timedelta,
-		get_shop_settings,
-		effective_end_time,
-	)
-except ImportError:
-	def to_timedelta(val: Union[str, time, timedelta, int, float, None]) -> timedelta:
-		if val is None:
-			return timedelta(0)
-		if isinstance(val, timedelta):
-			return val
-		if isinstance(val, time):
-			return timedelta(hours=val.hour, minutes=val.minute, seconds=val.second)
-		if isinstance(val, (int, float)):
-			return timedelta(seconds=int(val))
-		if isinstance(val, str):
-			val = val.strip()
-			if not val:
-				return timedelta(0)
-			parts = val.split(":")
-			try:
-				hours = int(parts[0])
-				minutes = int(parts[1]) if len(parts) > 1 else 0
-				seconds = int(float(parts[2])) if len(parts) > 2 else 0
-				return timedelta(hours=hours, minutes=minutes, seconds=seconds)
-			except (ValueError, IndexError):
-				return timedelta(0)
-		return timedelta(0)
-
-	def format_timedelta(td: timedelta) -> str:
-		total_seconds = int(td.total_seconds())
-		hours = total_seconds // 3600
-		minutes = (total_seconds % 3600) // 60
-		return f"{hours:02d}:{minutes:02d}"
-
-	def get_shop_settings() -> Dict[str, Any]:
-		settings = {
-			"operating_hours_start": timedelta(hours=8),
-			"operating_hours_end": timedelta(hours=17),
-			"break_start": timedelta(hours=12),
-			"break_end": timedelta(hours=12, minutes=30),
-			"default_slot_interval": 30,
-			"enable_technician_capacity": 1,
-			"technician_designation": "Technician",
-			"holiday_list": None,
-		}
-		if frappe.db.exists("DocType", "ISM Settings"):
-			try:
-				doc = frappe.get_single("ISM Settings")
-				if doc.operating_hours_start:
-					settings["operating_hours_start"] = to_timedelta(doc.operating_hours_start)
-				if doc.operating_hours_end:
-					settings["operating_hours_end"] = to_timedelta(doc.operating_hours_end)
-				if doc.break_start:
-					settings["break_start"] = to_timedelta(doc.break_start)
-				else:
-					settings["break_start"] = None
-				if doc.break_end:
-					settings["break_end"] = to_timedelta(doc.break_end)
-				else:
-					settings["break_end"] = None
-				if doc.default_slot_interval:
-					settings["default_slot_interval"] = int(doc.default_slot_interval)
-				if hasattr(doc, "enable_technician_capacity"):
-					settings["enable_technician_capacity"] = cint(doc.enable_technician_capacity)
-				if hasattr(doc, "technician_designation") and doc.technician_designation:
-					settings["technician_designation"] = doc.technician_designation
-				if hasattr(doc, "holiday_list") and doc.holiday_list:
-					settings["holiday_list"] = doc.holiday_list
-			except Exception:
-				pass
-		return settings
-
-	def effective_end_time(
-		start_time: Union[str, time, timedelta],
-		duration_minutes: Union[int, float],
-		break_start: Union[str, time, timedelta, None] = None,
-		break_end: Union[str, time, timedelta, None] = None,
-	) -> timedelta:
-		start_td = to_timedelta(start_time)
-		duration_td = timedelta(minutes=float(duration_minutes or 0))
-
-		if break_start is None or break_start == "" or break_end is None or break_end == "":
-			settings = get_shop_settings()
-			bs_td = settings["break_start"] if (break_start is None or break_start == "") else to_timedelta(break_start)
-			be_td = settings["break_end"] if (break_end is None or break_end == "") else to_timedelta(break_end)
-		else:
-			bs_td = to_timedelta(break_start)
-			be_td = to_timedelta(break_end)
-
-		if bs_td and be_td and be_td > bs_td:
-			break_duration = be_td - bs_td
-			if bs_td <= start_td < be_td:
-				return be_td + duration_td
-			elif start_td < bs_td and (start_td + duration_td) > bs_td:
-				return start_td + duration_td + break_duration
-
-		return start_td + duration_td
+from ism.scheduling.capacity import INACTIVE_WORK_STATUSES, NON_BLOCKING_ENTRY_STATUSES
+from ism.scheduling.time_utils import effective_end_time, format_timedelta, get_shop_settings, to_timedelta
 
 
 @frappe.whitelist()
@@ -115,6 +17,7 @@ def get_active_technicians(date: Optional[Union[str, date, datetime]] = None) ->
 	Returns active employees matching ISM Settings -> technician_designation.
 	If date is provided, includes leave status from approved Leave Applications.
 	"""
+	frappe.has_permission("Schedule Entry", "read", throw=True)
 	settings = get_shop_settings()
 	designation = settings.get("technician_designation") or "Technician"
 
@@ -228,6 +131,9 @@ def get_technician_pool_availability(
 	Pool-level capacity gating function.
 	Checks total, on-duty, occupied, and available technicians for the proposed time window.
 	"""
+	frappe.has_permission("Schedule Entry", "read", throw=True)
+	if exclude_entry is not None and not isinstance(exclude_entry, str):
+		frappe.throw(frappe._("Invalid exclude_entry identifier."), frappe.ValidationError)
 	settings = get_shop_settings()
 	if not settings.get("enable_technician_capacity"):
 		return {
@@ -262,8 +168,7 @@ def get_technician_pool_availability(
 
 	for tech in technicians:
 		emp_id = tech["employee"]
-		leave_res = check_employee_leave(emp_id, target_date, start_time, duration_minutes)
-		if leave_res["on_leave"]:
+		if tech.get("on_leave"):
 			on_leave_count += 1
 		else:
 			on_duty_techs.append(emp_id)
@@ -271,11 +176,12 @@ def get_technician_pool_availability(
 	on_duty_count = len(on_duty_techs)
 	occupied_count = 0
 
+	occupied_techs = set()
 	if on_duty_techs:
 		filters = [
 			["assigned_technician", "in", on_duty_techs],
 			["scheduled_date", "=", target_date],
-			["status", "!=", "Cancelled"],
+			["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
 		]
 		if exclude_entry:
 			filters.append(["name", "!=", exclude_entry])
@@ -286,7 +192,6 @@ def get_technician_pool_availability(
 			fields=["assigned_technician", "scheduled_time", "estimated_duration"],
 		)
 
-		occupied_techs = set()
 		for entry in entries:
 			ex_start = to_timedelta(entry.get("scheduled_time"))
 			ex_duration = entry.get("estimated_duration") or 0
@@ -297,6 +202,7 @@ def get_technician_pool_availability(
 
 		occupied_count = len(occupied_techs)
 
+	available_tech_ids = [t for t in on_duty_techs if t not in occupied_techs]
 	available_count = max(0, on_duty_count - occupied_count)
 
 	return {
@@ -305,6 +211,7 @@ def get_technician_pool_availability(
 		"on_duty": on_duty_count,
 		"occupied": occupied_count,
 		"available": available_count,
+		"available_technicians": available_tech_ids,
 		"is_available": available_count > 0,
 	}
 
@@ -321,7 +228,8 @@ def check_technician_availability(
 	Checks availability of a specific technician for a given date/time window.
 	Returns details on leave status, overlaps, and availability.
 	"""
-	if not employee or not date:
+	frappe.has_permission("Schedule Entry", "read", throw=True)
+	if not employee or not isinstance(employee, str) or not date:
 		return {
 			"is_available": False,
 			"reason": "invalid_parameters",
@@ -329,6 +237,8 @@ def check_technician_availability(
 			"half_day": False,
 			"conflicts": [],
 		}
+	if exclude_entry is not None and not isinstance(exclude_entry, str):
+		frappe.throw(frappe._("Invalid exclude_entry identifier."), frappe.ValidationError)
 
 	settings = get_shop_settings()
 	designation = settings.get("technician_designation") or "Technician"
@@ -380,7 +290,7 @@ def check_technician_availability(
 	filters = [
 		["assigned_technician", "=", employee],
 		["scheduled_date", "=", target_date],
-		["status", "!=", "Cancelled"],
+		["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
 	]
 	if exclude_entry:
 		filters.append(["name", "!=", exclude_entry])
@@ -426,48 +336,22 @@ def check_technician_availability(
 	}
 
 
-@frappe.whitelist()
-def get_technician_queue(employee: str, date: Union[str, date, datetime]) -> Dict[str, Any]:
-	"""
-	Returns personal work queue for a technician on a specific date.
-	Calculates gaps between entries and utilization percentage.
-	"""
-	settings = get_shop_settings()
-	op_start = settings["operating_hours_start"]
-	op_end = settings["operating_hours_end"]
-	bs_td = settings.get("break_start")
-	be_td = settings.get("break_end")
-
-	target_date = str(date)
-	emp_name = frappe.db.get_value("Employee", employee, "employee_name") or employee
-
-	# Check leave status
-	leave_res = check_employee_leave(employee, target_date, op_start, 0)
-	on_leave = leave_res["on_leave"]
-
-	entries = frappe.get_all(
-		"Schedule Entry",
-		filters=[
-			["assigned_technician", "=", employee],
-			["scheduled_date", "=", target_date],
-			["status", "!=", "Cancelled"],
-		],
-		fields=[
-			"name",
-			"scheduled_time",
-			"estimated_duration",
-			"service_bay",
-			"customer",
-			"repair_vehicle",
-			"items_summary",
-			"status",
-			"repair_order",
-		],
-		order_by="scheduled_time asc",
-	)
-
+def _build_queue_from_entries(
+	employee: str,
+	emp_name: str,
+	on_leave: bool,
+	entries: List[Dict[str, Any]],
+	op_start: timedelta,
+	op_end: timedelta,
+	bs_td: Optional[timedelta],
+	be_td: Optional[timedelta],
+) -> Dict[str, Any]:
+	"""Aggregate timeline metrics and utilization gaps from sorted Schedule Entry rows."""
 	formatted_entries = []
 	total_minutes = 0
+	completed_minutes = 0
+	remaining_minutes = 0
+	active_job_count = 0
 	gaps = []
 	last_end_td = op_start
 
@@ -477,8 +361,12 @@ def get_technician_queue(employee: str, date: Union[str, date, datetime]) -> Dic
 		eff_end_td = effective_end_time(st_td, dur, bs_td, be_td)
 
 		total_minutes += dur
+		if entry.get("status") == "Completed":
+			completed_minutes += dur
+		else:
+			remaining_minutes += dur
+			active_job_count += 1
 
-		# Calculate gap before this entry if there is free space
 		if st_td > last_end_td:
 			gap_dur = int((st_td - last_end_td).total_seconds() // 60)
 			if bs_td and be_td and last_end_td <= bs_td and st_td >= be_td:
@@ -519,7 +407,10 @@ def get_technician_queue(employee: str, date: Union[str, date, datetime]) -> Dic
 		"timeline": formatted_entries,
 		"entries": formatted_entries,
 		"total_jobs": len(formatted_entries),
+		"active_job_count": active_job_count,
 		"total_minutes": total_minutes,
+		"completed_minutes": completed_minutes,
+		"remaining_minutes": remaining_minutes,
 		"utilization_percent": utilization_pct,
 		"utilization_pct": utilization_pct,
 		"gaps": gaps,
@@ -527,10 +418,64 @@ def get_technician_queue(employee: str, date: Union[str, date, datetime]) -> Dic
 
 
 @frappe.whitelist()
+def get_technician_queue(employee: str, date: Union[str, date, datetime]) -> Dict[str, Any]:
+	"""
+	Returns personal work queue for a technician on a specific date.
+	Calculates gaps between entries and utilization percentage.
+	"""
+	frappe.has_permission("Schedule Entry", "read", throw=True)
+	if not employee or not isinstance(employee, str):
+		frappe.throw(frappe._("Valid technician identifier is required."), frappe.ValidationError)
+	settings = get_shop_settings()
+	op_start = settings["operating_hours_start"]
+	op_end = settings["operating_hours_end"]
+	bs_td = settings.get("break_start")
+	be_td = settings.get("break_end")
+
+	target_date = str(date)
+	emp_name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+	leave_res = check_employee_leave(employee, target_date, op_start, 0)
+
+	entries = frappe.get_list(
+		"Schedule Entry",
+		filters=[
+			["assigned_technician", "=", employee],
+			["scheduled_date", "=", target_date],
+			["status", "not in", list(INACTIVE_WORK_STATUSES)],
+		],
+		fields=[
+			"name",
+			"scheduled_time",
+			"estimated_duration",
+			"service_bay",
+			"customer",
+			"repair_vehicle",
+			"items_summary",
+			"status",
+			"repair_order",
+		],
+		order_by="scheduled_time asc",
+	)
+
+	return _build_queue_from_entries(
+		employee=employee,
+		emp_name=emp_name,
+		on_leave=leave_res["on_leave"],
+		entries=entries,
+		op_start=op_start,
+		op_end=op_end,
+		bs_td=bs_td,
+		be_td=be_td,
+	)
+
+
+@frappe.whitelist()
 def get_daily_technician_overview(date: Union[str, date, datetime]) -> Dict[str, Any]:
 	"""
 	Shop-wide technician dashboard data for managers and overview reporting.
 	"""
+	frappe.has_permission("Schedule Entry", "read", throw=True)
+	frappe.has_permission("Service Bay", "read", throw=True)
 	settings = get_shop_settings()
 	op_start = settings["operating_hours_start"]
 	op_end = settings["operating_hours_end"]
@@ -545,34 +490,69 @@ def get_daily_technician_overview(date: Union[str, date, datetime]) -> Dict[str,
 	operating_minutes = max(1, operating_minutes)
 
 	active_techs = get_active_technicians(date=target_date)
+	day_entries = frappe.get_list(
+		"Schedule Entry",
+		filters=[
+			["scheduled_date", "=", target_date],
+			["status", "not in", list(INACTIVE_WORK_STATUSES)],
+		],
+		fields=[
+			"name",
+			"assigned_technician",
+			"scheduled_time",
+			"estimated_duration",
+			"service_bay",
+			"customer",
+			"repair_vehicle",
+			"items_summary",
+			"status",
+			"repair_order",
+		],
+		order_by="scheduled_time asc",
+	)
+
+	entries_by_tech: Dict[str, List[Dict[str, Any]]] = {}
+	unassigned = []
+	for entry in day_entries:
+		tech_id = entry.get("assigned_technician")
+		if tech_id:
+			entries_by_tech.setdefault(tech_id, []).append(entry)
+		else:
+			unassigned.append(entry)
 
 	tech_summaries = []
 	total_scheduled_minutes = 0
+	total_remaining_minutes = 0
+	total_completed_minutes = 0
 
 	for tech in active_techs:
 		emp_id = tech["employee"]
-		queue = get_technician_queue(emp_id, target_date)
+		queue = _build_queue_from_entries(
+			employee=emp_id,
+			emp_name=tech["employee_name"],
+			on_leave=tech["on_leave"],
+			entries=entries_by_tech.get(emp_id, ()),
+			op_start=op_start,
+			op_end=op_end,
+			bs_td=bs_td,
+			be_td=be_td,
+		)
 
 		tech_summaries.append({
 			"employee": emp_id,
 			"employee_name": tech["employee_name"],
 			"on_leave": tech["on_leave"],
 			"job_count": queue["total_jobs"],
+			"active_job_count": queue["active_job_count"],
 			"total_minutes": queue["total_minutes"],
+			"completed_minutes": queue["completed_minutes"],
+			"remaining_minutes": queue["remaining_minutes"],
 			"utilization_percent": queue["utilization_percent"],
 			"utilization_pct": queue["utilization_pct"],
 		})
 		total_scheduled_minutes += queue["total_minutes"]
-
-	unassigned = frappe.get_all(
-		"Schedule Entry",
-		filters=[
-			["scheduled_date", "=", target_date],
-			["status", "!=", "Cancelled"],
-			["assigned_technician", "is", "not set"],
-		],
-		fields=["name", "scheduled_time", "customer", "repair_vehicle", "service_bay", "estimated_duration", "repair_order"],
-	)
+		total_remaining_minutes += queue["remaining_minutes"]
+		total_completed_minutes += queue["completed_minutes"]
 
 	unassigned_formatted = []
 	for u in unassigned:
@@ -593,6 +573,8 @@ def get_daily_technician_overview(date: Union[str, date, datetime]) -> Dict[str,
 
 	bottleneck = "technician" if on_duty_count < total_bays else ("bay" if total_bays < on_duty_count else None)
 	total_hours = round(total_scheduled_minutes / 60.0, 1)
+	active_hours = round(total_remaining_minutes / 60.0, 1)
+	completed_hours = round(total_completed_minutes / 60.0, 1)
 
 	shop_summary = {
 		"total_technicians": len(active_techs),
@@ -601,6 +583,8 @@ def get_daily_technician_overview(date: Union[str, date, datetime]) -> Dict[str,
 		"total_bays": total_bays,
 		"bottleneck": bottleneck,
 		"total_scheduled_hours": total_hours,
+		"active_scheduled_hours": active_hours,
+		"completed_hours": completed_hours,
 		"unassigned_count": len(unassigned_formatted),
 	}
 

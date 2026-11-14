@@ -6,127 +6,28 @@ from datetime import date, datetime, time, timedelta
 
 import frappe
 from frappe import _
-from frappe.utils import cint
+from frappe.utils import add_days, cint, getdate
+
+from ism.scheduling.capacity import (
+	INACTIVE_WORK_STATUSES,
+	NON_BLOCKING_ENTRY_STATUSES,
+	ShopCapacityWindow,
+	load_bay_tags_map,
+	parse_required_tags as _parse_required_tags,
+	resolve_candidate_bays,
+)
+from ism.scheduling.time_utils import (
+	effective_end_time as _effective_end_time,
+	format_timedelta,
+	get_shop_settings,
+	to_timedelta,
+)
 
 
-def to_timedelta(val: Union[str, time, timedelta, int, float, None]) -> timedelta:
-	"""Convert various time representations into a datetime.timedelta object."""
-	if val is None:
-		return timedelta(0)
-	if isinstance(val, timedelta):
-		return val
-	if isinstance(val, time):
-		return timedelta(hours=val.hour, minutes=val.minute, seconds=val.second)
-	if isinstance(val, (int, float)):
-		return timedelta(seconds=int(val))
-	if isinstance(val, str):
-		val = val.strip()
-		if not val:
-			return timedelta(0)
-		parts = val.split(":")
-		try:
-			hours = int(parts[0])
-			minutes = int(parts[1]) if len(parts) > 1 else 0
-			seconds = int(float(parts[2])) if len(parts) > 2 else 0
-			return timedelta(hours=hours, minutes=minutes, seconds=seconds)
-		except (ValueError, IndexError):
-			return timedelta(0)
-	return timedelta(0)
-
-
-def format_timedelta(td: timedelta) -> str:
-	"""Format a timedelta object into a HH:MM string."""
-	total_seconds = int(td.total_seconds())
-	hours = total_seconds // 3600
-	minutes = (total_seconds % 3600) // 60
-	return f"{hours:02d}:{minutes:02d}"
-
-
-# Support 00:00:00 - 00:00:00 operating hours boundary (closed shop / disabled hours)
-try:
-	from ism.ism.doctype.ism_settings.ism_settings import ISMSettings
-
-	def _safe_validate_operating_hours(self):
-		if self.operating_hours_start and self.operating_hours_end:
-			start = to_timedelta(self.operating_hours_start)
-			end = to_timedelta(self.operating_hours_end)
-			if not (start == end == timedelta(0)):
-				if start >= end:
-					frappe.throw(_("Operating Hours Start must be before Operating Hours End."))
-
-		if self.default_slot_interval is not None and self.default_slot_interval <= 0:
-			frappe.throw(_("Default Slot Interval must be greater than 0 minutes."))
-
-		if self.scheduling_horizon_days is not None and self.scheduling_horizon_days <= 0:
-			frappe.throw(_("Scheduling Horizon must be greater than 0 days."))
-
-	def _safe_validate_break_hours(self):
-		if self.break_start and self.break_end:
-			b_start = to_timedelta(self.break_start)
-			b_end = to_timedelta(self.break_end)
-			if b_start >= b_end:
-				frappe.throw(_("Break Start must be before Break End."))
-
-			if self.operating_hours_start and self.operating_hours_end:
-				op_start = to_timedelta(self.operating_hours_start)
-				op_end = to_timedelta(self.operating_hours_end)
-				if op_start == op_end == timedelta(0):
-					return
-				if b_start < op_start or b_end > op_end:
-					frappe.throw(_("Lunch break window must be within shop operating hours."))
-
-	ISMSettings._validate_operating_hours = _safe_validate_operating_hours
-	ISMSettings._validate_break_hours = _safe_validate_break_hours
-except Exception:
-	pass
-
-
-def get_shop_settings() -> Dict[str, Any]:
-	"""Retrieve shop scheduling parameters from ISM Settings."""
-	settings = {
-		"operating_hours_start": timedelta(hours=8),
-		"operating_hours_end": timedelta(hours=17),
-		"break_start": timedelta(hours=12),
-		"break_end": timedelta(hours=12, minutes=30),
-		"default_slot_interval": 30,
-		"scheduling_horizon_days": 30,
-		"enable_technician_capacity": 1,
-		"technician_designation": "Technician",
-		"holiday_list": None,
-		"default_diagnostic_duration": 60,
-	}
-
-	if frappe.db.exists("DocType", "ISM Settings"):
-		try:
-			doc = frappe.get_single("ISM Settings")
-			if doc.operating_hours_start is not None and str(doc.operating_hours_start).strip() != "":
-				settings["operating_hours_start"] = to_timedelta(doc.operating_hours_start)
-			if doc.operating_hours_end is not None and str(doc.operating_hours_end).strip() != "":
-				settings["operating_hours_end"] = to_timedelta(doc.operating_hours_end)
-			if doc.break_start is not None and str(doc.break_start).strip() != "":
-				settings["break_start"] = to_timedelta(doc.break_start)
-			else:
-				settings["break_start"] = None
-			if doc.break_end is not None and str(doc.break_end).strip() != "":
-				settings["break_end"] = to_timedelta(doc.break_end)
-			else:
-				settings["break_end"] = None
-			if getattr(doc, "default_slot_interval", None):
-				settings["default_slot_interval"] = int(doc.default_slot_interval)
-			if getattr(doc, "scheduling_horizon_days", None):
-				settings["scheduling_horizon_days"] = int(doc.scheduling_horizon_days)
-			if hasattr(doc, "enable_technician_capacity") and doc.enable_technician_capacity is not None:
-				settings["enable_technician_capacity"] = cint(doc.enable_technician_capacity)
-			if getattr(doc, "technician_designation", None):
-				settings["technician_designation"] = doc.technician_designation
-			if getattr(doc, "holiday_list", None):
-				settings["holiday_list"] = doc.holiday_list
-			if getattr(doc, "default_diagnostic_duration", None):
-				settings["default_diagnostic_duration"] = int(doc.default_diagnostic_duration)
-		except Exception:
-			pass
-
-	return settings
+def _ensure_schedule_read_permission(include_bays: bool = False) -> None:
+	frappe.has_permission("Schedule Entry", "read", throw=True)
+	if include_bays:
+		frappe.has_permission("Service Bay", "read", throw=True)
 
 
 @frappe.whitelist()
@@ -136,34 +37,9 @@ def effective_end_time(
 	break_start: Union[str, time, timedelta, None] = None,
 	break_end: Union[str, time, timedelta, None] = None,
 ) -> timedelta:
-	"""Calculate clock-time end of an appointment, accounting for lunch break window.
-
-	- If job starts during lunch window [break_start, break_end), effective start
-	  is pushed to break_end and work duration begins from there.
-	- If job starts before lunch window and naive end spans past break_start,
-	  break duration is added to end time.
-	- If job ends at or before break_start, or starts at or after break_end,
-	  no break adjustment is added.
-	"""
-	start_td = to_timedelta(start_time)
-	duration_td = timedelta(minutes=float(duration_minutes or 0))
-
-	if break_start is None or break_start == "" or break_end is None or break_end == "":
-		settings = get_shop_settings()
-		bs_td = settings["break_start"] if (break_start is None or break_start == "") else to_timedelta(break_start)
-		be_td = settings["break_end"] if (break_end is None or break_end == "") else to_timedelta(break_end)
-	else:
-		bs_td = to_timedelta(break_start)
-		be_td = to_timedelta(break_end)
-
-	if bs_td and be_td and be_td > bs_td:
-		break_duration = be_td - bs_td
-		if bs_td <= start_td < be_td:
-			return be_td + duration_td
-		elif start_td < bs_td and (start_td + duration_td) > bs_td:
-			return start_td + duration_td + break_duration
-
-	return start_td + duration_td
+	"""Calculate clock-time end of an appointment, accounting for lunch break window."""
+	_ensure_schedule_read_permission()
+	return _effective_end_time(start_time, duration_minutes, break_start, break_end)
 
 
 @frappe.whitelist()
@@ -179,24 +55,28 @@ def check_bay_availability(
 	Uses lunch-aware intervals for both proposed and existing Schedule Entries.
 	Returns True if bay is free, False if an overlap collision exists.
 	"""
-	if not service_bay or not date:
+	_ensure_schedule_read_permission(include_bays=True)
+	if not service_bay or not isinstance(service_bay, str) or not date:
 		return False
+	if exclude_entry is not None and not isinstance(exclude_entry, str):
+		frappe.throw(_("Invalid exclude_entry identifier."), frappe.ValidationError)
 
 	settings = get_shop_settings()
 	bs_td = settings["break_start"]
 	be_td = settings["break_end"]
 
 	prop_start = to_timedelta(start_time)
-	prop_end = effective_end_time(prop_start, duration_minutes, bs_td, be_td)
+	prop_end = _effective_end_time(prop_start, duration_minutes, bs_td, be_td)
 
 	filters = [
 		["service_bay", "=", service_bay],
 		["scheduled_date", "=", str(date)],
-		["status", "!=", "Cancelled"],
+		["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
 	]
 	if exclude_entry:
 		filters.append(["name", "!=", exclude_entry])
 
+	# Shop-wide overlap check intentionally scans all non-blocking entries after read perm verification.
 	existing_entries = frappe.get_all(
 		"Schedule Entry",
 		filters=filters,
@@ -206,9 +86,8 @@ def check_bay_availability(
 	for entry in existing_entries:
 		ex_start = to_timedelta(entry.get("scheduled_time"))
 		ex_duration = entry.get("estimated_duration") or 0
-		ex_end = effective_end_time(ex_start, ex_duration, bs_td, be_td)
+		ex_end = _effective_end_time(ex_start, ex_duration, bs_td, be_td)
 
-		# Interval overlap check: max(start1, start2) < min(end1, end2)
 		if max(prop_start, ex_start) < min(prop_end, ex_end):
 			return False
 
@@ -223,42 +102,45 @@ def get_available_bays(
 	required_tags: Optional[Union[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
 	"""Return active Service Bays matching required equipment tags and free during interval."""
-	if isinstance(required_tags, str):
-		try:
-			required_tags = frappe.parse_json(required_tags)
-		except Exception:
-			required_tags = [t.strip() for t in required_tags.split(",") if t.strip()]
-	if not required_tags:
-		required_tags = []
+	_ensure_schedule_read_permission(include_bays=True)
+	if not date:
+		return []
 
-	required_tags_set = set(required_tags)
+	required_tags_set = set(_parse_required_tags(required_tags))
+	candidate_bays, tags_by_bay = resolve_candidate_bays(None, required_tags_set)
+	if not candidate_bays:
+		return []
 
-	active_bays = frappe.get_all(
-		"Service Bay",
-		filters={"is_active": 1},
-		fields=["name", "bay_name"],
-		order_by="name asc",
+	settings = get_shop_settings()
+	bs_td = settings["break_start"]
+	be_td = settings["break_end"]
+	prop_start = to_timedelta(start_time)
+	prop_end = _effective_end_time(prop_start, duration_minutes, bs_td, be_td)
+
+	entries = frappe.get_all(
+		"Schedule Entry",
+		filters=[
+			["service_bay", "in", candidate_bays],
+			["scheduled_date", "=", str(date)],
+			["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
+		],
+		fields=["service_bay", "scheduled_time", "estimated_duration"],
 	)
-
-	available_bays = []
-	for bay in active_bays:
-		tags = frappe.get_all(
-			"Service Bay Equipment",
-			filters={"parent": bay.get("name")},
-			pluck="equipment_tag",
-		)
-		bay_tags_set = set(tags)
-
-		if not required_tags_set.issubset(bay_tags_set):
+	occupied_bays = set()
+	for entry in entries:
+		bay = entry.get("service_bay")
+		if not bay or bay in occupied_bays:
 			continue
+		ex_start = to_timedelta(entry.get("scheduled_time"))
+		ex_end = _effective_end_time(ex_start, entry.get("estimated_duration") or 0, bs_td, be_td)
+		if max(prop_start, ex_start) < min(prop_end, ex_end):
+			occupied_bays.add(bay)
 
-		if check_bay_availability(bay.get("name"), date, start_time, duration_minutes):
-			available_bays.append({
-				"bay_name": bay.get("name"),
-				"equipment_tags": tags,
-			})
-
-	return available_bays
+	return [
+		{"bay_name": bay_name, "equipment_tags": tags_by_bay.get(bay_name, [])}
+		for bay_name in candidate_bays
+		if bay_name not in occupied_bays
+	]
 
 
 @frappe.whitelist()
@@ -272,6 +154,7 @@ def auto_assign_bay(
 
 	Raises ValidationError if technician capacity exhausted or no capable bay available.
 	"""
+	_ensure_schedule_read_permission(include_bays=True)
 	settings = get_shop_settings()
 	if settings.get("enable_technician_capacity"):
 		try:
@@ -294,100 +177,38 @@ def auto_assign_bay(
 	return bays[0]["bay_name"]
 
 
+def _resolve_candidate_bays(
+	service_bay: Optional[str],
+	required_tags_set: set[str],
+) -> List[str]:
+	bays, _tags = resolve_candidate_bays(service_bay, required_tags_set)
+	return bays
+
+
 @frappe.whitelist()
 def get_available_slots(
 	date: str,
 	duration_minutes: Union[int, float],
 	required_tags: Optional[Union[str, List[str]]] = None,
 	service_bay: Optional[str] = None,
+	max_slots: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-	"""Return available slot dicts for date and duration across operating hours.
-
-	Excludes lunch break slots and slots ending after operating hours.
-	Reports available_bays, available_technicians, effective_capacity, and bottleneck.
-	"""
-	settings = get_shop_settings()
-	op_start = settings["operating_hours_start"]
-	op_end = settings["operating_hours_end"]
-	bs_td = settings["break_start"]
-	be_td = settings["break_end"]
-	interval = settings["default_slot_interval"] or 30
-	enable_tech = settings.get("enable_technician_capacity")
-
-	if op_start >= op_end or interval <= 0:
-		return []
-
-	duration_val = float(duration_minutes or 0)
-	if duration_val <= 0:
-		duration_val = float(settings.get("default_diagnostic_duration") or 60)
-
-	curr_time = op_start
-	slots = []
-
-	while curr_time < op_end:
-		# 1. Skip slot if curr_time falls inside lunch break
-		if bs_td and be_td and bs_td <= curr_time < be_td:
-			curr_time += timedelta(minutes=interval)
-			continue
-
-		# 2. Check effective end time does not exceed operating hours
-		eff_end = effective_end_time(curr_time, duration_val, bs_td, be_td)
-		if eff_end > op_end:
-			curr_time += timedelta(minutes=interval)
-			continue
-
-		# 3. Check bay availability
-		if service_bay:
-			if check_bay_availability(service_bay, date, curr_time, duration_val):
-				avail_bays_count = 1
-			else:
-				avail_bays_count = 0
-		else:
-			avail_bays = get_available_bays(date, curr_time, duration_val, required_tags)
-			avail_bays_count = len(avail_bays)
-
-		# 4. Check technician capacity if enabled
-		if enable_tech:
-			try:
-				from ism.api.technician_availability import get_technician_pool_availability
-				tech_pool = get_technician_pool_availability(date, curr_time, duration_val)
-				avail_techs_count = tech_pool.get("available", 0)
-			except ImportError:
-				avail_techs_count = None
-
-			if avail_techs_count is not None:
-				eff_cap = min(avail_bays_count, avail_techs_count)
-				if avail_techs_count < avail_bays_count:
-					bottleneck = "technician"
-				elif avail_bays_count < avail_techs_count:
-					bottleneck = "bay"
-				else:
-					bottleneck = "none"
-			else:
-				eff_cap = avail_bays_count
-				bottleneck = None
-		else:
-			avail_techs_count = None
-			eff_cap = avail_bays_count
-			bottleneck = None
-
-		if eff_cap > 0:
-			slots.append({
-				"start_time": format_timedelta(curr_time),
-				"available_bays": avail_bays_count,
-				"available_technicians": avail_techs_count,
-				"effective_capacity": eff_cap,
-				"bottleneck": bottleneck,
-			})
-
-		curr_time += timedelta(minutes=interval)
-
-	return slots
+	"""Return available slot dicts for date and duration across operating hours."""
+	_ensure_schedule_read_permission(include_bays=True)
+	window = ShopCapacityWindow(
+		start_date=date,
+		end_date=date,
+		required_tags=required_tags,
+		service_bay=service_bay,
+		skip_holidays=False,
+	)
+	return window.slots_for_date(date, duration_minutes, max_slots=max_slots)
 
 
 @frappe.whitelist()
 def is_holiday(date: Union[str, datetime, date]) -> Dict[str, Any]:
 	"""Check if a given date is a holiday according to ISM Settings -> holiday_list."""
+	_ensure_schedule_read_permission()
 	settings = get_shop_settings()
 	holiday_list = settings.get("holiday_list")
 	if not holiday_list or not date:
@@ -413,7 +234,9 @@ def is_holiday(date: Union[str, datetime, date]) -> Dict[str, Any]:
 @frappe.whitelist()
 def get_calendar_events(*args, **kwargs):
 	"""Re-export get_calendar_events from scheduling_views without circular imports."""
+	_ensure_schedule_read_permission()
 	from ism.api.scheduling_views import get_calendar_events as _get_events
+
 	return _get_events(*args, **kwargs)
 
 
@@ -425,27 +248,28 @@ def find_next_available_slot(
 	service_bay: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
 	"""Search forward from from_date up to scheduling_horizon_days for the earliest date with available slots."""
-	from frappe.utils import add_days, getdate
+	_ensure_schedule_read_permission(include_bays=True)
 	settings = get_shop_settings()
 	horizon = settings.get("scheduling_horizon_days") or 30
 	max_days = min(int(horizon), 30)
 
 	start_dt = getdate(from_date) if from_date else getdate()
-	for i in range(1, max_days + 1):
-		target_dt = add_days(start_dt, i)
-		target_str = str(target_dt)
-		hol = is_holiday(target_str)
-		if hol.get("is_holiday"):
-			continue
-		slots = get_available_slots(
-			date=target_str,
-			duration_minutes=duration_minutes,
-			required_tags=required_tags,
-			service_bay=service_bay,
-		)
+	window_start = add_days(start_dt, 1)
+	window_end = add_days(start_dt, max_days)
+
+	window = ShopCapacityWindow(
+		start_date=window_start,
+		end_date=window_end,
+		required_tags=required_tags,
+		service_bay=service_bay,
+		skip_holidays=True,
+	)
+
+	for target_dt in window.iter_dates():
+		slots = window.slots_for_date(target_dt, duration_minutes)
 		if slots:
 			return {
-				"date": target_str,
+				"date": str(target_dt),
 				"first_slot": slots[0],
 				"slots_count": len(slots),
 			}
@@ -455,47 +279,56 @@ def find_next_available_slot(
 @frappe.whitelist()
 def get_unscheduled_services(repair_order: str) -> List[Dict[str, Any]]:
 	"""Return services on Repair Order that are not yet allocated to an active Schedule Entry."""
-	if not repair_order or not frappe.db.exists("Repair Order", repair_order):
+	_ensure_schedule_read_permission()
+	frappe.has_permission("Repair Order", "read", throw=True)
+	if not repair_order or not isinstance(repair_order, str) or not frappe.db.exists("Repair Order", repair_order):
 		return []
+	frappe.has_permission("Repair Order", "read", doc=repair_order, throw=True)
+
+	has_se_field = frappe.db.has_column("Repair Order Service", "schedule_entry")
+	fields = [
+		"name",
+		"service_package",
+		"service_title",
+		"labor_hours",
+		"is_supplement",
+		"status",
+		"assigned_technician",
+	]
+	if has_se_field:
+		fields.append("schedule_entry")
 
 	services = frappe.get_all(
 		"Repair Order Service",
 		filters={"parent": repair_order},
-		fields=[
-			"name",
-			"service_package",
-			"service_title",
-			"labor_hours",
-			"is_supplement",
-			"status",
-			"assigned_technician",
-		],
+		fields=fields,
 		order_by="idx asc, creation asc",
 	)
 
-	has_se_field = frappe.db.has_column("Repair Order Service", "schedule_entry")
-	allocated_svc_names = set()
-
-	if has_se_field:
-		for s in services:
-			se = frappe.db.get_value("Repair Order Service", s.name, "schedule_entry")
-			if se:
-				se_status = frappe.db.get_value("Schedule Entry", se, "status")
-				if se_status != "Cancelled":
-					allocated_svc_names.add(s.name)
+	linked_se_names = list({s.get("schedule_entry") for s in services if has_se_field and s.get("schedule_entry")})
+	se_status_map: Dict[str, str] = {}
+	if linked_se_names:
+		for row in frappe.get_all(
+			"Schedule Entry",
+			filters={"name": ["in", linked_se_names]},
+			fields=["name", "status"],
+		):
+			se_status_map[row["name"]] = row.get("status") or ""
 
 	unscheduled = []
 	for s in services:
 		if s.get("status") == "Declined":
 			continue
-		if s.name in allocated_svc_names:
+
+		se_name = s.get("schedule_entry") if has_se_field else None
+		if se_name and se_status_map.get(se_name) not in INACTIVE_WORK_STATUSES:
 			continue
 
 		title = s.get("service_title") or s.get("service_package") or _("Service")
 		hours = float(s.get("labor_hours") or 0)
 		mins = int(round(hours * 60))
 		unscheduled.append({
-			"name": s.name,
+			"name": s["name"],
 			"service_title": title,
 			"labor_hours": hours,
 			"labor_minutes": mins,
@@ -505,6 +338,29 @@ def get_unscheduled_services(repair_order: str) -> List[Dict[str, Any]]:
 		})
 
 	return unscheduled
+
+
+def _format_services_summary(selected_services: List[str], repair_order: Optional[str]) -> Optional[str]:
+	if not (selected_services and repair_order):
+		return None
+
+	rows = frappe.get_all(
+		"Repair Order Service",
+		filters={"parent": repair_order, "name": ["in", selected_services]},
+		fields=["name", "service_title", "service_package", "labor_hours", "is_supplement"],
+		order_by="idx asc",
+	)
+	by_name = {r["name"]: r for r in rows}
+	lines = []
+	for svc_name in selected_services:
+		svc = by_name.get(svc_name)
+		if not svc:
+			continue
+		stitle = svc.get("service_title") or svc.get("service_package") or "Service"
+		supp_badge = " [Supplement]" if svc.get("is_supplement") else ""
+		shours = float(svc.get("labor_hours") or 0)
+		lines.append(f"- {stitle}{supp_badge} ({shours:.1f} hrs)")
+	return "\n".join(lines) if lines else None
 
 
 @frappe.whitelist()
@@ -519,8 +375,15 @@ def allocate_schedule_entry(
 	notes: Optional[str] = None,
 	selected_services: Optional[Union[str, List[str]]] = None,
 	schedule_entry_name: Optional[str] = None,
+	provisional_customer_name: Optional[str] = None,
+	provisional_vehicle_info: Optional[str] = None,
 ) -> Dict[str, Any]:
 	"""Create or update a Schedule Entry and link allocated Repair Order services."""
+	if schedule_entry_name is not None and not isinstance(schedule_entry_name, str):
+		frappe.throw(_("Invalid Schedule Entry identifier."), frappe.ValidationError)
+	if repair_order is not None and not isinstance(repair_order, str):
+		frappe.throw(_("Invalid Repair Order identifier."), frappe.ValidationError)
+
 	if isinstance(selected_services, str):
 		try:
 			selected_services = frappe.parse_json(selected_services)
@@ -529,26 +392,24 @@ def allocate_schedule_entry(
 	if not selected_services:
 		selected_services = []
 
-	items_summary_lines = []
-	if selected_services and repair_order:
-		for svc_name in selected_services:
-			svc = frappe.db.get_value(
-				"Repair Order Service",
-				svc_name,
-				["service_title", "service_package", "labor_hours", "is_supplement"],
-				as_dict=True,
-			)
-			if svc:
-				stitle = svc.get("service_title") or svc.get("service_package") or "Service"
-				supp_badge = " [Supplement]" if svc.get("is_supplement") else ""
-				shours = float(svc.get("labor_hours") or 0)
-				items_summary_lines.append(f"- {stitle}{supp_badge} ({shours:.1f} hrs)")
-
-	items_summary = "\n".join(items_summary_lines) if items_summary_lines else None
-
 	is_update = bool(schedule_entry_name and frappe.db.exists("Schedule Entry", schedule_entry_name))
 	if is_update:
+		frappe.has_permission("Schedule Entry", "write", throw=True)
 		doc = frappe.get_doc("Schedule Entry", schedule_entry_name)
+		doc.check_permission("write")
+	else:
+		frappe.has_permission("Schedule Entry", "create", throw=True)
+
+	if repair_order:
+		if not frappe.db.exists("Repair Order", repair_order):
+			frappe.throw(_("Repair Order {0} does not exist.").format(repair_order), frappe.DoesNotExistError)
+		frappe.has_permission("Repair Order", "read", doc=repair_order, throw=True)
+		if selected_services:
+			frappe.has_permission("Repair Order", "write", doc=repair_order, throw=True)
+
+	items_summary = _format_services_summary(selected_services, repair_order)
+
+	if is_update:
 		if repair_order:
 			doc.repair_order = repair_order
 		doc.entry_type = entry_type
@@ -560,6 +421,10 @@ def allocate_schedule_entry(
 		doc.assigned_technician = assigned_technician or None
 		if notes:
 			doc.notes = notes
+		if provisional_customer_name is not None:
+			doc.provisional_customer_name = provisional_customer_name
+		if provisional_vehicle_info is not None:
+			doc.provisional_vehicle_info = provisional_vehicle_info
 		if items_summary:
 			doc.items_summary = items_summary
 		doc.save()
@@ -573,17 +438,24 @@ def allocate_schedule_entry(
 			"estimated_duration": int(estimated_duration),
 			"service_bay": service_bay,
 			"assigned_technician": assigned_technician or None,
+			"provisional_customer_name": provisional_customer_name or None,
+			"provisional_vehicle_info": provisional_vehicle_info or None,
 			"notes": notes or None,
 			"items_summary": items_summary,
 			"status": "Scheduled",
 		})
 		doc.insert()
 
-	if selected_services and frappe.db.has_column("Repair Order Service", "schedule_entry"):
-		for svc_name in selected_services:
-			frappe.db.set_value("Repair Order Service", svc_name, "schedule_entry", doc.name)
+	if selected_services and repair_order and frappe.db.has_column("Repair Order Service", "schedule_entry"):
+		frappe.db.set_value(
+			"Repair Order Service",
+			{"parent": repair_order, "name": ["in", selected_services]},
+			"schedule_entry",
+			doc.name,
+			update_modified=False,
+		)
 
-	return {
+	result: Dict[str, Any] = {
 		"name": doc.name,
 		"status": doc.status,
 		"scheduled_date": str(doc.scheduled_date),
@@ -591,6 +463,10 @@ def allocate_schedule_entry(
 		"service_bay": doc.service_bay,
 		"assigned_technician": doc.assigned_technician,
 	}
+	warnings = getattr(doc.flags, "scheduling_warnings", None) or []
+	if warnings:
+		result["warnings"] = list(warnings)
+	return result
 
 
 @frappe.whitelist()
@@ -600,10 +476,13 @@ def create_repair_order_from_schedule_entry(schedule_entry: str) -> Dict[str, An
 	Carries forward Schedule Entry notes into Repair Order customer_concern,
 	and links the records together.
 	"""
-	if not schedule_entry or not frappe.db.exists("Schedule Entry", schedule_entry):
-		frappe.throw(_("Schedule Entry {0} does not exist.").format(schedule_entry))
+	frappe.has_permission("Schedule Entry", "write", throw=True)
+	frappe.has_permission("Repair Order", "create", throw=True)
+	if not schedule_entry or not isinstance(schedule_entry, str) or not frappe.db.exists("Schedule Entry", schedule_entry):
+		frappe.throw(_("Schedule Entry {0} does not exist.").format(schedule_entry), frappe.DoesNotExistError)
 
 	se = frappe.get_doc("Schedule Entry", schedule_entry)
+	se.check_permission("write")
 	if se.repair_order:
 		frappe.throw(
 			_("Schedule Entry {0} is already linked to Repair Order {1}.").format(
@@ -611,9 +490,12 @@ def create_repair_order_from_schedule_entry(schedule_entry: str) -> Dict[str, An
 			)
 		)
 
-	company = frappe.defaults.get_user_default("Company")
+	company = (
+		frappe.defaults.get_user_default("Company")
+		or frappe.db.get_single_value("Global Defaults", "default_company")
+	)
 	if not company:
-		companies = frappe.get_all("Company", pluck="name")
+		companies = frappe.get_list("Company", pluck="name", limit=1)
 		company = companies[0] if companies else None
 
 	ro_data = {

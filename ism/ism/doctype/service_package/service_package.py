@@ -1,6 +1,9 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import json
+import re
+
 import frappe
 from frappe.model.document import Document
 from frappe.utils import flt
@@ -43,7 +46,6 @@ class ServicePackage(Document):
 				pass
 
 		if not getattr(self, "is_symmetrical", 0) and self.package_name:
-			import re
 			if re.search(r'\bLH\b|\bRH\b|Left Hand|Right Hand', self.package_name, re.IGNORECASE):
 				self.is_symmetrical = 1
 
@@ -75,7 +77,6 @@ class ServicePackage(Document):
 		if self.package_name:
 			self.package_name = self.package_name.strip()
 			if self.correction_code:
-				import re
 				code = str(self.correction_code).strip()
 				self.package_name = re.sub(rf"^{re.escape(code)}\s*[-–—:]?\s*", "", self.package_name).strip()
 
@@ -126,11 +127,37 @@ class ServicePackage(Document):
 	def on_trash(self):
 		"""Clean up auto-created Item if no transactions reference it."""
 		item_code = (self.package_name or self.name or "").strip()
-		if item_code and frappe.db.exists("Item", item_code):
-			has_ro = frappe.db.count("Repair Order Item", {"item_code": item_code}) if frappe.db.table_exists("tabRepair Order Item") else 0
-			has_si = frappe.db.count("Sales Invoice Item", {"item_code": item_code})
-			if not (has_ro or has_si):
-				try:
-					frappe.delete_doc("Item", item_code, ignore_permissions=True)
-				except Exception:
-					pass
+		if not (item_code and frappe.db.exists("Item", item_code)):
+			return
+		if self._is_item_referenced(item_code):
+			return
+		try:
+			frappe.delete_doc("Item", item_code, ignore_permissions=True)
+		except Exception:
+			pass
+
+	def _is_item_referenced(self, item_code):
+		if frappe.db.count("Repair Order Service", {"service_package": self.name}):
+			return True
+		if frappe.db.count("Sales Invoice Item", {"item_code": item_code}):
+			return True
+		# Narrow candidates via LIKE, then verify exact item_code inside JSON rows to avoid prefix false positives.
+		ro_services = frappe.get_all(
+			"Repair Order Service",
+			filters={"parts": ["like", f"%{item_code}%"]},
+			fields=["parts"],
+		)
+		for row in ro_services:
+			raw_parts = row.get("parts")
+			if not raw_parts:
+				continue
+			try:
+				parsed = json.loads(raw_parts) if isinstance(raw_parts, str) else raw_parts
+			except Exception:
+				continue
+			if isinstance(parsed, list) and any(
+				isinstance(part, dict) and (part.get("item_code") or "").strip() == item_code
+				for part in parsed
+			):
+				return True
+		return False

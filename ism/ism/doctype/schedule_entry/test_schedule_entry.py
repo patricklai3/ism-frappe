@@ -2,7 +2,10 @@
 # For license information, please see license.txt
 
 import time
+from unittest.mock import patch
+
 import frappe
+from ism.ism.doctype.repair_order.repair_order import RepairOrder
 from ism.tests.base import ISMTestCase, TEST_PREFIX
 
 
@@ -240,3 +243,59 @@ class TestScheduleEntry(ISMTestCase):
 		self.assertEqual(se.customer, self.customer.name)
 		self.assertEqual(se.repair_vehicle, self.vehicle.name)
 		self.assertIn(self.customer.name, se.title)
+
+	def test_sync_does_not_revalidate_parent_ro(self):
+		"""Verify Schedule Entry save syncs child rows directly without invoking RepairOrder.validate."""
+		with patch.object(RepairOrder, "validate") as mock_ro_validate:
+			se = self._insert_entry({
+				"doctype": "Schedule Entry",
+				"entry_type": "Repair",
+				"repair_order": self.ro.name,
+				"scheduled_date": frappe.utils.today(),
+				"scheduled_time": "15:00:00",
+				"estimated_duration": 60,
+			})
+			se.status = "Confirmed"
+			se.save(ignore_permissions=True)
+
+		mock_ro_validate.assert_not_called()
+		self.ro.reload()
+		self.assertEqual(len(self.ro.schedule_entries), 1)
+		self.assertEqual(self.ro.schedule_entries[0].schedule_entry, se.name)
+		self.assertEqual(self.ro.schedule_entries[0].status, "Confirmed")
+
+	def test_warnings_and_no_show_release_capacity(self):
+		"""Verify assignment warnings use doc flags without msgprint, and No Show releases bay capacity."""
+		from ism.api.scheduling import check_bay_availability
+
+		if not frappe.db.exists("Service Bay", "Test Bay SE"):
+			bay = frappe.get_doc({
+				"doctype": "Service Bay",
+				"bay_name": "Test Bay SE",
+				"is_active": 1,
+			}).insert(ignore_permissions=True)
+			self.track(bay)
+
+		se = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"scheduled_date": frappe.utils.today(),
+			"scheduled_time": "09:00:00",
+			"estimated_duration": 60,
+			"service_bay": "Test Bay SE",
+		})
+		self.assertFalse(check_bay_availability("Test Bay SE", frappe.utils.today(), "09:00:00", 60))
+
+		with patch("frappe.msgprint") as mock_msgprint, patch(
+			"ism.api.technician_availability.check_technician_availability",
+			return_value={"is_available": False, "on_leave": True, "conflicts": []},
+		):
+			se.flags.ignore_links = True
+			se.assigned_technician = "TECH-MOCK"
+			se.save(ignore_permissions=True)
+		mock_msgprint.assert_not_called()
+		self.assertEqual(len(se.flags.scheduling_warnings), 1)
+
+		se.status = "No Show"
+		se.save(ignore_permissions=True)
+		self.assertTrue(check_bay_availability("Test Bay SE", frappe.utils.today(), "09:00:00", 60))

@@ -2,78 +2,125 @@
 # For license information, please see license.txt
 
 import hashlib
+import inspect
 import json
 import secrets
+from typing import Any, Dict, List, Optional
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import (
 	add_days,
 	cint,
-	escape_html,
 	flt,
 	get_datetime,
 	now_datetime,
 	time_diff_in_hours,
 	today,
 )
-from ism.api.parts import get_default_warehouse, _get_item_stock_qty
+from ism.api.parts import _resolve_default_warehouse as get_default_warehouse
+from ism.ism.naming import generate_safe_series_name
 
 
 def _get_default_labor_rate():
 	try:
-		if frappe.db.has_column("ISM Settings", "default_labor_rate"):
-			return flt(frappe.db.get_single_value("ISM Settings", "default_labor_rate")) or 120.0
+		if frappe.get_meta("ISM Settings").has_field("default_labor_rate"):
+			return flt(frappe.db.get_single_value("ISM Settings", "default_labor_rate")) or 140.0
 	except Exception:
 		pass
-	return 120.0
+	return 140.0
+
+
+def _is_public_approval_portal_call() -> bool:
+	"""Return True only when invoked directly from the token-verified guest approval endpoint."""
+	for frame_info in inspect.stack():
+		if frame_info.function == "submit_customer_approval" and frame_info.filename.replace("\\", "/").endswith(
+			"ism/api/approval.py"
+		):
+			return True
+	return False
+
+
+def build_service_package_row_fields(
+	pkg: Any,
+	company: Optional[str] = None,
+	cur_side: Optional[str] = None,
+	cur_title: Optional[str] = None,
+	cur_code: Optional[str] = None,
+	default_labor_rate: Optional[float] = None,
+	advisor_notes: str = "",
+	is_supplement: int = 0,
+) -> Dict[str, Any]:
+	"""Expand a Service Package document into a canonical Repair Order Service row dict."""
+	from ism.utils.tesla_manual import detect_service_side
+
+	pkg_title = getattr(pkg, "package_name", None) or pkg.name
+	pkg_code = getattr(pkg, "correction_code", None)
+	rh_code = getattr(pkg, "rh_correction_code", None)
+	is_symm = cint(getattr(pkg, "is_symmetrical", 0))
+
+	if cur_side is None:
+		base_side = detect_service_side(pkg_title, pkg_code, rh_code)
+		cur_side = "LH" if is_symm and base_side != "RH" else ("RH" if is_symm and base_side == "RH" else "None")
+
+	cur_title = cur_title or pkg_title
+	cur_code = pkg_code if cur_code is None else cur_code
+
+	labor_hours = flt(getattr(pkg, "standard_labor_hours", 0))
+	is_flat = cint(getattr(pkg, "is_flat_rate", 0))
+	if is_flat:
+		labor_rate = flt(getattr(pkg, "hourly_rate", 0))
+		labor_amount = flt(getattr(pkg, "service_rate", 0), 2)
+	else:
+		fallback_rate = flt(default_labor_rate) if default_labor_rate else _get_default_labor_rate()
+		labor_rate = flt(getattr(pkg, "hourly_rate", 0)) or fallback_rate
+		labor_amount = flt(labor_hours * labor_rate, 2)
+
+	parts_list = []
+	parts_total = 0.0
+	warehouse = get_default_warehouse(company)
+	for row in getattr(pkg, "items", None) or []:
+		row_side = getattr(row, "side", None) or "Both"
+		if cur_side in ("Both", "None") or row_side in ("Both", cur_side):
+			item_doc = frappe.get_cached_doc("Item", row.item_code)
+			qty = flt(row.qty) or 1.0
+			rate = flt(getattr(item_doc, "standard_rate", 0)) if getattr(row, "rate", None) is None else flt(row.rate)
+			amt = flt(qty * rate, 2)
+			parts_total += amt
+			parts_list.append({
+				"item_code": row.item_code,
+				"item_name": row.item_name or item_doc.item_name,
+				"qty": qty,
+				"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
+				"rate": rate,
+				"amount": amt,
+				"warehouse": warehouse,
+			})
+
+	return {
+		"service_package": pkg.name,
+		"correction_code": cur_code,
+		"service_title": cur_title,
+		"service_position": cur_side,
+		"status": "Estimating",
+		"is_flat_rate": is_flat,
+		"labor_hours": labor_hours,
+		"labor_rate": labor_rate,
+		"labor_amount": labor_amount,
+		"parts": json.dumps(parts_list),
+		"parts_total": parts_total,
+		"total_amount": flt(labor_amount + parts_total, 2),
+		"is_supplement": cint(is_supplement),
+		"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
+		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
+		"advisor_notes": advisor_notes or "",
+	}
 
 
 def get_or_create_default_tax_template(company=None):
 	"""Return the default 13% HST Sales Taxes and Charges Template for the company."""
 	from ism.setup import get_or_create_default_sales_tax_template
 	return get_or_create_default_sales_tax_template(company)
-
-
-def _render_parts_html(parts):
-	"""Render a compact, styled HTML table of parts nested under a service."""
-	if not parts:
-		return '<div class="text-muted" style="padding: 6px 0; font-size: 12px;"><i>No parts required for this service.</i></div>'
-
-	rows = ""
-	for p in parts:
-		item_code = escape_html(str(p.get("item_code", "")))
-		item_name = escape_html(str(p.get("item_name", p.get("item_code", ""))))
-		qty = flt(p.get("qty", 1.0))
-		uom = escape_html(str(p.get("uom", "Nos")))
-		rate = flt(p.get("rate", 0.0))
-		amt = flt(p.get("amount", qty * rate), 2)
-		rows += f"""
-		<tr>
-			<td><b>{item_code}</b></td>
-			<td>{item_name}</td>
-			<td style="text-align: right;">{qty} {uom}</td>
-			<td style="text-align: right;">${rate:.2f}</td>
-			<td style="text-align: right;"><b>${amt:.2f}</b></td>
-		</tr>
-		"""
-
-	return f"""
-	<table class="table table-bordered table-condensed" style="margin-top: 5px; font-size: 12px; background: #fafbfc;">
-		<thead>
-			<tr style="background: #eef2f7;">
-				<th>Part Code</th>
-				<th>Description</th>
-				<th style="text-align: right;">Qty</th>
-				<th style="text-align: right;">Rate</th>
-				<th style="text-align: right;">Amount</th>
-			</tr>
-		</thead>
-		<tbody>
-			{rows}
-		</tbody>
-	</table>
-	"""
 
 
 def _match_service_decision(service, approvals):
@@ -125,56 +172,9 @@ class RepairOrder(Document):
 			self.name = make_autoname(prefix, doc=self)
 		except Exception as e:
 			if "1020" in str(e) or "Deadlock" in str(e) or isinstance(e, frappe.QueryDeadlockError):
-				self.name = self._generate_safe_series_name(prefix)
+				self.name = generate_safe_series_name(self.doctype, prefix, doc=self)
 			else:
 				raise
-
-	def _generate_safe_series_name(self, series_pattern: str) -> str:
-		import re
-		from frappe.utils import now_datetime
-
-		today = now_datetime()
-		parts = series_pattern.split(".")
-		prefix_parts = []
-		digits = 5
-		for p in parts:
-			if p.startswith("#"):
-				digits = len(p)
-				break
-			elif p == "YYYY":
-				prefix_parts.append(today.strftime("%Y"))
-			elif p == "YY":
-				prefix_parts.append(today.strftime("%y"))
-			elif p == "MM":
-				prefix_parts.append(today.strftime("%m"))
-			elif p == "DD":
-				prefix_parts.append(today.strftime("%d"))
-			elif hasattr(self, p) and getattr(self, p):
-				prefix_parts.append(str(getattr(self, p)))
-			else:
-				prefix_parts.append(p)
-		prefix = "".join(prefix_parts)
-		existing = frappe.get_all(
-			self.doctype,
-			filters=[["name", "like", f"{prefix}%"]],
-			order_by="name desc",
-			limit=1,
-			pluck="name",
-		)
-		next_num = 1
-		if existing and existing[0].startswith(prefix):
-			suffix = existing[0][len(prefix):]
-			match = re.search(r"(\d+)", suffix)
-			if match:
-				try:
-					next_num = int(match.group(1)) + 1
-				except ValueError:
-					next_num = 1
-		candidate = f"{prefix}{next_num:0{digits}d}"
-		while frappe.db.exists(self.doctype, candidate):
-			next_num += 1
-			candidate = f"{prefix}{next_num:0{digits}d}"
-		return candidate
 
 	def before_insert(self):
 		if not self.price_list:
@@ -196,7 +196,6 @@ class RepairOrder(Document):
 		self._validate_vehicle_and_customer()
 		self._validate_odometer()
 		self._calculate_service_totals()
-		self._sync_service_package_parts()
 		self._calculate_taxes_and_totals()
 		self._update_progress_and_job_timing()
 		self._validate_authorization_guards()
@@ -315,18 +314,19 @@ class RepairOrder(Document):
 
 	@frappe.whitelist()
 	def check_parts_stock_availability(self):
+		self.check_permission("read")
 		all_avail, deficit = self._check_parts_stock_availability()
 		updated = False
 		if self.status == "Waiting on Parts" and all_avail:
+			self.check_permission("write")
 			self.status = "Authorized - In Progress"
-			self.flags.ignore_permissions = True
 			self.save()
 			updated = True
 		return {"all_available": all_avail, "deficit_items": deficit, "status": self.status, "updated": updated}
 
 	def _update_parts_waiting_status(self):
 		"""Update status between 'Waiting on Parts' and 'Authorized - In Progress' based on inventory."""
-		if getattr(self, "has_shop_floor_override", 0):
+		if getattr(self, "has_shop_floor_override", 0) or getattr(self, "manual_parts_hold", 0):
 			return
 		if self.approval_status in ["Approved", "Partially Approved"]:
 			if self.status in ["Draft Estimate", "Pending Authorization", "Waiting on Parts", "Authorized - In Progress", "", None]:
@@ -345,13 +345,15 @@ class RepairOrder(Document):
 
 	def submit(self):
 		"""Save for non-submittable Repair Order to preserve API compatibility."""
-		self.save(ignore_permissions=True)
+		self.check_permission("write")
+		self.save()
 		return self
 
 	def cancel(self):
 		"""Handle cancellation for non-submittable Repair Order."""
+		self.check_permission("write")
 		self.on_cancel()
-		self.save(ignore_permissions=True)
+		self.save()
 		return self
 
 	def on_cancel(self):
@@ -368,8 +370,9 @@ class RepairOrder(Document):
 
 	@frappe.whitelist()
 	def cancel_repair_order(self):
+		self.check_permission("write")
 		self.on_cancel()
-		self.save(ignore_permissions=True)
+		self.save()
 
 	def _validate_vehicle_and_customer(self):
 		if not self.customer:
@@ -377,19 +380,9 @@ class RepairOrder(Document):
 		if not self.vehicle:
 			frappe.throw(_("Vehicle is mandatory for Repair Order."), frappe.MandatoryError)
 
-		# Ensure vehicle exists
+		# Ensure vehicle exists (customer linking happens in on_update after validation succeeds)
 		if not frappe.db.exists("Repair Vehicle", self.vehicle):
 			frappe.throw(_("Repair Vehicle {0} does not exist.").format(self.vehicle))
-
-		# Link customer to vehicle if not already linked
-		is_linked = frappe.db.exists(
-			"Repair Vehicle Customer",
-			{"parent": self.vehicle, "customer": self.customer},
-		)
-		if not is_linked:
-			veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
-			veh_doc.append("customers", {"customer": self.customer, "is_primary": 1 if not veh_doc.customers else 0})
-			veh_doc.save(ignore_permissions=True)
 
 	def _validate_odometer(self):
 		if self.status != "Checked In":
@@ -408,16 +401,18 @@ class RepairOrder(Document):
 	@frappe.whitelist()
 	def sync_schedule_entries(self, exclude_entry=None):
 		"""Sync informational schedule entries child table with linked Schedule Entry records."""
+		if not getattr(self.flags, "ignore_permissions", False):
+			self.check_permission("read")
 		if not self.name or not frappe.db.exists("Repair Order", self.name):
 			return
-		filters = {"repair_order": self.name}
-		if exclude_entry:
-			filters["name"] = ["!=", exclude_entry]
-		entries = frappe.get_all(
-			"Schedule Entry",
-			filters=filters,
+		from ism.ism.doctype.schedule_entry.schedule_entry import sync_repair_order_schedule_entries
+
+		sync_repair_order_schedule_entries(self.name, exclude_entry=exclude_entry)
+		rows = frappe.get_all(
+			"Repair Order Schedule Entry",
+			filters={"parent": self.name, "parenttype": "Repair Order"},
 			fields=[
-				"name",
+				"schedule_entry",
 				"entry_type",
 				"scheduled_date",
 				"scheduled_time",
@@ -426,23 +421,9 @@ class RepairOrder(Document):
 				"assigned_technician",
 				"status",
 			],
-			order_by="scheduled_date asc, scheduled_time asc",
+			order_by="idx asc",
 		)
-		self.set("schedule_entries", [])
-		for entry in entries:
-			self.append("schedule_entries", {
-				"schedule_entry": entry.name,
-				"entry_type": entry.entry_type,
-				"scheduled_date": entry.scheduled_date,
-				"scheduled_time": entry.scheduled_time,
-				"estimated_duration": entry.estimated_duration,
-				"service_bay": entry.service_bay,
-				"assigned_technician": entry.assigned_technician,
-				"status": entry.status,
-			})
-		self.flags.ignore_validate_update_after_submit = True
-		self.flags.ignore_mandatory = True
-		self.save(ignore_permissions=True)
+		self.set("schedule_entries", rows)
 
 	def _calculate_service_totals(self):
 		"""
@@ -504,14 +485,6 @@ class RepairOrder(Document):
 				valid_wh = part_wh if (part_wh and frappe.db.exists("Warehouse", {**wh_filters, "name": part_wh})) else default_wh
 
 				code = p.get("item_code", "")
-				part_stock = 0.0
-				part_committed = 0.0
-				if code:
-					from ism.api.parts import get_item_available_stock
-					avail_info = get_item_available_stock(code, valid_wh, self.name)
-					part_stock = flt(avail_info.get("available_qty", 0.0))
-					part_committed = flt(avail_info.get("committed_qty", 0.0))
-
 				cleaned_parts.append({
 					"item_code": code,
 					"item_name": p.get("item_name", code),
@@ -526,96 +499,16 @@ class RepairOrder(Document):
 					"rate": rate,
 					"amount": amt,
 					"warehouse": valid_wh,
-					"stock_qty": part_stock,
-					"committed_qty": part_committed,
 				})
 
 			s.parts = json.dumps(cleaned_parts)
 			s.parts_total = flt(parts_total, 2)
 			s.total_amount = flt(s.labor_amount + s.parts_total, 2)
 
-			# Render clean HTML preview of parts inside service row
-			s.parts_html = _render_parts_html(cleaned_parts)
-
 			if s.status == "Approved":
 				total_billed_hours += labor_hours
 
 		self.total_billed_hours = total_billed_hours
-
-	def _sync_service_package_parts(self):
-		"""Auto-sync parts added to services on Repair Orders into their linked Service Packages.
-		Ensures that any part used for a service is automatically remembered as a compatible variant.
-		"""
-		for s in self.services:
-			pkg_name = s.service_package
-			if not pkg_name and s.service_title:
-				pkg_name = frappe.db.get_value("Service Package", {"package_name": s.service_title}, "name")
-				if pkg_name:
-					s.service_package = pkg_name
-
-			if not pkg_name or not frappe.db.exists("Service Package", pkg_name):
-				continue
-
-			parts = s.parts
-			if isinstance(parts, str):
-				try:
-					parts = json.loads(parts) if parts else []
-				except Exception:
-					parts = []
-			if not isinstance(parts, list) or not parts:
-				continue
-
-			pkg = frappe.get_doc("Service Package", pkg_name)
-			pkg_dirty = False
-			from ism.api.parts import parse_slot_number, format_slot_label
-
-			for p in parts:
-				if not isinstance(p, dict):
-					continue
-				item_code = p.get("item_code")
-				if not item_code or not frappe.db.exists("Item", item_code):
-					continue
-
-				slot_num = cint(p.get("slot_number", 0)) or parse_slot_number(p.get("component_slot"))
-				if slot_num == 0:
-					slot_num = 1
-				slot_label = format_slot_label(slot_num)
-
-				existing_row = next((it for it in pkg.items if it.item_code == item_code), None)
-				if existing_row:
-					# If previously unassigned in Service Package, PERMANENTLY assign it!
-					curr_slot = cint(getattr(existing_row, "slot_number", 0)) or parse_slot_number(existing_row.component_slot)
-					if curr_slot == 0:
-						existing_row.slot_number = slot_num
-						existing_row.component_slot = slot_label
-						pkg_dirty = True
-				else:
-					# Newly added part in RO not yet in Service Package items -> add and assign to this slot
-					item_doc = frappe.get_cached_doc("Item", item_code)
-					side = getattr(s, "service_position", None) or p.get("side") or "Both"
-					has_slot_items = any(
-						(cint(getattr(it, "slot_number", 0)) == slot_num or it.component_slot == slot_label)
-						for it in pkg.items
-					)
-					pkg.append("items", {
-						"slot_number": slot_num,
-						"component_slot": slot_label,
-						"item_code": item_code,
-						"item_name": item_doc.item_name,
-						"qty": flt(p.get("qty", 1.0)) or 1.0,
-						"rate": flt(p.get("rate", 0.0)) or flt(item_doc.standard_rate),
-						"side": side if side in ("LH", "RH") else "Both",
-						"is_default": 0 if has_slot_items else 1,
-						"part_source": getattr(item_doc, "part_source", "OEM") or "OEM",
-						"part_condition": getattr(item_doc, "part_condition", "New") or "New",
-						"oem_part_number": getattr(item_doc, "oem_part_number", "") or "",
-						"warranty_period": getattr(item_doc, "warranty_period", "12 Months / 20,000 km") or "12 Months / 20,000 km",
-					})
-					pkg_dirty = True
-
-			if pkg_dirty:
-				pkg.flags.ignore_permissions = True
-				pkg.save()
 
 	def _calculate_taxes_and_totals(self):
 		has_approved = any(s.status == "Approved" for s in self.services)
@@ -788,6 +681,7 @@ class RepairOrder(Document):
 	@frappe.whitelist()
 	def pick_up_vehicle(self):
 		"""Technician pulls vehicle from lot into service bay."""
+		self.check_permission("write")
 		has_approved = any(s.status == "Approved" for s in self.services)
 		if self.approval_status == "Approved":
 			has_approved = True
@@ -821,21 +715,13 @@ class RepairOrder(Document):
 			self.db_set("picked_up_by", self.picked_up_by)
 			self.db_set("status", self.status)
 
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"status": "success", "vehicle_location": self.vehicle_location, "picked_up_at": self.picked_up_at}
-
-	@frappe.whitelist()
-	def override_and_pick_up_vehicle(self, notes=None, **kwargs):
-		"""Shop floor override has been removed in standard workflow."""
-		frappe.throw(
-			_(
-				"Shop floor override is disabled. All required parts must be received into inventory before vehicle pick-up."
-			)
-		)
 
 	@frappe.whitelist()
 	def park_vehicle(self):
 		"""Technician parks vehicle back in lot."""
+		self.check_permission("write")
 		self.parked_at = now_datetime()
 		self.parked_by = frappe.session.user
 		if self.picked_up_at:
@@ -861,12 +747,13 @@ class RepairOrder(Document):
 			self.db_set("status", self.status)
 			self.db_set("total_bay_hours", self.total_bay_hours)
 
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"status": "success", "vehicle_location": self.vehicle_location, "total_bay_hours": self.total_bay_hours}
 
 	@frappe.whitelist()
 	def toggle_service_completion(self, service_row_id=None, is_completed=None, **kwargs):
 		"""Toggle individual service completion with timestamping."""
+		self.check_permission("write")
 		if isinstance(service_row_id, dict):
 			is_completed = service_row_id.get("is_completed", is_completed)
 			service_row_id = service_row_id.get("service_row_id") or service_row_id.get("job_id")
@@ -934,17 +821,13 @@ class RepairOrder(Document):
 			self.db_set("status", self.status)
 			self.db_set("vehicle_location", self.vehicle_location)
 
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"status": "success", "progress_percent": self.progress_percent}
-
-	# Backward compatibility alias
-	@frappe.whitelist()
-	def toggle_job_completion(self, job_id=None, is_completed=None, **kwargs):
-		return self.toggle_service_completion(service_row_id=job_id, is_completed=is_completed, **kwargs)
 
 	@frappe.whitelist()
 	def generate_approval_token(self):
 		"""Generate token for remote customer signature portal."""
+		self.check_permission("write")
 		self.approval_token = secrets.token_urlsafe(32)
 		self.approval_token_expiry = add_days(now_datetime(), 2)
 
@@ -960,7 +843,7 @@ class RepairOrder(Document):
 			self.approval_status = "Partially Approved"
 		else:
 			self.approval_status = "Pending Approval"
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"approval_token": self.approval_token, "expiry": self.approval_token_expiry}
 
 	@frappe.whitelist()
@@ -969,6 +852,10 @@ class RepairOrder(Document):
 		Apply per-service customer decisions (Approved/Declined) and audit evidence.
 		approvals: {"1": "Approved", "Brake Service": "Declined"}
 		"""
+		is_public_portal = frappe.session.user == "Guest" and _is_public_approval_portal_call()
+		if not getattr(self.flags, "ignore_permissions", False) and not is_public_portal:
+			self.check_permission("write")
+
 		# Defensive unwrapping in case Frappe or caller passed wrapped dict in approvals
 		if isinstance(approvals, dict) and ("approvals" in approvals or "channel" in approvals or "signer_name" in approvals):
 			channel = approvals.get("channel") or channel
@@ -1120,7 +1007,7 @@ class RepairOrder(Document):
 			if self.verbal_notes:
 				self.db_set("verbal_notes", self.verbal_notes)
 
-		self.save(ignore_permissions=True)
+		self.save(ignore_permissions=is_public_portal)
 		return {
 			"status": "success",
 			"approval_status": self.approval_status,
@@ -1130,12 +1017,16 @@ class RepairOrder(Document):
 	@frappe.whitelist()
 	def add_service_package(self, service_package=None, **kwargs):
 		"""Expand canned service package into new Service row(s) with nested Parts."""
+		self.check_permission("write")
 		from ism.utils.tesla_manual import swap_side_in_title
 
 		if isinstance(service_package, dict):
 			kwargs.update(service_package)
 			service_package = service_package.get("service_package")
 		service_package = service_package or kwargs.get("service_package")
+		if not service_package or not isinstance(service_package, str):
+			frappe.throw(_("Valid Service Package identifier is required."), frappe.ValidationError)
+		frappe.has_permission("Service Package", "read", doc=service_package, throw=True)
 		pkg = frappe.get_doc("Service Package", service_package)
 		has_prior_authorization = bool(
 			self.authorized_at
@@ -1151,9 +1042,9 @@ class RepairOrder(Document):
 		is_symm = cint(getattr(pkg, "is_symmetrical", 0))
 		pkg_title = pkg.package_name
 		pkg_code = getattr(pkg, "correction_code", None)
-		rh_code = getattr(pkg, "rh_correction_code", None) or pkg_code
+		raw_rh_code = getattr(pkg, "rh_correction_code", None)
 
-		base_side = detect_service_side(pkg_title, pkg_code, rh_code)
+		base_side = detect_service_side(pkg_title, pkg_code, raw_rh_code)
 		if base_side == "RH":
 			rh_title = pkg_title
 			lh_title = swap_side_in_title(pkg_title, "LH")
@@ -1163,6 +1054,7 @@ class RepairOrder(Document):
 			lh_title = pkg_title
 			rh_title = swap_side_in_title(pkg_title, "RH")
 			lh_code = pkg_code
+			rh_code = raw_rh_code or pkg_code
 
 		sides_to_add = []
 		if side_param == "both" and is_symm:
@@ -1175,15 +1067,6 @@ class RepairOrder(Document):
 		else:
 			pos = "LH" if is_symm and base_side != "RH" else ("RH" if is_symm and base_side == "RH" else "None")
 			sides_to_add.append({"side": pos, "title": pkg_title, "code": pkg_code})
-
-		labor_hours = flt(pkg.standard_labor_hours)
-		is_flat = cint(pkg.is_flat_rate)
-		if is_flat:
-			labor_rate = flt(pkg.hourly_rate)
-			labor_amount = flt(pkg.service_rate, 2)
-		else:
-			labor_rate = flt(pkg.hourly_rate) or _get_default_labor_rate()
-			labor_amount = flt(labor_hours * labor_rate, 2)
 
 		added_titles = []
 		for entry in sides_to_add:
@@ -1199,45 +1082,16 @@ class RepairOrder(Document):
 			):
 				continue
 
-			parts_list = []
-			parts_total = 0.0
-			for row in pkg.items:
-				row_side = getattr(row, "side", None) or "Both"
-				if cur_side in ("Both", "None") or row_side in ("Both", cur_side):
-					item_doc = frappe.get_cached_doc("Item", row.item_code)
-					qty = flt(row.qty) or 1.0
-					rate = flt(row.rate)
-					amt = flt(qty * rate, 2)
-					parts_total += amt
-					parts_list.append({
-						"item_code": row.item_code,
-						"item_name": row.item_name or item_doc.item_name,
-						"qty": qty,
-						"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
-						"rate": rate,
-						"amount": amt,
-						"warehouse": get_default_warehouse(self.company),
-					})
-
-			self.append("services", {
-				"service_package": pkg.name,
-				"correction_code": cur_code,
-				"service_title": cur_title,
-				"service_position": cur_side,
-				"status": "Estimating",
-				"is_flat_rate": is_flat,
-				"labor_hours": labor_hours,
-				"labor_rate": labor_rate,
-				"labor_amount": labor_amount,
-				"parts": json.dumps(parts_list),
-				"parts_total": parts_total,
-				"total_amount": flt(labor_amount + parts_total, 2),
-				"parts_html": _render_parts_html(parts_list) if parts_list else "",
-				"is_supplement": is_supp,
-				"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
-				"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
-				"advisor_notes": kwargs.get("advisor_notes", "") or "",
-			})
+			row_fields = build_service_package_row_fields(
+				pkg=pkg,
+				company=self.company,
+				cur_side=cur_side,
+				cur_title=cur_title,
+				cur_code=cur_code,
+				advisor_notes=kwargs.get("advisor_notes", "") or "",
+				is_supplement=is_supp,
+			)
+			self.append("services", row_fields)
 			added_titles.append(cur_title)
 
 		if is_supp:
@@ -1246,12 +1100,13 @@ class RepairOrder(Document):
 			else:
 				self.approval_status = "Pending Approval"
 
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"status": "success", "service": ", ".join(added_titles)}
 
 	@frappe.whitelist()
 	def duplicate_service_for_opposite_side(self, service_row_id=None, **kwargs):
 		"""Duplicate a service row for the opposite side (e.g. LH -> RH or RH -> LH)."""
+		self.check_permission("write")
 		from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
 
 		if not service_row_id:
@@ -1266,7 +1121,8 @@ class RepairOrder(Document):
 		if not target:
 			frappe.throw(_("Service row '{0}' not found on this Repair Order.").format(service_row_id))
 
-		curr_pos = getattr(target, "service_position", "") or detect_service_side(target.service_title)
+		raw_pos = getattr(target, "service_position", None)
+		curr_pos = raw_pos if raw_pos in ("LH", "RH") else detect_service_side(target.service_title)
 		if curr_pos not in ("LH", "RH"):
 			frappe.throw(_("Service '{0}' is not a symmetrical LH/RH operation.").format(target.service_title))
 
@@ -1346,7 +1202,6 @@ class RepairOrder(Document):
 			"parts": json.dumps(parts_list),
 			"parts_total": parts_total,
 			"total_amount": flt(flt(target.labor_amount) + parts_total, 2),
-			"parts_html": _render_parts_html(parts_list) if parts_list else "",
 			"is_supplement": is_supp,
 			"is_mobile_capable": target.is_mobile_capable,
 			"tesla_manual_url": target.tesla_manual_url,
@@ -1359,7 +1214,7 @@ class RepairOrder(Document):
 			else:
 				self.approval_status = "Pending Approval"
 
-		self.save(ignore_permissions=True)
+		self.save()
 		return {
 			"status": "success",
 			"service_row": new_service.as_dict() if hasattr(new_service, "as_dict") else None,
@@ -1368,8 +1223,9 @@ class RepairOrder(Document):
 		}
 
 	@frappe.whitelist()
-	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, parts=None, notes=None, job_title=None, **kwargs):
+	def add_supplement(self, service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=None, parts=None, notes=None, job_title=None, **kwargs):
 		"""Add a supplemental repair service to an existing Repair Order."""
+		self.check_permission("write")
 		if isinstance(service_title, dict):
 			category = service_title.get("category", category)
 			labor_hours = service_title.get("labor_hours", labor_hours)
@@ -1380,7 +1236,7 @@ class RepairOrder(Document):
 			service_title = service_title.get("service_title")
 		title = service_title or job_title or kwargs.get("service_title") or kwargs.get("job_title") or "Supplemental Service"
 		hours = flt(labor_hours)
-		rate = flt(labor_rate) or 120.0
+		rate = flt(labor_rate) if (labor_rate is not None and str(labor_rate).strip() != "") else _get_default_labor_rate()
 		labor_amount = flt(hours * rate, 2)
 
 		parts_list = []
@@ -1415,7 +1271,6 @@ class RepairOrder(Document):
 			"parts": json.dumps(parts_list),
 			"parts_total": parts_total,
 			"total_amount": flt(labor_amount + parts_total, 2),
-			"parts_html": _render_parts_html(parts_list),
 			"is_supplement": 1,
 			"advisor_notes": notes or "",
 		})
@@ -1425,7 +1280,7 @@ class RepairOrder(Document):
 		else:
 			self.approval_status = "Pending Approval"
 
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"status": "success", "service_title": title}
 
 	@frappe.whitelist()
@@ -1434,6 +1289,7 @@ class RepairOrder(Document):
 		Add one or more previously deferred services to this Repair Order.
 		deferred_items can be a list of job titles, dicts, or a JSON string.
 		"""
+		self.check_permission("write")
 		if isinstance(deferred_items, str):
 			try:
 				deferred_items = json.loads(deferred_items)
@@ -1523,7 +1379,6 @@ class RepairOrder(Document):
 					"parts": json.dumps(parts_list),
 					"parts_total": parts_total,
 					"total_amount": flt(labor_amount + parts_total, 2),
-					"parts_html": _render_parts_html(parts_list),
 					"is_supplement": is_supp,
 					"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
 					"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
@@ -1541,7 +1396,6 @@ class RepairOrder(Document):
 					"parts": json.dumps([]),
 					"parts_total": 0.0,
 					"total_amount": est_amount,
-					"parts_html": "",
 					"is_supplement": is_supp,
 					"advisor_notes": "",
 				})
@@ -1562,7 +1416,7 @@ class RepairOrder(Document):
 
 		self._calculate_service_totals()
 		self._calculate_taxes_and_totals()
-		self.save(ignore_permissions=True)
+		self.save()
 		return {"status": "success", "added_count": len(added_services), "added_services": added_services}
 
 	@frappe.whitelist()
@@ -1570,6 +1424,8 @@ class RepairOrder(Document):
 		"""
 		Save a one-off repair service and its nested parts as a reusable Service Package.
 		"""
+		self.check_permission("write")
+		frappe.has_permission("Service Package", "create", throw=True)
 		if isinstance(service_row_id, dict):
 			package_name = service_row_id.get("package_name", package_name)
 			service_row_id = service_row_id.get("service_row_id")
@@ -1621,7 +1477,7 @@ class RepairOrder(Document):
 				if p.get("item_code")
 			]
 		})
-		pkg.insert(ignore_permissions=True)
+		pkg.insert()
 
 		target.service_package = pkg.name
 		if target.name and not str(target.name).startswith("new-"):
@@ -1642,6 +1498,11 @@ class RepairOrder(Document):
 		3. Creates matching Payment Entry
 		4. Marks vehicle released, stamps vehicle last service specs, and submits RO
 		"""
+		self.check_permission("write")
+		frappe.has_permission("Sales Invoice", "create", throw=True)
+		frappe.has_permission("Sales Invoice", "submit", throw=True)
+		if self.vehicle:
+			frappe.has_permission("Repair Vehicle", "write", doc=self.vehicle, throw=True)
 		if isinstance(payment_method, dict):
 			paid_amount = payment_method.get("paid_amount", paid_amount)
 			odometer_out = payment_method.get("odometer_out", odometer_out)
@@ -1797,7 +1658,6 @@ class RepairOrder(Document):
 			})
 
 		si.calculate_taxes_and_totals()
-		si.flags.ignore_permissions = True
 		si.insert()
 		si.submit()
 
@@ -1806,6 +1666,8 @@ class RepairOrder(Document):
 		# Process Payment Entry
 		pay_amt = flt(paid_amount) if paid_amount is not None else flt(self.grand_total)
 		if pay_amt > 0:
+			frappe.has_permission("Payment Entry", "create", throw=True)
+			frappe.has_permission("Payment Entry", "submit", throw=True)
 			pe = frappe.new_doc("Payment Entry")
 			pe.payment_type = "Receive"
 			pe.party_type = "Customer"
@@ -1838,7 +1700,6 @@ class RepairOrder(Document):
 				"outstanding_amount": si.outstanding_amount,
 				"allocated_amount": min(pay_amt, si.outstanding_amount),
 			})
-			pe.flags.ignore_permissions = True
 			pe.insert()
 			pe.submit()
 
@@ -1857,10 +1718,10 @@ class RepairOrder(Document):
 			veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle)
 			veh_doc.last_odometer = self.odometer_out or self.odometer_in
 			veh_doc.last_service_date = today()
-			veh_doc.last_repair_order = self.name
-			veh_doc.save(ignore_permissions=True)
+			veh_doc.save()
 
-		self.save(ignore_permissions=True)
+		complete_linked_schedule_entries(self.name)
+		self.save()
 		return {
 			"status": "success",
 			"sales_invoice": self.sales_invoice,
@@ -1869,91 +1730,24 @@ class RepairOrder(Document):
 			"checkout_date": self.checkout_date,
 		}
 
-	@frappe.whitelist()
-	def create_material_request(self):
-		"""Create background ERPNext Material Request for all parts in approved services."""
-		approved_services = [s for s in self.services if s.status == "Approved"]
-		if not approved_services:
-			frappe.throw(_("No approved services found on this order."))
-
-		parts_to_order = []
-		for s in approved_services:
-			parts = s.parts
-			if isinstance(parts, str):
-				try:
-					parts = json.loads(parts) if parts else []
-				except Exception:
-					parts = []
-			for p in parts:
-				item_code = p.get("item_code")
-				if item_code and frappe.db.exists("Item", item_code):
-					parts_to_order.append(p)
-
-		if not parts_to_order:
-			frappe.throw(_("No inventory parts found in approved services."))
-
-		mr = frappe.new_doc("Material Request")
-		mr.material_request_type = "Material Transfer"
-		mr.company = self.company
-		mr.transaction_date = today()
-		mr.schedule_date = today()
-
-		default_wh = get_default_warehouse(self.company)
-
-		for part in parts_to_order:
-			item_doc = frappe.get_cached_doc("Item", part.get("item_code"))
-			wh_filters = {"is_group": 0}
-			if self.company:
-				wh_filters["company"] = self.company
-			target_wh = part.get("warehouse")
-			if not target_wh or not frappe.db.exists("Warehouse", {**wh_filters, "name": target_wh}):
-				target_wh = default_wh
-
-			mr.append("items", {
-				"item_code": part.get("item_code"),
-				"item_name": part.get("item_name") or item_doc.item_name,
-				"description": part.get("item_name") or item_doc.item_name,
-				"qty": flt(part.get("qty", 1.0)),
-				"uom": part.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
-				"warehouse": target_wh,
-				"schedule_date": today(),
-			})
-
-		mr.flags.ignore_permissions = True
-		mr.insert()
-		return {"material_request": mr.name}
-
-
 # -------------------------------------------------------------
-# Module-level Whitelisted RPC Wrappers
+# Module-level Standalone RPCs & Lifecycle Utilities
 # -------------------------------------------------------------
-
-def _extract_docname_from_request():
-	if frappe.form_dict.get("docname"):
-		return frappe.form_dict.get("docname")
-	if frappe.form_dict.get("doc"):
-		doc_data = frappe.form_dict.get("doc")
-		if isinstance(doc_data, str):
-			doc_data = json.loads(doc_data)
-		return doc_data.get("name") if isinstance(doc_data, dict) else getattr(doc_data, "name", None)
-	if frappe.form_dict.get("docs"):
-		docs_data = frappe.form_dict.get("docs")
-		if isinstance(docs_data, str):
-			docs_data = json.loads(docs_data)
-		if isinstance(docs_data, dict):
-			return docs_data.get("name")
-		elif isinstance(docs_data, list) and docs_data:
-			return docs_data[0].get("name")
-	frappe.throw(_("Repair Order name is required."))
 
 
 @frappe.whitelist()
 def get_service_package_details(service_package, side=None):
 	"""Return package info and its parts list so the client can automatically populate."""
+	frappe.has_permission("Service Package", "read", throw=True)
 	if not service_package:
 		return {}
+	if not isinstance(service_package, str):
+		frappe.throw(_("service_package must be a string."), frappe.ValidationError)
+	if side is not None and not isinstance(side, str):
+		frappe.throw(_("side must be a string."), frappe.ValidationError)
 
 	pkg = frappe.get_doc("Service Package", service_package)
+	pkg.check_permission("read")
 	default_wh = get_default_warehouse()
 	default_rate = _get_default_labor_rate()
 
@@ -2042,7 +1836,7 @@ def get_service_package_details(service_package, side=None):
 	if not pkg_cat and getattr(pkg, "correction_code", None):
 		try:
 			from ism.utils.tesla_manual import get_category_for_correction_code
-			cat, _ = get_category_for_correction_code(pkg.correction_code)
+			cat, _subcat = get_category_for_correction_code(pkg.correction_code)
 			if cat:
 				pkg_cat = cat
 		except Exception:
@@ -2084,112 +1878,28 @@ def get_service_package_details(service_package, side=None):
 	}
 
 
-@frappe.whitelist()
-def save_service_as_package(service_row_id=None, package_name=None, docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.save_service_as_package(service_row_id=service_row_id, package_name=package_name, **kwargs)
-
-
-@frappe.whitelist()
-def add_deferred_services(docname=None, deferred_items=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.add_deferred_services(deferred_items=deferred_items, **kwargs)
-
-
-@frappe.whitelist()
-def toggle_service_completion(service_row_id=None, is_completed=None, docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.toggle_service_completion(service_row_id=service_row_id, is_completed=is_completed, **kwargs)
-
-
-@frappe.whitelist()
-def toggle_job_completion(job_id=None, is_completed=None, docname=None, **kwargs):
-	return toggle_service_completion(service_row_id=job_id, is_completed=is_completed, docname=docname, **kwargs)
-
-
-@frappe.whitelist()
-def authorize_jobs(docname=None, approvals=None, channel="Remote Web Link", signer_name=None, signature_image=None, notes=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.authorize_jobs(
-		approvals=approvals,
-		channel=channel,
-		signer_name=signer_name,
-		signature_image=signature_image,
-		notes=notes,
-		**kwargs,
+def complete_linked_schedule_entries(ro_name):
+	"""Mark non-cancelled Schedule Entries for a completed/released Repair Order as Completed."""
+	if not ro_name or not frappe.db.exists("DocType", "Schedule Entry"):
+		return []
+	frappe.has_permission("Schedule Entry", "write", throw=True)
+	open_entries = frappe.get_list(
+		"Schedule Entry",
+		filters={"repair_order": ro_name, "status": ["in", ["Draft", "Scheduled", "Confirmed", "In Progress"]]},
+		pluck="name",
 	)
+	if not open_entries:
+		return []
 
+	frappe.db.set_value("Schedule Entry", {"name": ["in", open_entries]}, "status", "Completed")
+	from ism.ism.doctype.schedule_entry.schedule_entry import sync_repair_order_schedule_entries
 
-@frappe.whitelist()
-def pick_up_vehicle(docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.pick_up_vehicle()
-
-
-@frappe.whitelist()
-def park_vehicle(docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.park_vehicle()
-
-
-@frappe.whitelist()
-def add_service_package(service_package=None, docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.add_service_package(service_package=service_package, **kwargs)
-
-
-@frappe.whitelist()
-def duplicate_service_for_opposite_side(service_row_id=None, docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.duplicate_service_for_opposite_side(service_row_id=service_row_id, **kwargs)
-
-
-@frappe.whitelist()
-def add_supplement(service_title=None, category="Maintenance", labor_hours=1.0, labor_rate=120.0, notes=None, parts=None, docname=None, job_title=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.add_supplement(service_title=service_title, category=category, labor_hours=labor_hours, labor_rate=labor_rate, parts=parts, notes=notes, job_title=job_title, **kwargs)
-
-
-@frappe.whitelist()
-def process_payment_and_release(payment_method="Debit / Interac", paid_amount=None, odometer_out=None, docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.process_payment_and_release(payment_method=payment_method, paid_amount=paid_amount, odometer_out=odometer_out, **kwargs)
-
-
-@frappe.whitelist()
-def generate_approval_token(docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.generate_approval_token()
-
-
-@frappe.whitelist()
-def create_material_request(docname=None, **kwargs):
-	if not docname:
-		docname = _extract_docname_from_request()
-	ro = frappe.get_doc("Repair Order", docname)
-	return ro.create_material_request()
+	sync_repair_order_schedule_entries(ro_name)
+	frappe.publish_realtime(
+		"ism_calendar_update",
+		{"repair_order": ro_name, "schedule_entries": list(open_entries), "action": "bulk_complete"},
+	)
+	return open_entries
 
 
 @frappe.whitelist()
@@ -2245,8 +1955,12 @@ def get_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters, a
 
 @frappe.whitelist()
 def get_deferred_services_for_vehicle(vehicle: str):
-	if not vehicle:
+	frappe.has_permission("Repair Vehicle", "read", throw=True)
+	if not vehicle or not isinstance(vehicle, str) or not vehicle.strip():
 		return []
+	if not frappe.db.exists("Repair Vehicle", vehicle):
+		return []
+	frappe.has_permission("Repair Vehicle", "read", doc=vehicle, throw=True)
 
 	services = frappe.get_all(
 		"Vehicle Deferred Service",
@@ -2306,7 +2020,7 @@ def get_vehicle_customers(vehicle: str):
 
 	customer_names = {
 		c.name: c.customer_name
-		for c in frappe.get_all(
+		for c in frappe.get_list(
 			"Customer",
 			filters={"name": ["in", customer_ids]},
 			fields=["name", "customer_name"],
@@ -2334,24 +2048,6 @@ def get_vehicle_customers(vehicle: str):
 			seen.add(row.customer)
 
 	return customers
-
-
-@frappe.whitelist()
-def override_and_pick_up_vehicle(docname=None, notes=None, **kwargs):
-	name = docname or _extract_docname_from_request()
-	if not name:
-		frappe.throw(_("Repair Order name is required"))
-	ro = frappe.get_doc("Repair Order", name)
-	return ro.override_and_pick_up_vehicle(notes=notes, **kwargs)
-
-
-@frappe.whitelist()
-def check_parts_stock_availability(docname=None, **kwargs):
-	name = docname or _extract_docname_from_request()
-	if not name:
-		frappe.throw(_("Repair Order name is required"))
-	ro = frappe.get_doc("Repair Order", name)
-	return ro.check_parts_stock_availability()
 
 
 def on_stock_update_event(doc, method=None):

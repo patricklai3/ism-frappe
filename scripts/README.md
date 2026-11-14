@@ -6,13 +6,15 @@ All scripts detect the repository root dynamically relative to their location. T
 
 ## Files
 
-- [sync-to-wsl.ps1](file:///d:/ism/scripts/sync-to-wsl.ps1): Pushes files from Windows to WSL2 once using checksum verification.
-- [sync-from-wsl.ps1](file:///d:/ism/scripts/sync-from-wsl.ps1): Pulls files from WSL2 to Windows once.
-- [watch-sync.ps1](file:///d:/ism/scripts/watch-sync.ps1): Watches the repository for changes and pushes them to WSL2 automatically (PowerShell).
-- [watch-sync.mjs](file:///d:/ism/scripts/watch-sync.mjs): Watches the repository for changes and pushes them to WSL2 automatically (Node.js).
-- [start-remote-tunnel.ps1](file:///d:/ism/scripts/start-remote-tunnel.ps1): Exposes dev site on port 8000 via Cloudflare Tunnel with custom domain or quick URL and mobile QR code.
-- [stop-remote-tunnel.ps1](file:///d:/ism/scripts/stop-remote-tunnel.ps1): Stops active Cloudflare Tunnel processes.
-- [.tunnel-config.example.json](file:///d:/ism/scripts/.tunnel-config.example.json): Configuration template for your Cloudflare custom domain and tunnel token.
+- [sync-to-wsl.ps1](sync-to-wsl.ps1): Pushes files from Windows to WSL2 once using checksum verification.
+- [sync-from-wsl.ps1](sync-from-wsl.ps1): Pulls files from WSL2 to Windows once.
+- [watch-sync.ps1](watch-sync.ps1): Watches the repository for changes and pushes them to WSL2 automatically (PowerShell).
+- [watch-sync.mjs](watch-sync.mjs): Watches the repository for changes and pushes them to WSL2 automatically (Node.js).
+- [start-remote-tunnel.ps1](start-remote-tunnel.ps1): Exposes dev site on port 8000 via Cloudflare Tunnel with custom domain or quick URL and mobile QR code.
+- [stop-remote-tunnel.ps1](stop-remote-tunnel.ps1): Stops active Cloudflare Tunnel processes.
+- [verify_mcp_agent.py](../ism/scripts/verify_mcp_agent.py): Verification suite for `ism.api.agent` via Frappe v16 native MCP protocol (`bench --site <site> execute ism.scripts.verify_mcp_agent.run`).
+- [ism-agent-os](../ism-agent-os/tools/cli.py): Python package (`ism_agent_os`) and REST/CLI adapters for Frappe v16 + ISM.
+- [.tunnel-config.example.json](.tunnel-config.example.json): Configuration template for your Cloudflare custom domain and tunnel token.
 
 
 ## Usage

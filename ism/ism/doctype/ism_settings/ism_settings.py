@@ -4,20 +4,32 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import to_timedelta
+from frappe.utils import flt
+
+from ism.scheduling.time_utils import to_timedelta
 
 
 class ISMSettings(Document):
+	def before_validate(self):
+		self._normalize_sms_settings()
+
 	def validate(self):
 		self._validate_operating_hours()
 		self._validate_break_hours()
 		self._validate_estimation_parameters()
+		self._validate_pricing_parameters()
+
+	def _normalize_sms_settings(self):
+		# Twilio support was removed; coerce legacy values so existing sites save cleanly.
+		if not self.sms_gateway_provider or self.sms_gateway_provider == "Twilio":
+			self.sms_gateway_provider = "Disabled"
 
 	def _validate_operating_hours(self):
 		if self.operating_hours_start and self.operating_hours_end:
 			start = to_timedelta(self.operating_hours_start)
 			end = to_timedelta(self.operating_hours_end)
-			if start >= end:
+			# 00:00:00 - 00:00:00 marks the shop closed for scheduling tests and off-days.
+			if not (start == end == to_timedelta("00:00:00")) and start >= end:
 				frappe.throw(_("Operating Hours Start must be before Operating Hours End."))
 
 		if self.default_slot_interval is not None and self.default_slot_interval <= 0:
@@ -36,6 +48,8 @@ class ISMSettings(Document):
 			if self.operating_hours_start and self.operating_hours_end:
 				op_start = to_timedelta(self.operating_hours_start)
 				op_end = to_timedelta(self.operating_hours_end)
+				if op_start == op_end == to_timedelta("00:00:00"):
+					return
 				if b_start < op_start or b_end > op_end:
 					frappe.throw(_("Lunch break window must be within shop operating hours."))
 
@@ -57,3 +71,7 @@ class ISMSettings(Document):
 
 		if self.default_diagnostic_duration is not None and self.default_diagnostic_duration <= 0:
 			frappe.throw(_("Default Diagnostic Duration must be greater than 0 minutes."))
+
+	def _validate_pricing_parameters(self):
+		if self.default_labor_rate is not None and flt(self.default_labor_rate) <= 0:
+			frappe.throw(_("Default Labor Rate must be greater than 0."))

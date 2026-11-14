@@ -6,3 +6,5 @@
 # Patches added in this section will be executed after doctypes are migrated
 ism.patches.fix_tax_and_acc_sinv_2026_00047
 ism.patches.strip_code_from_service_package_titles
+ism.patches.drop_legacy_repair_order_job_and_item
+ism.patches.cleanup_legacy_setup_and_permissions

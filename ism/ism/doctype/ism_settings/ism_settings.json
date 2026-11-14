@@ -31,7 +31,9 @@
   "estimation_sigma",
   "cb_estimation",
   "buffer_padding_minutes",
-  "default_diagnostic_duration"
+  "default_diagnostic_duration",
+  "sb_pricing",
+  "default_labor_rate"
  ],
  "fields": [
   {
@@ -69,11 +71,11 @@
    "label": "Outbound SMS Gateway Settings"
   },
   {
-   "default": "Custom HTTP Webhook",
+   "default": "Disabled",
    "fieldname": "sms_gateway_provider",
    "fieldtype": "Select",
    "label": "SMS Gateway Provider",
-   "options": "Custom HTTP Webhook\nTwilio\nDisabled"
+   "options": "Disabled\nCustom HTTP Webhook"
   },
   {
    "fieldname": "sms_gateway_endpoint",
@@ -196,11 +198,23 @@
    "fieldname": "default_diagnostic_duration",
    "fieldtype": "Int",
    "label": "Default Diagnostic Duration (Minutes)"
+  },
+  {
+   "fieldname": "sb_pricing",
+   "fieldtype": "Section Break",
+   "label": "Pricing Defaults"
+  },
+  {
+   "default": "140.0",
+   "description": "Default hourly shop labor rate used for job estimates and Repair Orders when a labor rate is not specified.",
+   "fieldname": "default_labor_rate",
+   "fieldtype": "Currency",
+   "label": "Default Labor Rate"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-26 12:00:00.000000",
+ "modified": "2026-11-13 14:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

@@ -6,15 +6,6 @@
         "serve",
         "--mcp"
       ]
-    },
-    "ism-agent-os": {
-      "command": "python",
-      "args": [
-        "ism-agent-os/tools/ism_mcp_server.py"
-      ],
-      "env": {
-        "FRAPPE_URL": "http://localhost:8000"
-      }
     }
   }
 }

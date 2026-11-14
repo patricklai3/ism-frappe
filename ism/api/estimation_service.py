@@ -5,6 +5,7 @@ import json
 from typing import Any, Dict, List, Optional, Union
 
 import frappe
+from frappe import _
 from frappe.utils import cint, flt
 
 from ism.scheduling.estimation_light import (
@@ -16,13 +17,68 @@ from ism.scheduling.estimation_light import (
 
 
 def _get_ism_settings():
-	"""Retrieve ISM Settings single doctype safely."""
+	"""Retrieve cached ISM Settings single doctype safely."""
 	if not frappe.db.exists("DocType", "ISM Settings"):
 		return None
 	try:
 		return frappe.get_single("ISM Settings")
 	except Exception:
 		return None
+
+
+def _prefetch_items_meta(item_codes: List[str]) -> Dict[str, Dict[str, Any]]:
+	"""Batch-load item_group and optional custom_frt for a list of item codes."""
+	unique_codes = list({str(c).strip() for c in item_codes if c})
+	if not unique_codes or not frappe.db.exists("DocType", "Item"):
+		return {}
+
+	fields = ["name", "item_group"]
+	if frappe.db.has_column("Item", "custom_frt"):
+		fields.append("custom_frt")
+
+	rows = frappe.get_list("Item", filters={"name": ["in", unique_codes]}, fields=fields)
+	return {r["name"]: r for r in rows}
+
+
+def _prefetch_package_hours(package_names: List[str]) -> Dict[str, float]:
+	"""Batch-load standard_labor_hours for Service Packages."""
+	unique_pkgs = list({str(p).strip() for p in package_names if p})
+	if not unique_pkgs or not frappe.db.exists("DocType", "Service Package"):
+		return {}
+	rows = frappe.get_list(
+		"Service Package",
+		filters={"name": ["in", unique_pkgs]},
+		fields=["name", "standard_labor_hours"],
+	)
+	out: Dict[str, float] = {}
+	for r in rows:
+		val = flt(r.get("standard_labor_hours"))
+		if val > 0:
+			out[r["name"]] = val
+	return out
+
+
+def _extract_part_item_codes(parts_raw: Any) -> List[str]:
+	"""Extract item codes from JSON string, list of dicts, or child documents."""
+	if not parts_raw:
+		return []
+	parsed = parts_raw
+	if isinstance(parts_raw, str):
+		try:
+			parsed = frappe.parse_json(parts_raw)
+		except Exception:
+			try:
+				parsed = json.loads(parts_raw)
+			except Exception:
+				return []
+	if not isinstance(parsed, (list, tuple)):
+		return []
+	codes: List[str] = []
+	for entry in parsed:
+		code = entry.get("item_code") if isinstance(entry, dict) else getattr(entry, "item_code", None)
+		if code:
+			codes.append(str(code).strip())
+	return codes
 
 
 def _get_setting_percentile(settings, default: float = 0.80) -> float:
@@ -120,6 +176,9 @@ def get_estimate(item_code: Optional[str] = None, **kwargs) -> Dict[str, Any]:
 			- percentile: float
 			- sigma: float
 	"""
+	frappe.has_permission("Item", "read", throw=True)
+	if item_code is not None and not isinstance(item_code, str):
+		frappe.throw(frappe._("Invalid item_code identifier."), frappe.ValidationError)
 	settings = _get_ism_settings()
 
 	# Resolve percentile
@@ -246,6 +305,7 @@ def get_total_estimate(
 			- buffer_padding: int
 			- operations_count: int
 	"""
+	frappe.has_permission("Item", "read", throw=True)
 	settings = _get_ism_settings()
 
 	# Resolve percentile
@@ -309,18 +369,27 @@ def get_total_estimate(
 			except Exception:
 				item_codes = [c.strip() for c in item_codes.split(",") if c.strip()]
 
-	if not item_codes or not isinstance(item_codes, (list, tuple)):
+	if item_codes is None or item_codes == [] or item_codes == ():
 		return {
 			"total_duration_minutes": 0,
 			"p_pure": 0,
 			"buffer_padding": buffer_padding,
 			"operations_count": 0,
 		}
+	if not isinstance(item_codes, (list, tuple)):
+		frappe.throw(_("Operations must be a list of item codes or operation specs."), frappe.ValidationError)
 
-	operations = []
+	normalized_items = []
+	candidate_codes: List[str] = []
 	for item in item_codes:
 		if isinstance(item, dict):
 			code = item.get("item_code")
+			if code is not None and not isinstance(code, str):
+				frappe.throw(_("Invalid item_code: expected string."), frappe.ValidationError)
+			if code:
+				code = code.strip()
+				if code:
+					candidate_codes.append(code)
 			item_frt_min = item.get("flat_rate_minutes")
 			if item_frt_min is None:
 				item_frt_min = item.get("frt_minutes")
@@ -348,16 +417,32 @@ def get_total_estimate(
 			code = None
 			item_frt = float(item)
 			item_sig = None
-		else:
-			code = str(item).strip() if item else None
+		elif isinstance(item, str):
+			code = item.strip() or None
+			if code:
+				candidate_codes.append(code)
 			item_frt = None
 			item_sig = None
+		elif item is None:
+			continue
+		else:
+			frappe.throw(_("Invalid item entry in operations: expected string, number, or dict."), frappe.ValidationError)
+
+		normalized_items.append((code.strip() if isinstance(code, str) and code.strip() else None, item_frt, item_sig))
+
+	items_meta = _prefetch_items_meta(candidate_codes)
+	default_diag = _get_setting_default_diagnostic(settings)
+
+	operations = []
+	for code, item_frt, item_sig in normalized_items:
+		meta = items_meta.get(code) if code else None
 
 		if item_frt is None and code:
-			effective_fallback = None if skip_missing else (
-				fallback_frt if fallback_frt is not None else _get_setting_default_diagnostic(settings)
-			)
-			item_frt = _get_frt(code, fallback=effective_fallback)
+			frt_hours = meta.get("custom_frt") if meta else None
+			if frt_hours is not None and flt(frt_hours) > 0:
+				item_frt = flt(frt_hours) * 60.0
+			elif not skip_missing:
+				item_frt = fallback_frt if fallback_frt is not None else default_diag
 
 		if item_frt is None or item_frt <= 0:
 			if skip_missing:
@@ -368,9 +453,8 @@ def get_total_estimate(
 			continue
 
 		if item_sig is None:
-			if code and frappe.db.exists("Item", code):
-				item_group = frappe.db.get_value("Item", code, "item_group")
-				item_sig = get_sigma_for_item(item_group, default_sigma=default_sigma)
+			if meta and meta.get("item_group"):
+				item_sig = get_sigma_for_item(meta.get("item_group"), default_sigma=default_sigma)
 			else:
 				item_sig = default_sigma
 		else:
@@ -400,7 +484,11 @@ def get_total_estimate(
 	}
 
 
-def _resolve_service_frt_minutes(s) -> Optional[float]:
+def _resolve_service_frt_minutes(
+	s,
+	package_hours: Optional[Dict[str, float]] = None,
+	items_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Optional[float]:
 	"""Extract flat rate time in minutes from a Repair Order Service row."""
 	labor_hours = getattr(s, "labor_hours", None)
 	if labor_hours is not None:
@@ -421,26 +509,35 @@ def _resolve_service_frt_minutes(s) -> Optional[float]:
 			pass
 
 	pkg_name = getattr(s, "service_package", None)
-	if pkg_name and frappe.db.exists("Service Package", pkg_name):
-		pkg_hours = frappe.db.get_value("Service Package", pkg_name, "standard_labor_hours")
-		if pkg_hours is not None:
-			try:
-				val = float(pkg_hours)
-				if val > 0:
-					return val * 60.0
-			except (ValueError, TypeError):
-				pass
+	if pkg_name:
+		if package_hours is not None:
+			if pkg_name in package_hours:
+				return package_hours[pkg_name] * 60.0
+		elif frappe.db.exists("Service Package", pkg_name):
+			pkg_hours = frappe.db.get_value("Service Package", pkg_name, "standard_labor_hours")
+			if pkg_hours is not None and flt(pkg_hours) > 0:
+				return flt(pkg_hours) * 60.0
 
 	item_code = getattr(s, "item_code", None)
 	if item_code:
-		item_frt = _get_frt(str(item_code))
-		if item_frt and item_frt > 0:
-			return item_frt
+		code = str(item_code).strip()
+		if items_meta is not None:
+			meta = items_meta.get(code)
+			if meta and flt(meta.get("custom_frt")) > 0:
+				return flt(meta.get("custom_frt")) * 60.0
+		else:
+			item_frt = _get_frt(code)
+			if item_frt and item_frt > 0:
+				return item_frt
 
 	return None
 
 
-def _resolve_service_sigma(s, default_sigma: float) -> float:
+def _resolve_service_sigma(
+	s,
+	default_sigma: float,
+	items_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> float:
 	"""Determine variance profile (sigma) for a Repair Order Service row."""
 	cat = getattr(s, "category", None)
 	if cat and isinstance(cat, str):
@@ -456,11 +553,14 @@ def _resolve_service_sigma(s, default_sigma: float) -> float:
 		if keyword in combined:
 			return get_sigma_for_item(keyword, default_sigma=default_sigma)
 
-	parts = getattr(s, "parts", []) or []
-	for p in parts:
-		item_code = getattr(p, "item_code", None)
-		if item_code and frappe.db.exists("Item", item_code):
-			item_group = frappe.db.get_value("Item", item_code, "item_group")
+	part_codes = _extract_part_item_codes(getattr(s, "parts", None))
+	if part_codes and items_meta is None:
+		items_meta = _prefetch_items_meta(part_codes)
+
+	for code in part_codes:
+		meta = items_meta.get(code) if items_meta else None
+		item_group = meta.get("item_group") if meta else None
+		if item_group:
 			sig = get_sigma_for_item(item_group, default_sigma=default_sigma)
 			if sig != default_sigma:
 				return sig
@@ -492,6 +592,7 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 			- repair_order: Optional[str]
 	"""
 	if not repair_order:
+		frappe.has_permission("Repair Order", "read", throw=True)
 		return {
 			"total_minutes": 0,
 			"total_duration_minutes": 0,
@@ -503,9 +604,13 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 
 	if hasattr(repair_order, "doctype") and repair_order.doctype == "Repair Order":
 		ro = repair_order
+		ro.check_permission("create" if ro.is_new() else "read")
 		repair_order_name = ro.name
 	else:
-		repair_order_name = str(repair_order).strip()
+		if not isinstance(repair_order, str):
+			frappe.throw(frappe._("Invalid Repair Order identifier."), frappe.ValidationError)
+		frappe.has_permission("Repair Order", "read", throw=True)
+		repair_order_name = repair_order.strip()
 		if repair_order_name.startswith("new-"):
 			return {
 				"total_minutes": 0,
@@ -521,6 +626,7 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 				frappe.DoesNotExistError,
 			)
 		ro = frappe.get_doc("Repair Order", repair_order_name)
+		ro.check_permission("read")
 
 	settings = _get_ism_settings()
 	default_sigma = _get_setting_sigma(settings)
@@ -530,17 +636,22 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 		except (ValueError, TypeError):
 			pass
 
-	services = getattr(ro, "services", []) or []
-	operations = []
-
+	services = [s for s in (getattr(ro, "services", []) or []) if getattr(s, "status", None) != "Declined"]
+	pkg_names = [getattr(s, "service_package", None) for s in services if getattr(s, "service_package", None)]
+	item_codes: List[str] = []
 	for s in services:
-		status = getattr(s, "status", None)
-		if status == "Declined":
-			continue
+		if getattr(s, "item_code", None):
+			item_codes.append(str(getattr(s, "item_code")).strip())
+		item_codes.extend(_extract_part_item_codes(getattr(s, "parts", None)))
 
-		frt_min = _resolve_service_frt_minutes(s)
+	package_hours = _prefetch_package_hours(pkg_names)
+	items_meta = _prefetch_items_meta(item_codes)
+
+	operations = []
+	for s in services:
+		frt_min = _resolve_service_frt_minutes(s, package_hours=package_hours, items_meta=items_meta)
 		if frt_min is not None and frt_min > 0:
-			sig = _resolve_service_sigma(s, default_sigma)
+			sig = _resolve_service_sigma(s, default_sigma, items_meta=items_meta)
 			operations.append({"flat_rate_minutes": float(frt_min), "sigma": float(sig)})
 
 	if not operations:

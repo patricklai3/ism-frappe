@@ -104,8 +104,8 @@ frappe.views.calendar["Schedule Entry"] = {
 // Ambient Realtime synchronization: automatically refetch events when an appointment is booked or moved
 if (frappe.realtime) {
 	frappe.realtime.off("ism_calendar_update");
-	frappe.realtime.on("ism_calendar_update", function (data) {
-		if (window.cur_calendar) {
+	frappe.realtime.on("ism_calendar_update", function () {
+		if (window.cur_calendar && (!window.cur_calendar.doctype || window.cur_calendar.doctype === "Schedule Entry")) {
 			window.cur_calendar.refresh();
 		}
 	});

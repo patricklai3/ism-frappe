@@ -1,9 +1,12 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+from unittest.mock import MagicMock, patch
+
 import frappe
 from frappe.utils import flt
-from ism.tests.base import ISMTestCase
+import ism.api.tesla as tesla_api
+from ism.tests.base import ISMTestCase, TEST_PREFIX
 from ism.utils.tesla_manual import (
 	get_category_for_correction_code,
 	parse_tesla_manual_url,
@@ -12,9 +15,18 @@ from ism.utils.tesla_manual import (
 	get_tesla_manual_url_for_vehicle,
 	validate_vehicle_compatibility,
 	parse_tesla_procedure_html,
+	normalize_tesla_procedure,
+	detect_service_side,
 	_MANIFEST_CACHE,
 )
-from ism.api.tesla import import_tesla_procedure, get_active_repair_orders, get_vehicle_manual_url
+from ism.api.tesla import (
+	decode_vehicle_vin,
+	fetch_and_parse_tesla_procedure,
+	get_vehicle_intelligence,
+	import_tesla_procedure,
+	link_vehicle_customer,
+	search_vehicles,
+)
 from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
 
 
@@ -285,23 +297,38 @@ class TestTeslaIntegration(ISMTestCase):
 		expected_labor_amt = flt(0.90 * default_rate, 2)
 		self.assertEqual(flt(srv.labor_amount), expected_labor_amt)
 
-		# Re-importing same procedure without duplicate_action should trigger duplicate_warning
+		# Default on_conflict="skip" skips existing matching row cleanly without pausing
 		res2 = import_tesla_procedure(
 			repair_order=ro.name,
 			data=proc_payload
 		)
-		self.assertEqual(res2["status"], "duplicate_warning")
-		self.assertTrue(res2["requires_duplicate_choice"])
-		self.assertEqual(
-			res2["message"],
-			"Correction code 00030700 is already on this Repair Order. Update existing row or Add as additional job?"
-		)
+		self.assertEqual(res2["status"], "skipped")
+		self.assertEqual(res2["action"], "skipped")
+		self.assertNotIn("requires_duplicate_choice", res2)
+		ro.reload()
+		self.assertEqual(len(ro.services), 1)
 
-		# Re-importing with duplicate_action="update" should update existing row
+		# on_conflict="error" throws DuplicateEntryError
+		with self.assertRaises(frappe.DuplicateEntryError):
+			import_tesla_procedure(
+				repair_order=ro.name,
+				data=proc_payload,
+				on_conflict="error",
+			)
+
+		# Invalid on_conflict value is rejected
+		with self.assertRaises(frappe.ValidationError):
+			import_tesla_procedure(
+				repair_order=ro.name,
+				data=proc_payload,
+				on_conflict="prompt",
+			)
+
+		# Re-importing with on_conflict="overwrite" (or legacy duplicate_action="update") updates existing row
 		res_update = import_tesla_procedure(
 			repair_order=ro.name,
 			data=proc_payload,
-			duplicate_action="update"
+			on_conflict="overwrite",
 		)
 		self.assertEqual(res_update["status"], "success")
 		self.assertEqual(res_update["action"], "updated")
@@ -309,11 +336,11 @@ class TestTeslaIntegration(ISMTestCase):
 		ro.reload()
 		self.assertEqual(len(ro.services), 1)
 
-		# Re-importing with duplicate_action="add" should append an additional row
+		# Re-importing with on_conflict="add" appends an additional row
 		res_add = import_tesla_procedure(
 			repair_order=ro.name,
 			data=proc_payload,
-			duplicate_action="add"
+			on_conflict="add",
 		)
 		self.assertEqual(res_add["status"], "success")
 		self.assertEqual(res_add["action"], "added")
@@ -385,14 +412,23 @@ class TestTeslaIntegration(ISMTestCase):
 			"tesla_manual_url": "https://service.tesla.com/docs/ModelY/ServiceManual/en-us/GUID-DOOR-LH.html",
 		}
 
-		# Import with side="both"
+		# Mismatched vehicle model with force=False throws ValidationError (no requires_confirmation pause)
+		with self.assertRaises(frappe.ValidationError):
+			import_tesla_procedure(
+				repair_order=ro.name,
+				data=proc_payload,
+				side="both",
+			)
+
+		# Import with side="both" and force=True succeeds and emits compatibility warning
 		res = import_tesla_procedure(
 			repair_order=ro.name,
 			data=proc_payload,
 			side="both",
-			allow_generation_mismatch=1,
+			force=True,
 		)
 		self.assertEqual(res["status"], "success")
+		self.assertTrue(res.get("warnings"))
 		ro.reload()
 		self.assertEqual(len(ro.services), 2)
 
@@ -407,15 +443,15 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(rh_service.correction_code, "10106102")
 		self.assertIn("RH", rh_service.service_title)
 
-		# Verify duplicate detection handles sides independently
-		# Importing LH again should trigger duplicate warning
+		# Verify conflict detection handles sides independently (default skip keeps existing row untouched)
 		dup_res = import_tesla_procedure(
 			repair_order=ro.name,
 			data=proc_payload,
 			side="lh",
-			allow_generation_mismatch=1,
+			force=True,
 		)
-		self.assertEqual(dup_res["status"], "duplicate_warning")
+		self.assertEqual(dup_res["status"], "skipped")
+		self.assertEqual(dup_res["action"], "skipped")
 
 		# Opposite side duplicate action: duplicate_service_for_opposite_side
 		ro_single = self.create_test_repair_order(customer=customer.name, vehicle=vehicle.name)
@@ -478,10 +514,145 @@ class TestTeslaIntegration(ISMTestCase):
 			ro_non_symm.duplicate_service_for_opposite_side(ro_non_symm.services[0].name)
 
 		# 4. Verify SSRF protection on fetch_and_parse_tesla_procedure
-		from ism.api.tesla import fetch_and_parse_tesla_procedure
 		with self.assertRaises(frappe.ValidationError):
 			fetch_and_parse_tesla_procedure("http://169.254.169.254/latest/meta-data/")
 		with self.assertRaises(frappe.ValidationError):
 			fetch_and_parse_tesla_procedure("https://malicious-domain.com/hack.html")
+
+	def test_extension_endpoints_removed_and_no_cors_wildcard(self):
+		"""Verify deprecated Chrome extension CORS-wildcard endpoints are removed."""
+		for removed_fn in ("get_active_repair_orders", "get_session_info", "get_vehicle_manual_url"):
+			self.assertFalse(hasattr(tesla_api, removed_fn), f"{removed_fn} should be removed")
+
+		frappe.local.allow_cors = None
+		sample_html = (
+			'<h1 class="topictitle1"><span class="ph procedure-title">Cabin Filter Replacement</span></h1>'
+			'<span class="ph correction-code">18100102</span>'
+			'<span class="ph frt">0.40</span>'
+			'<table><tr><td>Cabin Air Filter (Qty: 2)</td><td>1107681-00-A</td></tr></table>'
+		)
+		mock_resp = MagicMock()
+		mock_resp.__enter__.return_value = mock_resp
+		mock_resp.read.return_value = sample_html.encode("utf-8")
+
+		cust = self.create_test_customer(f"{TEST_PREFIX}CorsCheck")
+		veh = self.create_test_vehicle(
+			vin="5YJ3E1EBXNF909090",
+			customer=cust.name,
+			model="Model 3",
+			model_year="2022",
+			manufactured_month="05/22",
+		)
+		with patch("ism.api.tesla.urllib.request.urlopen", return_value=mock_resp):
+			parsed = fetch_and_parse_tesla_procedure(
+				"https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-CABIN-FILT.html",
+				vehicle=veh.name,
+			)
+		self.assertIsNone(getattr(frappe.local, "allow_cors", None))
+		self.assertEqual(parsed["title"], "Cabin Filter Replacement")
+		self.assertEqual(parsed["correction_code"], "18100102")
+		self.assertTrue(parsed["compatibility"]["is_compatible"])
+		self.assertEqual(len(parsed["parts"]), 1)
+		self.assertEqual(parsed["parts"][0]["part_number"], "1107681-00-A")
+		self.assertEqual(parsed["parts"][0]["qty"], 2.0)
+
+	def test_unified_parts_persistence_and_side_filtering(self):
+		"""Verify procedure normalization persists parts on Service Package and splits LH/RH parts on RO."""
+		normalized = normalize_tesla_procedure({
+			"procedure_name": "31011402 - Link - Lower - Front - LH",
+			"correction_code": "31011402",
+			"rh_correction_code": "31011502",
+			"labor_hours": 0.85,
+			"model": "Model 3",
+			"parts": [
+				{"part_number": "1044341-00-D", "part_name": "Front Lower Lateral Link - LH", "qty": 1, "rate": 185.0},
+				{"part_number": "1044342-00-D", "part_name": "Front Lower Lateral Link - RH", "qty": 1, "rate": 185.0, "side": "RH"},
+				{"part_number": "1044399-00-A", "part_name": "Lateral Link Mounting Bolt", "qty": 2, "rate": 10.0, "side": "Both"},
+			],
+		}, url="https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-LINK-TEST.html")
+		self.assertEqual(normalized["title"], "Link - Lower - Front - LH")
+		self.assertEqual(normalized["service_side"], "LH")
+		self.assertEqual(detect_service_side(normalized["title"]), "LH")
+		self.assertEqual(len(normalized["parts"]), 3)
+
+		cust = self.create_test_customer(f"{TEST_PREFIX}PartsPersist")
+		veh = self.create_test_vehicle(
+			vin="5YJ3E1EBXNF818181",
+			customer=cust.name,
+			model="Model 3",
+			model_year="2022",
+			manufactured_month="05/22",
+		)
+		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name)
+
+		res = import_tesla_procedure(repair_order=ro.name, data=normalized, side="both")
+		self.assertEqual(res["status"], "success")
+		self.assertEqual(res["count_added"], 2)
+
+		pkg = frappe.get_doc("Service Package", res["service_package"])
+		self.track(pkg)
+		self.assertEqual(len(pkg.items), 3)
+
+		ro.reload()
+		lh_parts = frappe.parse_json(ro.services[0].parts)
+		rh_parts = frappe.parse_json(ro.services[1].parts)
+		lh_codes = {p["item_code"] for p in lh_parts}
+		rh_codes = {p["item_code"] for p in rh_parts}
+		self.assertIn("OEM-1044341-00-D-NEW", lh_codes)
+		self.assertIn("OEM-1044399-00-A-NEW", lh_codes)
+		self.assertNotIn("OEM-1044342-00-D-NEW", lh_codes)
+		self.assertIn("OEM-1044342-00-D-NEW", rh_codes)
+		self.assertIn("OEM-1044399-00-A-NEW", rh_codes)
+		self.assertNotIn("OEM-1044341-00-D-NEW", rh_codes)
+		self.assertEqual(flt(ro.services[0].parts_total), 205.0)
+		self.assertEqual(flt(ro.services[1].parts_total), 205.0)
+
+	def test_vehicle_intelligence_api_endpoints(self):
+		"""Verify offline VIN decoding, multi-customer search, linking, and intelligence summary endpoints."""
+		decoded = decode_vehicle_vin("5YJ3E1EBXNF123456")
+		self.assertTrue(decoded["is_tesla_wmi"])
+		self.assertEqual(decoded["is_valid_vin"], 1)
+		self.assertEqual(decoded["model"], "Model 3")
+
+		cust1 = self.create_test_customer(f"{TEST_PREFIX}IntelOwner1")
+		cust2 = self.create_test_customer(f"{TEST_PREFIX}IntelOwner2")
+		veh = self.create_test_vehicle(
+			vin="5YJ3E1EBXNF727272",
+			customer=cust1.name,
+			license_plate="TESLA-99",
+			model="Model 3",
+			model_year="2022",
+			manufactured_month="05/22",
+		)
+		veh.append("deferred_services", {
+			"job_title": "Brake Fluid Flush",
+			"estimated_amount": 180.0,
+			"status": "Open Recommendation",
+			"safety_hazard": 1,
+		})
+		veh.save(ignore_permissions=True)
+
+		linked = link_vehicle_customer(vehicle="TESLA-99", customer=cust2.name, relationship="Spouse")
+		self.assertEqual(len(linked["owners"]), 2)
+
+		matches = search_vehicles(query="TESLA-99", customer=cust2.name)
+		self.assertTrue(any(m["name"] == veh.name for m in matches))
+
+		intel = get_vehicle_intelligence(veh.vin)
+		self.assertEqual(intel["vehicle"]["vin"], veh.vin)
+		self.assertEqual(len(intel["owners"]), 2)
+		self.assertEqual(intel["deferred_services"]["open_count"], 1)
+		self.assertEqual(intel["deferred_services"]["safety_hazard_count"], 1)
+		self.assertEqual(flt(intel["deferred_services"]["open_estimated_total"]), 180.0)
+		self.assertIn("Model3", intel["recommended_manual_url"])
+
+		# Type-confusion guards reject non-string filter-injection payloads
+		for fn, kwargs in (
+			(fetch_and_parse_tesla_procedure, {"url": {"$ne": ""}}),
+			(import_tesla_procedure, {"repair_order": {"!=": ""}, "url": "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-123.html"}),
+			(get_vehicle_intelligence, {"vehicle": {"$ne": ""}}),
+		):
+			with self.assertRaises((frappe.ValidationError, frappe.exceptions.FrappeTypeError)):
+				fn(**kwargs)
 
 

@@ -1,11 +1,20 @@
 // Copyright (c) 2026, patricklai3 and contributors
 // For license information, please see license.txt
 
+function recalculate_service_rate(frm) {
+	if (frm.doc.is_flat_rate) return;
+
+	const hours = flt(frm.doc.standard_labor_hours);
+	const rate = flt(frm.doc.hourly_rate);
+	if (hours && rate) {
+		frm.set_value("service_rate", hours * rate);
+	}
+}
+
 frappe.ui.form.on("Service Package", {
 	refresh(frm) {
 		frm.trigger("toggle_flat_rate_display");
 
-		// Top-level standalone action buttons
 		frm.add_custom_button(__("Tesla Manual"), () => {
 			frm.trigger("open_tesla_manual");
 		});
@@ -13,28 +22,6 @@ frappe.ui.form.on("Service Package", {
 		frm.add_custom_button(__("Import from Tesla URL"), () => {
 			frm.trigger("open_import_dialog");
 		});
-
-		frm.add_custom_button(__("Quick Add / Import Part"), () => {
-			frm.trigger("open_parts_importer");
-		}, __("Parts"));
-
-		if (frm.fields_dict.items && frm.fields_dict.items.grid) {
-			frm.fields_dict.items.grid.add_custom_button(__("+ Quick Add / Import Part"), () => {
-				frm.trigger("open_parts_importer");
-			});
-		}
-	},
-
-	open_parts_importer(frm) {
-		frappe.msgprint(__("Parts import is now handled via the Agent Layer (`import_supplier_catalog`). You can also add rows directly to the Items table below."));
-	},
-
-	btn_open_tesla_manual(frm) {
-		frm.trigger("open_tesla_manual");
-	},
-
-	btn_import_from_url(frm) {
-		frm.trigger("open_import_dialog");
 	},
 
 	open_tesla_manual(frm) {
@@ -67,36 +54,47 @@ frappe.ui.form.on("Service Package", {
 				const url = values.tesla_url.trim();
 				frappe.call({
 					method: "ism.api.tesla.fetch_and_parse_tesla_procedure",
-					args: { url: url },
+					args: { url },
 					freeze: true,
 					freeze_message: __("Fetching procedure from Tesla manual..."),
 					callback(r) {
-						if (r && r.message) {
-							const d = r.message;
-							dialog.hide();
+						if (!r?.message) return;
 
-							const code = d.correction_code ? d.correction_code.trim() : "";
-							let title = d.title ? d.title.trim() : "";
-							if (code && title.startsWith(code)) {
-								title = title.replace(new RegExp(`^${code}\\s*[-–—:]?\\s*`), "").trim();
-							}
+						const d = r.message;
+						dialog.hide();
 
-							frm.set_value("package_name", title);
-							if (code) frm.set_value("correction_code", code);
-							if (d.frt) {
-								frm.set_value("standard_labor_hours", flt(d.frt));
-							}
-							if (d.doc_guid) frm.set_value("doc_guid", d.doc_guid);
-							if (d.applicable_model) frm.set_value("applicable_model", d.applicable_model);
-							if (d.applicable_generation) frm.set_value("applicable_generation", d.applicable_generation);
-							if (d.is_mobile_capable !== undefined) frm.set_value("is_mobile_capable", d.is_mobile_capable ? 1 : 0);
-							frm.set_value("tesla_manual_url", url);
-
-							frappe.show_alert({
-								message: __("Loaded: {0} ({1} hrs)", [title || code, d.frt || frm.doc.standard_labor_hours]),
-								indicator: "green",
-							}, 5);
+						const code = d.correction_code ? d.correction_code.trim() : "";
+						let title = d.title ? d.title.trim() : "";
+						if (code && title.startsWith(code)) {
+							const escaped_code = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+							title = title
+								.replace(new RegExp(`^${escaped_code}\\s*[-–—:]?\\s*`), "")
+								.trim();
 						}
+
+						frm.set_value("package_name", title);
+						if (code) frm.set_value("correction_code", code);
+						if (d.frt) frm.set_value("standard_labor_hours", flt(d.frt));
+						if (d.doc_guid) frm.set_value("doc_guid", d.doc_guid);
+						if (d.applicable_model) frm.set_value("applicable_model", d.applicable_model);
+						if (d.applicable_generation) {
+							frm.set_value("applicable_generation", d.applicable_generation);
+						}
+						if (d.is_mobile_capable !== undefined) {
+							frm.set_value("is_mobile_capable", d.is_mobile_capable ? 1 : 0);
+						}
+						frm.set_value("tesla_manual_url", url);
+
+						frappe.show_alert(
+							{
+								message: __("Loaded: {0} ({1} hrs)", [
+									title || code,
+									d.frt || frm.doc.standard_labor_hours,
+								]),
+								indicator: "green",
+							},
+							5
+						);
 					},
 				});
 			},
@@ -106,37 +104,29 @@ frappe.ui.form.on("Service Package", {
 
 	is_flat_rate(frm) {
 		frm.trigger("toggle_flat_rate_display");
-		if (!frm.doc.is_flat_rate) {
-			const hours = flt(frm.doc.standard_labor_hours);
-			const rate = flt(frm.doc.hourly_rate);
-			if (hours && rate) {
-				frm.set_value("service_rate", hours * rate);
-			}
-		}
+		recalculate_service_rate(frm);
 	},
 
 	standard_labor_hours(frm) {
-		if (!frm.doc.is_flat_rate) {
-			const hours = flt(frm.doc.standard_labor_hours);
-			const rate = flt(frm.doc.hourly_rate);
-			if (hours && rate) {
-				frm.set_value("service_rate", hours * rate);
-			}
-		}
+		recalculate_service_rate(frm);
 	},
 
 	hourly_rate(frm) {
-		if (!frm.doc.is_flat_rate) {
-			const hours = flt(frm.doc.standard_labor_hours);
-			const rate = flt(frm.doc.hourly_rate);
-			frm.set_value("service_rate", hours * rate);
-		}
+		recalculate_service_rate(frm);
 	},
 
 	toggle_flat_rate_display(frm) {
 		if (frm.doc.is_flat_rate) {
-			frm.set_df_property("service_rate", "description", __("Fixed flat rate labor/service amount billed to customer."));
-			frm.set_df_property("hourly_rate", "description", __("Optional: Hourly rate is ignored for flat rate services."));
+			frm.set_df_property(
+				"service_rate",
+				"description",
+				__("Fixed flat rate labor/service amount billed to customer.")
+			);
+			frm.set_df_property(
+				"hourly_rate",
+				"description",
+				__("Optional: Hourly rate is ignored for flat rate services.")
+			);
 		} else {
 			frm.set_df_property("service_rate", "description", __("Calculated as FRT × Hourly Rate."));
 			frm.set_df_property("hourly_rate", "description", "");

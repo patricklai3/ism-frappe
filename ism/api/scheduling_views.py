@@ -5,7 +5,9 @@ import json
 from datetime import timedelta
 import frappe
 from frappe import _
-from frappe.utils import getdate, to_timedelta
+from frappe.utils import getdate
+
+from ism.scheduling.time_utils import effective_end_time, get_shop_settings, to_timedelta
 
 STATUS_COLORS = {
 	"Draft": "#9e9e9e",
@@ -24,6 +26,7 @@ def get_calendar_events(start, end, filters=None):
 	Return structured events payload for FullCalendar / Desk Calendar view.
 	Accepts start date, end date, and optional filters (JSON string, dict, or list).
 	"""
+	frappe.has_permission("Schedule Entry", "read", throw=True)
 	if isinstance(filters, str):
 		try:
 			filters = json.loads(filters)
@@ -50,7 +53,7 @@ def get_calendar_events(start, end, filters=None):
 	elif isinstance(filters, list):
 		query_filters.extend(filters)
 
-	entries = frappe.get_all(
+	entries = frappe.get_list(
 		"Schedule Entry",
 		filters=query_filters,
 		fields=[
@@ -72,15 +75,15 @@ def get_calendar_events(start, end, filters=None):
 		order_by="scheduled_date asc, scheduled_time asc",
 	)
 
+	shop_settings = get_shop_settings()
+	bs_td = shop_settings.get("break_start")
+	be_td = shop_settings.get("break_end")
+
 	events = []
 	for entry in entries:
 		start_td = to_timedelta(entry.scheduled_time)
 		duration = entry.estimated_duration or 60
-		try:
-			from ism.api.scheduling import effective_end_time
-			end_td = effective_end_time(entry.scheduled_time, duration)
-		except Exception:
-			end_td = start_td + timedelta(minutes=duration)
+		end_td = effective_end_time(start_td, duration, bs_td, be_td)
 
 		sched_date_str = str(entry.scheduled_date)
 		start_str = f"{sched_date_str} {str(start_td):>08}"

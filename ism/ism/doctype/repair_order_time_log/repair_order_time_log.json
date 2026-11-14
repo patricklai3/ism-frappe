@@ -28,7 +28,7 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Technician",
-   "options": "User",
+   "options": "Employee",
    "reqd": 1
   },
   {

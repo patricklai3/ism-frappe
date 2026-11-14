@@ -10,15 +10,12 @@ from ism.api.parts import (
 	quick_create_part,
 	bulk_import_parts,
 	get_component_alternates,
-	save_part_to_service_package,
 	get_default_warehouse,
 	link_part_to_service_packages,
 	search_service_packages,
 	quick_create_service_package,
 	parse_slot_number,
 	format_slot_label,
-	get_service_package_slots,
-	assign_part_to_slot,
 	has_lhrh_designation,
 	detect_part_side,
 	resolve_part_side,
@@ -27,7 +24,9 @@ from ism.api.parts import (
 	submit_procurement_orders,
 	get_item_procurement_info,
 	get_repair_order_committed_qty,
+	get_repair_order_committed_qty_batch,
 	get_item_available_stock,
+	get_items_available_stock_batch,
 	get_repair_order_parts_stock,
 )
 from ism.ism.doctype.repair_order.repair_order import (
@@ -263,8 +262,8 @@ class TestPartsManagement(ISMTestCase):
 		self.assertEqual(wh_doc.company, company)
 		self.assertEqual(wh_doc.is_group, 0)
 
-	def test_create_material_request_warehouse_resilience(self):
-		"""Verify create_material_request handles stale / invalid warehouses (e.g. Stores - ISM) smoothly."""
+	def test_procurement_warehouse_resilience(self):
+		"""Verify submit_procurement_orders handles stale / invalid warehouses on RO parts smoothly."""
 		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed EV"
 		customer = self.create_test_customer(company=company)
 		vehicle = self.create_test_vehicle(customer=customer.name)
@@ -309,18 +308,21 @@ class TestPartsManagement(ISMTestCase):
 		}).insert(ignore_permissions=True)
 		self.track(ro)
 
-		# create_material_request should sanitize the invalid warehouse and create MR successfully
-		res = ro.create_material_request()
-		self.assertIn("material_request", res)
-		mr_name = res["material_request"]
-		mr = frappe.get_doc("Material Request", mr_name)
-		self.track(mr)
-
-		self.assertEqual(len(mr.items), 1)
-		self.assertEqual(mr.items[0].item_code, p_code)
-		self.assertEqual(flt(mr.items[0].qty), 2.0)
-		self.assertNotEqual(mr.items[0].warehouse, "Stores - NONEXISTENT_INVALID")
-		self.assertTrue(frappe.db.exists("Warehouse", {"name": mr.items[0].warehouse, "company": company, "is_group": 0}))
+		proc_data = get_repair_order_procurement_data(ro.name)
+		self.assertEqual(len(proc_data["parts"]), 1)
+		res = submit_procurement_orders(
+			repair_order=ro.name,
+			parts_data=[{"item_code": p_code, "qty": 2.0, "supplier": f"{TEST_PREFIX}Resilient Sup", "order_mode": "Purchase Order"}],
+			submit=False,
+		)
+		self.assertEqual(len(res["purchase_orders"]), 1)
+		po = frappe.get_doc("Purchase Order", res["purchase_orders"][0])
+		self.track(po)
+		self.assertEqual(len(po.items), 1)
+		self.assertEqual(po.items[0].item_code, p_code)
+		self.assertEqual(flt(po.items[0].qty), 2.0)
+		self.assertNotEqual(po.items[0].warehouse, "Stores - NONEXISTENT_INVALID")
+		self.assertTrue(frappe.db.exists("Warehouse", {"name": po.items[0].warehouse, "company": company, "is_group": 0}))
 
 	def test_link_part_to_multiple_service_packages(self):
 		"""Verify linking a single part to multiple Service Packages (e.g. Model 3 LH and Model Y LH)."""
@@ -353,7 +355,7 @@ class TestPartsManagement(ISMTestCase):
 		self.assertIn(part["item_code"], [it.item_code for it in pkg2_doc.items])
 
 	def test_auto_sync_repair_order_parts_to_service_package(self):
-		"""Verify parts added to a service on a Repair Order are automatically synced to the Service Package on save."""
+		"""Verify RO save does not mutate catalog Service Packages, while save_service_as_package explicitly persists parts."""
 		pkg = quick_create_service_package(package_name=f"{TEST_PREFIX}Pkg_AutoSync")
 		self.track(frappe.get_doc("Service Package", pkg["name"]))
 
@@ -405,12 +407,19 @@ class TestPartsManagement(ISMTestCase):
 		}).insert(ignore_permissions=True)
 		self.track(ro)
 
-		# Reload Service Package and verify the part has been automatically cataloged
+		# Saving RO must NOT mutate the source catalog Service Package
 		pkg_doc.reload()
-		synced_item = next((it for it in pkg_doc.items if it.item_code == part["item_code"]), None)
-		self.assertIsNotNone(synced_item, "Part must be auto-synced into Service Package items")
-		self.assertEqual(synced_item.slot_number, 1)
-		self.assertEqual(synced_item.component_slot, "Slot 1")
+		self.assertNotIn(part["item_code"], [it.item_code for it in pkg_doc.items])
+
+		# Explicit save_service_as_package intentionally creates a new catalog package with the parts
+		saved_pkg_res = ro.save_service_as_package(
+			service_row_id=ro.services[0].name,
+			package_name=f"{TEST_PREFIX}Pkg_Saved_{frappe.generate_hash(length=4)}",
+		)
+		saved_pkg = frappe.get_doc("Service Package", saved_pkg_res["package_name"])
+		self.track(saved_pkg)
+		synced_item = next((it for it in saved_pkg.items if it.item_code == part["item_code"]), None)
+		self.assertIsNotNone(synced_item, "Part must be persisted when explicitly saving Service Package")
 		self.assertEqual(flt(synced_item.qty), 1.0)
 		self.assertEqual(flt(synced_item.rate), 220.0)
 		self.assertEqual(synced_item.part_source, "OEM")
@@ -513,54 +522,6 @@ class TestPartsManagement(ISMTestCase):
 		self.assertEqual(format_slot_label(0), "Unassigned")
 		self.assertEqual(format_slot_label(-1), "Unassigned")
 
-	def test_get_service_package_slots(self):
-		"""Verify get_service_package_slots returns grouped slots with live part previews."""
-		pkg = quick_create_service_package(
-			package_name=f"{TEST_PREFIX}SlotsPkg_{frappe.generate_hash(length=4)}",
-		)
-		pkg_name = pkg["name"]
-		self.track(frappe.get_doc("Service Package", pkg_name))
-
-		# Add part in slot 1 (LH)
-		p1 = quick_create_part(
-			part_number=f"{TEST_PREFIX}SLOT1_P1",
-			part_name="Left Upper Control Arm",
-			slot_number=1,
-			service_package=pkg_name,
-		)
-		self.track(frappe.get_doc("Item", p1["item_code"]))
-
-		# Add another part (variant) in slot 1 (LH aftermarket)
-		p2 = quick_create_part(
-			part_number=f"{TEST_PREFIX}SLOT1_P2",
-			part_name="Left Upper Control Arm Aftermarket",
-			part_source="Aftermarket",
-			slot_number=1,
-			service_package=pkg_name,
-		)
-		self.track(frappe.get_doc("Item", p2["item_code"]))
-
-		# Add part in slot 2 (RH)
-		p3 = quick_create_part(
-			part_number=f"{TEST_PREFIX}SLOT2_P1",
-			part_name="Right Upper Control Arm",
-			slot_number=2,
-			service_package=pkg_name,
-		)
-		self.track(frappe.get_doc("Item", p3["item_code"]))
-
-		slots_data = get_service_package_slots(pkg_name)
-		self.assertEqual(len(slots_data["slots"]), 2)
-		self.assertEqual(slots_data["slots"][0]["slot_number"], 1)
-		self.assertEqual(slots_data["slots"][0]["slot_label"], "Slot 1")
-		self.assertEqual(len(slots_data["slots"][0]["parts"]), 2)
-
-		self.assertEqual(slots_data["slots"][1]["slot_number"], 2)
-		self.assertEqual(slots_data["slots"][1]["slot_label"], "Slot 2")
-		self.assertEqual(len(slots_data["slots"][1]["parts"]), 1)
-
-		self.assertEqual(slots_data["next_slot_number"], 3)
-
 	def test_link_part_to_service_packages_multi_service_slots(self):
 		"""Verify multi-service link: primary gets chosen slot, secondary gets unassigned."""
 		pkg1 = quick_create_service_package(
@@ -593,41 +554,6 @@ class TestPartsManagement(ISMTestCase):
 		self.assertIsNotNone(row2)
 		self.assertEqual(row2.slot_number, 0)
 		self.assertEqual(row2.component_slot, "Unassigned")
-
-	def test_assign_part_to_slot_permanently(self):
-		"""Verify assign_part_to_slot permanently sets slot_number and component_slot."""
-		pkg = quick_create_service_package(
-			package_name=f"{TEST_PREFIX}AssignSlotPkg_{frappe.generate_hash(length=4)}",
-		)
-		pkg_name = pkg["name"]
-		self.track(frappe.get_doc("Service Package", pkg_name))
-
-		# Create an unassigned part
-		part = quick_create_part(
-			part_number=f"{TEST_PREFIX}UNASSIGNED_P1",
-			part_name="Unassigned Bushing",
-			slot_number=0,
-			service_package=pkg_name,
-		)
-		self.track(frappe.get_doc("Item", part["item_code"]))
-
-		# Verify initially in unassigned
-		slots_before = get_service_package_slots(pkg_name)
-		self.assertEqual(len(slots_before["unassigned"]), 1)
-		self.assertEqual(slots_before["unassigned"][0]["item_code"], part["item_code"])
-
-		# Permanently assign to Slot 1
-		assign_res = assign_part_to_slot(pkg_name, part["item_code"], 1)
-		self.assertEqual(assign_res["status"], "success")
-		self.assertEqual(assign_res["slot_number"], 1)
-		self.assertEqual(assign_res["slot_label"], "Slot 1")
-
-		# Verify now in Slot 1 and unassigned is empty
-		slots_after = get_service_package_slots(pkg_name)
-		self.assertEqual(len(slots_after["unassigned"]), 0)
-		self.assertEqual(len(slots_after["slots"]), 1)
-		self.assertEqual(slots_after["slots"][0]["slot_number"], 1)
-		self.assertEqual(slots_after["slots"][0]["parts"][0]["item_code"], part["item_code"])
 
 	def test_repair_order_sync_permanently_assigns_unassigned_part(self):
 		"""Verify that using an unassigned part in a Repair Order permanently assigns it in the Service Package."""
@@ -683,10 +609,12 @@ class TestPartsManagement(ISMTestCase):
 		}).insert(ignore_permissions=True)
 		self.track(ro)
 
-		# Now check Service Package: part must have been permanently assigned to Slot 2!
+		# Verify RO-level slot assignment does not mutate the underlying Service Package catalog template
 		pkg_doc.reload()
-		self.assertEqual(pkg_doc.items[0].slot_number, 2)
-		self.assertEqual(pkg_doc.items[0].component_slot, "Slot 2")
+		self.assertEqual(pkg_doc.items[0].slot_number, 0)
+		self.assertEqual(pkg_doc.items[0].component_slot, "Unassigned")
+		ro_parts = json.loads(ro.services[0].parts)
+		self.assertEqual(ro_parts[0]["component_slot"], "Slot 2")
 
 	def test_get_service_package_details_excludes_unassigned_from_default_parts(self):
 		"""Verify get_service_package_details excludes unassigned parts from active parts list."""
@@ -939,13 +867,9 @@ class TestPartsManagement(ISMTestCase):
 		# Since p_code has zero stock, status must automatically be "Waiting on Parts"
 		self.assertEqual(ro.status, "Waiting on Parts")
 
-		# Direct pick_up_vehicle must be strictly blocked
+		# Direct pick_up_vehicle must be strictly blocked when stock is missing
 		with self.assertRaises(frappe.ValidationError):
 			ro.pick_up_vehicle()
-
-		# Shop floor override is strictly disabled and throws ValidationError
-		with self.assertRaises(frappe.ValidationError):
-			ro.override_and_pick_up_vehicle(notes="Attempting override")
 
 		# Still in Waiting on Parts and Not in bay
 		ro.reload()
@@ -1318,6 +1242,374 @@ class TestPartsManagement(ISMTestCase):
 			frappe.db.get_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template"),
 			1,
 		)
+
+	def test_bulk_import_parts_structured_json(self):
+		"""Verify bulk_import_parts accepts structured list[dict] and JSON string payloads with aliases, supplier linking, and error reporting."""
+		pkg = quick_create_service_package(
+			package_name=f"{TEST_PREFIX}StructImpPkg_{frappe.generate_hash(length=4)}",
+		)
+		pkg_name = pkg["name"]
+		self.track(frappe.get_doc("Service Package", pkg_name))
+
+		sup_name = f"{TEST_PREFIX}CatalogSup_{frappe.generate_hash(length=4)}"
+		p1 = f"{TEST_PREFIX}STR1"
+		p2 = f"{TEST_PREFIX}STR2"
+		p3 = f"{TEST_PREFIX}STR3"
+
+		payload = [
+			{
+				"part_number": p1,
+				"part_name": "Front Brake Caliper Reman",
+				"part_source": "OEM",
+				"part_condition": "Reman",
+				"unit_rate": 180.0,
+				"valuation_rate": 110.0,
+				"qty": 3,
+				"revision": "B",
+				"oem_part_number": "1044621-00-B",
+			},
+			{
+				"sku": p2,
+				"description": "Aftermarket Rotor Kit",
+				"source": "AFT",
+				"condition": "New",
+				"rate": 95.5,
+				"cost": 55.0,
+				"quantity": 2,
+				"supplier_part_no": "SUP-ROT-02",
+			},
+			{
+				"part_name": "Missing Part Number Row",
+			},
+		]
+
+		res = bulk_import_parts(
+			items=payload,
+			service_package=pkg_name,
+			supplier=sup_name,
+		)
+		self.track(frappe.get_doc("Supplier", sup_name))
+		self.assertEqual(res["total_created"], 2)
+		self.assertEqual(len(res["errors"]), 1)
+		self.assertEqual(res["errors"][0]["index"], 3)
+
+		code1 = f"OEM-{p1}-RCN"
+		code2 = f"AFT-{p2}-NEW"
+		it1 = frappe.get_doc("Item", code1)
+		it2 = frappe.get_doc("Item", code2)
+		self.track(it1)
+		self.track(it2)
+
+		self.assertEqual(it1.part_source, "OEM")
+		self.assertEqual(it1.part_condition, "Reconditioned")
+		self.assertEqual(it1.revision, "B")
+		self.assertEqual(flt(it1.standard_rate), 180.0)
+		self.assertEqual(it2.part_source, "Aftermarket")
+		self.assertEqual(flt(it2.valuation_rate), 55.0)
+		self.assertIn(sup_name, [r.supplier for r in it2.supplier_items])
+		sup_row = next(r for r in it2.supplier_items if r.supplier == sup_name)
+		self.assertEqual(sup_row.supplier_part_no, "SUP-ROT-02")
+
+		pkg_doc = frappe.get_doc("Service Package", pkg_name)
+		pkg_row1 = next(r for r in pkg_doc.items if r.item_code == code1)
+		pkg_row2 = next(r for r in pkg_doc.items if r.item_code == code2)
+		self.assertEqual(flt(pkg_row1.qty), 3.0)
+		self.assertEqual(pkg_row1.is_default, 1)
+		self.assertEqual(flt(pkg_row2.qty), 2.0)
+
+		# Also verify raw JSON string input works identically
+		json_res = bulk_import_parts(
+			items=json.dumps([
+				{
+					"part_number": p3,
+					"part_name": "JSON String Part",
+					"part_source": "OEM",
+					"part_condition": "Used",
+					"unit_rate": 60.0,
+				}
+			])
+		)
+		self.assertEqual(json_res["total_created"], 1)
+		code3 = f"OEM-{p3}-USED"
+		self.track(frappe.get_doc("Item", code3))
+		self.assertEqual(json_res["created"][0]["item_code"], code3)
+		self.assertEqual(json_res["created"][0]["part_condition"], "Used")
+
+	def test_fifo_batch_allocation_parity_and_warehouse_isolation(self):
+		"""Verify batched FIFO stock calculations match single-item functions, preserve FIFO ordering, and isolate warehouses."""
+		company = self._get_company()
+		customer = self.create_test_customer()
+		v1 = self.create_test_vehicle(customer=customer.name)
+		v2 = self.create_test_vehicle(customer=customer.name)
+		v3 = self.create_test_vehicle(customer=customer.name)
+
+		p1 = quick_create_part(part_number=f"{TEST_PREFIX}BATCH_P1", part_name="Batch Part 1", unit_rate=50.0)
+		p2 = quick_create_part(part_number=f"{TEST_PREFIX}BATCH_P2", part_name="Batch Part 2", unit_rate=70.0)
+		c1, c2 = p1["item_code"], p2["item_code"]
+		self.track(frappe.get_doc("Item", c1))
+		self.track(frappe.get_doc("Item", c2))
+
+		wh1 = get_default_warehouse(company)
+		parent_wh = frappe.db.get_value("Warehouse", {"company": company, "is_group": 1}, "name")
+		wh2_doc = frappe.get_doc({
+			"doctype": "Warehouse",
+			"warehouse_name": f"{TEST_PREFIX}AltWH_{frappe.generate_hash(length=4)}",
+			"company": company,
+			"is_group": 0,
+			**({"parent_warehouse": parent_wh} if parent_wh else {}),
+		}).insert(ignore_permissions=True)
+		self.track(wh2_doc)
+		wh2 = wh2_doc.name
+
+		for item_code, qty, target_wh in ((c1, 5.0, wh1), (c1, 10.0, wh2), (c2, 4.0, wh1)):
+			se = frappe.get_doc({
+				"doctype": "Stock Entry",
+				"stock_entry_type": "Material Receipt",
+				"company": company,
+				"items": [{"item_code": item_code, "qty": qty, "t_warehouse": target_wh, "basic_rate": 50.0}],
+			}).insert(ignore_permissions=True)
+			se.submit()
+			self.track(se)
+
+		ro1 = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": v1.name,
+			"odometer_in": 10000,
+			"approval_status": "Partially Approved",
+			"services": [
+				{
+					"service_title": "RO1 Approved Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": c1, "qty": 2.0, "rate": 50.0, "warehouse": wh1},
+						{"item_code": c2, "qty": 1.0, "rate": 70.0, "warehouse": wh1},
+					]),
+					"parts_total": 170.0,
+					"total_amount": 270.0,
+				},
+				{
+					"service_title": "RO1 Unapproved Estimating Service",
+					"status": "Estimating",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": c1, "qty": 99.0, "rate": 50.0, "warehouse": wh1},
+					]),
+					"parts_total": 4950.0,
+					"total_amount": 5050.0,
+				},
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro1)
+
+		ro2 = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": v2.name,
+			"odometer_in": 12000,
+			"approval_status": "Approved",
+			"services": [
+				{
+					"service_title": "RO2 Approved Dual WH Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": c1, "qty": 1.0, "rate": 50.0, "warehouse": wh1},
+						{"item_code": c1, "qty": 2.0, "rate": 50.0, "warehouse": wh2},
+					]),
+					"parts_total": 150.0,
+					"total_amount": 250.0,
+				},
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro2)
+
+		ro_est = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": v3.name,
+			"odometer_in": 14000,
+			"approval_status": "Estimating",
+			"services": [
+				{
+					"service_title": "RO3 Estimating Service",
+					"status": "Estimating",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([
+						{"item_code": c1, "qty": 1.0, "rate": 50.0},
+						{"item_code": c2, "qty": 1.0, "rate": 70.0},
+					]),
+					"parts_total": 120.0,
+					"total_amount": 220.0,
+				},
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro_est)
+
+		# Ensure unapproved Estimating RO commits nothing to prior RO2, and RO2 only sees RO1
+		ro2_batch = get_items_available_stock_batch([c1, c2], wh1, ro2.name)
+		self.assertEqual(ro2_batch[c1]["committed_qty"], 2.0)
+		self.assertEqual(ro2_batch[c1]["available_qty"], 3.0)
+		self.assertEqual([o["repair_order"] for o in ro2_batch[c1]["committed_orders"]], [ro1.name])
+
+		# Estimating RO sees RO1 + RO2 strictly ordered FIFO for wh1
+		est_batch = get_items_available_stock_batch([c1, c2], wh1, ro_est.name)
+		self.assertEqual(est_batch[c1]["actual_qty"], 5.0)
+		self.assertEqual(est_batch[c1]["committed_qty"], 3.0)
+		self.assertEqual(est_batch[c1]["available_qty"], 2.0)
+		self.assertEqual([o["repair_order"] for o in est_batch[c1]["committed_orders"]], [ro1.name, ro2.name])
+		self.assertEqual(est_batch[c2]["actual_qty"], 4.0)
+		self.assertEqual(est_batch[c2]["committed_qty"], 1.0)
+		self.assertEqual(est_batch[c2]["available_qty"], 3.0)
+
+		# Parity check against single-item helpers and whitelisted endpoint
+		ro_parts_stock = get_repair_order_parts_stock(ro_name=ro_est.name, items=[c1, c2], company=company)
+		committed_batch = get_repair_order_committed_qty_batch([c1, c2], wh1, ro_est.name)
+		for code in (c1, c2):
+			single = get_item_available_stock(code, wh1, ro_est.name)
+			single_committed = get_repair_order_committed_qty(code, wh1, ro_est.name)
+			self.assertEqual(est_batch[code], single)
+			self.assertEqual(ro_parts_stock[code], single)
+			self.assertEqual(committed_batch[code], single_committed)
+
+		# Warehouse 2 isolation check
+		wh2_batch = get_items_available_stock_batch([c1], wh2, ro_est.name)
+		self.assertEqual(wh2_batch[c1]["actual_qty"], 10.0)
+		self.assertEqual(wh2_batch[c1]["committed_qty"], 2.0)
+		self.assertEqual(wh2_batch[c1]["available_qty"], 8.0)
+
+	def test_service_package_on_trash_cleanup(self):
+		"""Verify ServicePackage.on_trash cleans unreferenced Items via Repair Order Service JSON parts."""
+		company = self._get_company()
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name)
+
+		# 1. Referenced ONLY via JSON parts on Repair Order Service -> Item must NOT be deleted on trash
+		pkg_ref_name = f"{TEST_PREFIX}TrashRef_{frappe.generate_hash(length=4)}"
+		quick_create_service_package(package_name=pkg_ref_name)
+		self.assertTrue(frappe.db.exists("Item", pkg_ref_name))
+
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 18000,
+			"services": [
+				{
+					"service_title": "Manual JSON Part Reference",
+					"status": "Estimating",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([{"item_code": pkg_ref_name, "qty": 1.0, "rate": 120.0}]),
+					"parts_total": 120.0,
+					"total_amount": 220.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+
+		frappe.delete_doc("Service Package", pkg_ref_name, ignore_permissions=True)
+		self.assertTrue(frappe.db.exists("Item", pkg_ref_name))
+		self.track(frappe.get_doc("Item", pkg_ref_name))
+
+		# 2. Prefix substring in another RO JSON part must NOT block cleanup of an unreferenced Service Package Item
+		pkg_free_name = f"{TEST_PREFIX}TrashFree_{frappe.generate_hash(length=4)}"
+		quick_create_service_package(package_name=pkg_free_name)
+		self.assertTrue(frappe.db.exists("Item", pkg_free_name))
+
+		other_item = quick_create_part(
+			part_number=f"{TEST_PREFIX}PREFIX_OTHER",
+			part_name="Prefix False Positive Item",
+		)
+		other_doc = frappe.get_doc("Item", other_item["item_code"])
+		self.track(other_doc)
+
+		ro_prefix = frappe.get_doc({
+			"doctype": "Repair Order",
+			"company": company,
+			"customer": customer.name,
+			"vehicle": vehicle.name,
+			"odometer_in": 19000,
+			"services": [
+				{
+					"service_title": "Substring Non-Match",
+					"status": "Estimating",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"labor_amount": 100.0,
+					"parts": json.dumps([{"item_code": f"{pkg_free_name}_OTHER", "qty": 1.0, "rate": 10.0}]),
+					"parts_total": 10.0,
+					"total_amount": 110.0,
+				}
+			],
+		}).insert(ignore_permissions=True)
+		self.track(ro_prefix)
+
+		frappe.delete_doc("Service Package", pkg_free_name, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("Item", pkg_free_name))
+
+	def test_parts_endpoints_enforce_permissions_and_input_types(self):
+		"""Verify whitelisted parts APIs reject unprivileged users and malformed filter dicts."""
+		from ism.api.parts import (
+			get_default_warehouse,
+			search_service_packages,
+			quick_create_part,
+			bulk_import_parts,
+			get_component_alternates,
+			link_part_to_service_packages,
+			quick_create_service_package,
+			ensure_supplier_and_link_to_item,
+			get_repair_order_parts_stock,
+			get_item_procurement_info,
+			get_repair_order_procurement_data,
+			submit_procurement_orders,
+		)
+
+		with self.assertRaises(frappe.ValidationError):
+			get_component_alternates(item_code={"!=": ""})
+		with self.assertRaises(frappe.ValidationError):
+			search_service_packages(query={"!=": ""})
+		with self.assertRaises(frappe.ValidationError):
+			get_repair_order_procurement_data(docname={"!=": ""})
+
+		orig_user = frappe.session.user
+		try:
+			frappe.set_user("Guest")
+			calls = (
+				lambda: quick_create_part(part_number="GUEST-PART"),
+				lambda: bulk_import_parts(items=[{"part_number": "GUEST-BLK"}]),
+				lambda: get_component_alternates(oem_part_number="1044321-00-J"),
+				lambda: link_part_to_service_packages("GUEST-ITEM", ["GUEST-PKG"]),
+				lambda: search_service_packages(query=""),
+				lambda: quick_create_service_package(package_name="GUEST-PKG"),
+				lambda: ensure_supplier_and_link_to_item("GUEST-SUP"),
+				lambda: get_repair_order_parts_stock(items=["GUEST-ITEM"]),
+				lambda: get_item_procurement_info("GUEST-ITEM"),
+				lambda: get_repair_order_procurement_data("GUEST-RO"),
+				lambda: submit_procurement_orders("GUEST-RO", [{"item_code": "GUEST-ITEM", "supplier": "S"}]),
+				lambda: get_default_warehouse(),
+			)
+			for call in calls:
+				with self.assertRaises(frappe.PermissionError):
+					call()
+		finally:
+			frappe.set_user(orig_user)
+
+
 
 
 

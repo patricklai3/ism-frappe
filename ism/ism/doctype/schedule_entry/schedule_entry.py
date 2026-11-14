@@ -8,14 +8,55 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint
 
+from ism.ism.naming import generate_safe_series_name
+from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES
+from ism.scheduling.time_utils import effective_end_time
+
 
 def sync_repair_order_schedule_entries(repair_order_name: str, exclude_entry: str = None):
-	"""Sync the informational Schedule Entry child table on the linked Repair Order."""
+	"""Sync the informational Repair Order Schedule Entry child rows without saving the parent RO."""
 	if not repair_order_name or not frappe.db.exists("Repair Order", repair_order_name):
 		return
 	try:
-		ro = frappe.get_doc("Repair Order", repair_order_name)
-		ro.sync_schedule_entries(exclude_entry=exclude_entry)
+		filters = {"repair_order": repair_order_name}
+		if exclude_entry:
+			filters["name"] = ["!=", exclude_entry]
+		entries = frappe.get_all(
+			"Schedule Entry",
+			filters=filters,
+			fields=[
+				"name",
+				"entry_type",
+				"scheduled_date",
+				"scheduled_time",
+				"estimated_duration",
+				"service_bay",
+				"assigned_technician",
+				"status",
+			],
+			order_by="scheduled_date asc, scheduled_time asc",
+		)
+		frappe.db.delete(
+			"Repair Order Schedule Entry",
+			{"parent": repair_order_name, "parenttype": "Repair Order"},
+		)
+		for idx, entry in enumerate(entries, start=1):
+			child = frappe.get_doc({
+				"doctype": "Repair Order Schedule Entry",
+				"parent": repair_order_name,
+				"parenttype": "Repair Order",
+				"parentfield": "schedule_entries",
+				"idx": idx,
+				"schedule_entry": entry.name,
+				"entry_type": entry.entry_type,
+				"scheduled_date": entry.scheduled_date,
+				"scheduled_time": entry.scheduled_time,
+				"estimated_duration": entry.estimated_duration,
+				"service_bay": entry.service_bay,
+				"assigned_technician": entry.assigned_technician,
+				"status": entry.status,
+			})
+			child.db_insert()
 	except Exception as e:
 		frappe.log_error(f"Failed to sync schedule entries to Repair Order {repair_order_name}: {e}")
 
@@ -30,56 +71,9 @@ class ScheduleEntry(Document):
 			self.name = make_autoname(prefix, doc=self)
 		except Exception as e:
 			if "1020" in str(e) or "Deadlock" in str(e) or isinstance(e, frappe.QueryDeadlockError):
-				self.name = self._generate_safe_series_name(prefix)
+				self.name = generate_safe_series_name(self.doctype, prefix, doc=self)
 			else:
 				raise
-
-	def _generate_safe_series_name(self, series_pattern: str) -> str:
-		import re
-		from frappe.utils import now_datetime
-
-		today = now_datetime()
-		parts = series_pattern.split(".")
-		prefix_parts = []
-		digits = 5
-		for p in parts:
-			if p.startswith("#"):
-				digits = len(p)
-				break
-			elif p == "YYYY":
-				prefix_parts.append(today.strftime("%Y"))
-			elif p == "YY":
-				prefix_parts.append(today.strftime("%y"))
-			elif p == "MM":
-				prefix_parts.append(today.strftime("%m"))
-			elif p == "DD":
-				prefix_parts.append(today.strftime("%d"))
-			elif hasattr(self, p) and getattr(self, p):
-				prefix_parts.append(str(getattr(self, p)))
-			else:
-				prefix_parts.append(p)
-		prefix = "".join(prefix_parts)
-		existing = frappe.get_all(
-			self.doctype,
-			filters=[["name", "like", f"{prefix}%"]],
-			order_by="name desc",
-			limit=1,
-			pluck="name",
-		)
-		next_num = 1
-		if existing and existing[0].startswith(prefix):
-			suffix = existing[0][len(prefix):]
-			match = re.search(r"(\d+)", suffix)
-			if match:
-				try:
-					next_num = int(match.group(1)) + 1
-				except ValueError:
-					next_num = 1
-		candidate = f"{prefix}{next_num:0{digits}d}"
-		while frappe.db.exists(self.doctype, candidate):
-			next_num += 1
-			candidate = f"{prefix}{next_num:0{digits}d}"
-		return candidate
 
 	def get_display_customer(self) -> str:
 		"""Returns linked Customer name, provisional customer name, or fallback 'Guest'."""
@@ -167,18 +161,14 @@ class ScheduleEntry(Document):
 		"""Calculate lunch-aware effective end time as timedelta."""
 		if not self.scheduled_time:
 			return timedelta(0)
-		try:
-			from ism.api.scheduling import effective_end_time
-			return effective_end_time(self.scheduled_time, self.estimated_duration or 60)
-		except Exception:
-			from frappe.utils import to_timedelta
-			return to_timedelta(self.scheduled_time) + timedelta(minutes=self.estimated_duration or 60)
+		return effective_end_time(self.scheduled_time, self.estimated_duration or 60)
 
 	def get_effective_end_time(self) -> timedelta:
 		"""Returns lunch-aware effective end time."""
 		return self.end_time
 
 	def validate(self):
+		self.flags.scheduling_warnings = []
 		self.validate_estimated_duration()
 		self.validate_repair_order_requirement()
 		self.validate_bay_availability()
@@ -198,25 +188,32 @@ class ScheduleEntry(Document):
 		if not self.repair_order:
 			return
 
-		if not frappe.db.exists("Repair Order", self.repair_order):
+		ro_meta = frappe.db.get_value(
+			"Repair Order",
+			self.repair_order,
+			["customer", "vehicle"],
+			as_dict=True,
+		)
+		if not ro_meta:
 			return
 
-		ro_doc = frappe.get_doc("Repair Order", self.repair_order)
+		if not self.customer and ro_meta.get("customer"):
+			self.customer = ro_meta["customer"]
 
-		# 1. Fetch Customer
-		if not self.customer and getattr(ro_doc, "customer", None):
-			self.customer = ro_doc.customer
+		if not self.repair_vehicle and ro_meta.get("vehicle"):
+			self.repair_vehicle = ro_meta["vehicle"]
 
-		# 2. Fetch Repair Vehicle (field on Repair Order is 'vehicle')
-		if not self.repair_vehicle and getattr(ro_doc, "vehicle", None):
-			self.repair_vehicle = ro_doc.vehicle
-
-		# 3. Populate services summary if empty
-		if not self.items_summary and hasattr(ro_doc, "services") and ro_doc.services:
+		if not self.items_summary:
+			svc_rows = frappe.get_all(
+				"Repair Order Service",
+				filters={"parent": self.repair_order},
+				fields=["service_title", "service_package", "labor_hours"],
+				order_by="idx asc",
+			)
 			summary_lines = []
-			for s in ro_doc.services:
-				title = getattr(s, "service_title", "") or getattr(s, "service_package", "") or "Service"
-				hrs = getattr(s, "labor_hours", 0)
+			for s in svc_rows:
+				title = s.get("service_title") or s.get("service_package") or "Service"
+				hrs = s.get("labor_hours") or 0
 				summary_lines.append(f"• {title} ({hrs} hrs)")
 			if summary_lines:
 				self.items_summary = "\n".join(summary_lines)
@@ -241,22 +238,19 @@ class ScheduleEntry(Document):
 		if not self.service_bay or not self.scheduled_date or not self.scheduled_time:
 			return
 
-		if self.status == "Cancelled":
+		if self.status in NON_BLOCKING_ENTRY_STATUSES:
 			return
 
-		try:
-			from ism.api.scheduling import check_bay_availability
+		from ism.api.scheduling import check_bay_availability
 
-			duration = self.estimated_duration or 60
-			is_available = check_bay_availability(
-				service_bay=self.service_bay,
-				date=str(self.scheduled_date),
-				start_time=self.scheduled_time,
-				duration_minutes=duration,
-				exclude_entry=self.name,
-			)
-		except ImportError:
-			is_available = self._check_bay_availability_fallback()
+		duration = self.estimated_duration or 60
+		is_available = check_bay_availability(
+			service_bay=self.service_bay,
+			date=str(self.scheduled_date),
+			start_time=self.scheduled_time,
+			duration_minutes=duration,
+			exclude_entry=self.name,
+		)
 
 		if not is_available:
 			frappe.throw(
@@ -266,50 +260,17 @@ class ScheduleEntry(Document):
 				frappe.ValidationError,
 			)
 
-	def _check_bay_availability_fallback(self) -> bool:
-		"""Fallback interval overlap check when scheduling API is not yet loaded."""
-		from datetime import timedelta
-		from frappe.utils import to_timedelta
-
-		prop_start = to_timedelta(self.scheduled_time)
-		prop_duration = timedelta(minutes=self.estimated_duration or 60)
-		prop_end = prop_start + prop_duration
-
-		filters = [
-			["service_bay", "=", self.service_bay],
-			["scheduled_date", "=", self.scheduled_date],
-			["status", "!=", "Cancelled"],
-		]
-		if self.name:
-			filters.append(["name", "!=", self.name])
-
-		existing_entries = frappe.get_all(
-			"Schedule Entry",
-			filters=filters,
-			fields=["name", "scheduled_time", "estimated_duration"],
-		)
-
-		for entry in existing_entries:
-			ex_start = to_timedelta(entry.get("scheduled_time"))
-			ex_duration = timedelta(minutes=entry.get("estimated_duration") or 60)
-			ex_end = ex_start + ex_duration
-
-			# Interval overlap check: max(start1, start2) < min(end1, end2)
-			if max(prop_start, ex_start) < min(prop_end, ex_end):
-				return False
-
-		return True
-
 	def validate_technician_pool(self):
 		"""Validate technician pool capacity gating."""
-		if not self.scheduled_date or not self.scheduled_time or self.status == "Cancelled":
+		if (
+			not self.scheduled_date
+			or not self.scheduled_time
+			or self.status in NON_BLOCKING_ENTRY_STATUSES
+		):
 			return
 
-		try:
-			from ism.api.scheduling import get_shop_settings
-			from ism.api.technician_availability import get_technician_pool_availability
-		except ImportError:
-			return
+		from ism.api.technician_availability import get_technician_pool_availability
+		from ism.scheduling.time_utils import get_shop_settings
 
 		settings = get_shop_settings()
 		if not settings.get("enable_technician_capacity"):
@@ -331,14 +292,16 @@ class ScheduleEntry(Document):
 			)
 
 	def validate_technician_assignment(self):
-		"""Issue non-blocking soft warnings if assigned technician has leave or overlap."""
-		if not self.assigned_technician or not self.scheduled_date or not self.scheduled_time or self.status == "Cancelled":
+		"""Collect non-blocking soft warnings if assigned technician has leave or overlap."""
+		if (
+			not self.assigned_technician
+			or not self.scheduled_date
+			or not self.scheduled_time
+			or self.status in NON_BLOCKING_ENTRY_STATUSES
+		):
 			return
 
-		try:
-			from ism.api.technician_availability import check_technician_availability
-		except ImportError:
-			return
+		from ism.api.technician_availability import check_technician_availability
 
 		check = check_technician_availability(
 			employee=self.assigned_technician,
@@ -348,19 +311,20 @@ class ScheduleEntry(Document):
 			exclude_entry=self.name,
 		)
 
+		warnings = getattr(self.flags, "scheduling_warnings", None)
+		if warnings is None:
+			warnings = []
+			self.flags.scheduling_warnings = warnings
+
 		if check.get("on_leave"):
-			frappe.msgprint(
-				_("Warning: Assigned technician '{0}' is on approved leave on {1}.").format(
+			warnings.append(
+				_("Assigned technician '{0}' is on approved leave on {1}.").format(
 					self.assigned_technician, self.scheduled_date
-				),
-				alert=True,
-				indicator="red",
+				)
 			)
 		elif check.get("conflicts"):
-			frappe.msgprint(
-				_("Warning: Assigned technician '{0}' has an overlapping Schedule Entry during this time window.").format(
+			warnings.append(
+				_("Assigned technician '{0}' has an overlapping Schedule Entry during this time window.").format(
 					self.assigned_technician
-				),
-				alert=True,
-				indicator="orange",
+				)
 			)

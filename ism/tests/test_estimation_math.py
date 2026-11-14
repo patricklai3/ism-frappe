@@ -500,3 +500,20 @@ class TestEstimationMath(ISMTestCase):
 		self._require_service()
 		with self.assertRaises(frappe.DoesNotExistError):
 			estimate_repair_order("NON_EXISTENT_RO_NAME_99999")
+
+	def test_estimate_repair_order_resolves_sigma_from_parts_json(self):
+		"""estimate_repair_order inspects JSON Repair Order Service.parts for item_group sigma."""
+		self._require_service()
+		ensure_ism_settings(buffer_padding_minutes=0, estimation_percentile=0.80, estimation_sigma=0.30)
+		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		ro.append("services", {
+			"service_title": "Custom Seasonal Swap",
+			"labor_hours": 1.0,
+			"parts": json.dumps([{"item_code": f"{PREFIX}EST_ITEM_TIRE", "qty": 4}]),
+			"status": "Approved",
+		})
+		ro.save(ignore_permissions=True)
+
+		res = estimate_repair_order(ro.name)
+		# Tires sigma is 0.15 -> ceil(exp(ln(60) + 0.15 * 0.8416212)) = 69 (not default sigma 0.30 -> 78)
+		self.assertEqual(res["total_minutes"], 69)

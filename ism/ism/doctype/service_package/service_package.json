@@ -19,8 +19,6 @@
   "is_mobile_capable",
   "is_symmetrical",
   "sec_manual_ref",
-  "btn_open_tesla_manual",
-  "btn_import_from_url",
   "tesla_manual_url",
   "doc_guid",
   "sb_items",
@@ -100,16 +98,6 @@
    "label": "Tesla Service Manual Reference"
   },
   {
-   "fieldname": "btn_open_tesla_manual",
-   "fieldtype": "Button",
-   "label": "Open in Tesla Manual"
-  },
-  {
-   "fieldname": "btn_import_from_url",
-   "fieldtype": "Button",
-   "label": "Fetch from Tesla URL"
-  },
-  {
    "fieldname": "tesla_manual_url",
    "fieldtype": "Data",
    "label": "Tesla Manual URL"
@@ -146,7 +134,7 @@
   }
  ],
  "links": [],
- "modified": "2026-10-08 00:00:00.000000",
+ "modified": "2026-11-13 14:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Package",

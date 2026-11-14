@@ -30,7 +30,7 @@ Pre-commit is configured to use the following tools for checking and formatting 
 
 ### Agent OS Integration
 
-This repository includes [ism-agent-os](./ism-agent-os) as a Git submodule. Clone with submodules to load the shop skills, safety rules, and MCP server:
+This repository includes [ism-agent-os](./ism-agent-os) as a Git submodule. Clone with submodules to load the shop skills, safety rules, CLI, Python client, and Open WebUI tools over direct Frappe REST (`/api/method/*` and `/api/resource/*`):
 
 ```bash
 git clone --recurse-submodules <URL_OF_THIS_REPO>
@@ -39,8 +39,11 @@ git clone --recurse-submodules <URL_OF_THIS_REPO>
 Configure Frappe API credentials in `ism-agent-os/.env` (from `ism-agent-os/.env.example`) and verify connectivity:
 
 ```bash
-python ism-agent-os/tools/ism_mcp_server.py --test
+cd ism-agent-os
+python -m tools.cli test
 ```
+
+Or install in editable mode (`pip install -e ./ism-agent-os --no-build-isolation`) and run `ism-agent-os test`.
 
 ### License
 

@@ -32,7 +32,8 @@
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Repair Order",
-   "options": "Repair Order"
+   "options": "Repair Order",
+   "search_index": 1
   },
   {
    "default": "0",
@@ -47,7 +48,8 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Open Recommendation\nCompleted Later\nCancelled"
+   "options": "Open Recommendation\nCompleted Later\nCancelled",
+   "search_index": 1
   },
   {
    "default": "0",

@@ -31,7 +31,6 @@
   "origin_schedule_entry",
   "tab_estimate",
   "sec_services",
-  "services_tree_html",
   "services",
   "sec_totals",
   "taxes_and_charges",
@@ -65,9 +64,8 @@
   "vehicle_released",
   "is_mobile_capable",
   "has_shop_floor_override",
+  "manual_parts_hold",
   "override_notes",
-  "sec_workshop_tasks",
-  "workshop_tasks_html",
   "sec_schedule_allocations",
   "schedule_entries",
   "sec_time",
@@ -246,12 +244,6 @@
    "fieldname": "sec_services",
    "fieldtype": "Section Break",
    "label": "Services & Nested Parts"
-  },
-  {
-   "allow_on_submit": 1,
-   "fieldname": "services_tree_html",
-   "fieldtype": "HTML",
-   "label": "Itemized Services & Nested Parts"
   },
   {
    "allow_on_submit": 1,
@@ -486,21 +478,19 @@
   },
   {
    "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "manual_parts_hold",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Manual Parts Hold",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
    "fieldname": "override_notes",
    "fieldtype": "Small Text",
    "hidden": 1,
    "label": "Shop Floor Override Notes"
-  },
-  {
-   "fieldname": "sec_workshop_tasks",
-   "fieldtype": "Section Break",
-   "label": "Workshop Job Execution & Service Checklist"
-  },
-  {
-   "allow_on_submit": 1,
-   "fieldname": "workshop_tasks_html",
-   "fieldtype": "HTML",
-   "label": "Workshop Job Cards"
   },
   {
    "collapsible": 1,
@@ -589,7 +579,7 @@
  ],
  "is_submittable": 0,
  "links": [],
- "modified": "2026-10-08 02:40:00.000000",
+ "modified": "2026-11-13 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Repair Order",

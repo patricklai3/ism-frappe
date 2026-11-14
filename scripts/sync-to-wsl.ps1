@@ -20,6 +20,7 @@ $WindowsSource = (wsl -d $TargetDistro wslpath -u "$NormalizedSource").Trim() + 
 
 $Excludes = @(
     "--exclude=.git",
+    "--exclude=.codegraph",
     "--exclude=node_modules",
     "--exclude=__pycache__",
     "--exclude=*.pyc",

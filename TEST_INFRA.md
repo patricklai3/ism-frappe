@@ -38,10 +38,10 @@ The test suite is built on a **requirement-driven, opaque-box E2E philosophy**:
 | 20 | Equipment Tag System | R3 | `test_equipment_tag_crud` | `test_bay_equipment_child_table` | Tag Match + Auto Assign | S2 | `test_scheduling_capacity.py` |
 | 21 | Schedule Entry Type DocType | R3 | `test_schedule_entry_type_seed` | `test_entry_type_color_and_non_ro` | Entry Type + Calendar | S1, S4 | `test_scheduling_capacity.py` |
 | 22 | Schedule Entry DocType | R3 | `test_schedule_entry_crud` | `test_schedule_entry_validation_rules` | Schedule Entry + RO Link | S1, S4 | `test_scheduling_capacity.py` |
-| 23 | Reusable Modal Date Navigator | R2 | `test_modal_date_navigation` | `test_modal_date_holiday_alert` | Date Nav + Slot Refresh | S1, S3 | `test_ro_scheduling_e2e.py` |
-| 24 | Header Badges | R2 | `test_header_badge_duration_calc` | `test_header_badge_equipment_tags` | Badge + Estimation API | S1, S2 | `test_ro_scheduling_e2e.py` |
-| 25 | Slot Selection Grid | R2 | `test_slot_grid_capacity_payload` | `test_slot_grid_boundary_slots` | Slot Grid + Dual Resource | S1, S2 | `test_ro_scheduling_e2e.py` |
-| 26 | Tech Preview & Conflict Warnings | R2 | `test_tech_preview_payload` | `test_tech_conflict_warning_messages` | Preview + Booking Submit | S1, S3 | `test_ro_scheduling_e2e.py` |
+| 23 | Slot & Date Availability APIs | R2 | `test_modal_date_navigation` | `test_modal_date_holiday_alert` | Date Nav + Slot Refresh | S1, S3 | `test_ro_scheduling_e2e.py` |
+| 24 | Agent Estimation & Tag Resolution | R2 | `test_header_badge_duration_calc` | `test_header_badge_equipment_tags` | Badge + Estimation API | S1, S2 | `test_ro_scheduling_e2e.py` |
+| 25 | Bay & Technician Slot Payloads | R2 | `test_slot_grid_capacity_payload` | `test_slot_grid_boundary_slots` | Slot Grid + Dual Resource | S1, S2 | `test_ro_scheduling_e2e.py` |
+| 26 | Technician Conflict Previews | R2 | `test_tech_preview_payload` | `test_tech_conflict_warning_messages` | Preview + Booking Submit | S1, S3 | `test_ro_scheduling_e2e.py` |
 | 27 | Calendar View Integration | R5 | `test_calendar_events_payload` | `test_calendar_lunch_gap_badges` | Calendar + Entry Types | S4 | `test_ro_scheduling_e2e.py` |
 | 28 | List View Quick Filters | R5 | `test_list_view_filter_presets` | `test_list_view_unassigned_filter` | Filter + Status Transitions | S1 | `test_ro_scheduling_e2e.py` |
 | 29 | Early Appointment Stages on RO | R1 | `test_ro_early_appointment_stages` | `test_ro_early_relaxed_mandatories` | Early RO + Schedule Entry | S1 | `test_ro_scheduling_e2e.py` |
@@ -53,20 +53,21 @@ The test suite is built on a **requirement-driven, opaque-box E2E philosophy**:
 ## 3. Test Architecture & Directory Layout
 
 ```
-d:\ism\
-├── ism\
-│   └── tests\
+ism/ (repo root)
+├── ism/
+│   └── tests/
 │       ├── base.py                         # ISMTestCase base class with transactional hygiene
 │       ├── cleanup.py                      # Purge routines for test-prefixed records
 │       ├── test_fixtures.py                # Centralized scheduling master fixtures & settings helpers
 │       ├── test_estimation_math.py         # Features 1–5: Pure log-normal math, F-W, Z-score, buffer padding
 │       ├── test_scheduling_capacity.py     # Features 6–22: Dual resource scheduling, bays, technicians, pool gating
-│       ├── test_ro_scheduling_e2e.py       # Features 23–31: RO early lifecycle, formalization, supplemental, modal/cal APIs
-│       ├── test_estimation.py              # Backward-compatible proxy to test_estimation_math
-│       ├── test_scheduling.py              # Backward-compatible proxy to test_scheduling_capacity
-│       ├── test_repair_order_scheduling.py # Backward-compatible proxy to test_ro_scheduling_e2e
-│       ├── test_parts_management.py        # Existing parts suite (retained)
-│       └── test_tesla_integration.py      # Existing Tesla integration suite (retained)
+│       ├── test_ro_scheduling_e2e.py       # Features 23–31: RO early lifecycle, formalization, supplemental, scheduling/cal APIs
+│       ├── test_agent_facade.py            # Agent Facade (`ism.api.agent.*`) endpoints and guardrails
+│       ├── test_approval_and_inspection.py # Public approval portal, SMS dispatch, and check-in inspections
+│       ├── test_parts_management.py        # Parts, alternates, FIFO allocation, and procurement suite
+│       └── test_tesla_integration.py       # Tesla manual parsing and vehicle intelligence suite
+├── ism-agent-os/
+│   └── tests/                              # Offline Agent OS client, CLI, Open WebUI, ingestion, and skill tests
 ├── TEST_INFRA.md                           # This document
 └── TEST_READY.md                           # Suite verification & readiness report
 ```
@@ -99,7 +100,7 @@ Pairwise and multi-variable feature interactions:
 
 #### Scenario 1: Complete Appointment-to-Intake-to-Release Lifecycle
 1. Customer calls shop with provisional details (John Doe, 555-0199, john@example.com, Tesla Model 3 squeaking brakes).
-2. Service Advisor opens `Repair Order` form in `Draft Appointment` status and schedules initial Diagnostic appointment via scheduling dialog for `Test Bay 1`.
+2. Service Advisor creates a `Repair Order` in `Draft Appointment` status and schedules the initial Diagnostic appointment via the agent scheduling API (`ism.api.agent.find_available_slots` / `book_appointment`) for `Test Bay 1`.
 3. Customer arrives at shop. Status advances to `Checked In`.
 4. Service Advisor triggers `formalize_provisional_info()`. Master `Customer` and `Repair Vehicle` records are created/resolved, and the linked `Schedule Entry` is updated with formalized references without data loss.
 5. Vehicle enters workshop. Diagnostic reveals front brake rotor replacement needed.

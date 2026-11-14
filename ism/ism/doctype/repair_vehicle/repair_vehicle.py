@@ -2,8 +2,11 @@
 # For license information, please see license.txt
 
 import re
+from typing import Any, Optional
 import frappe
 from frappe.model.document import Document
+from frappe.utils import cint, flt
+from ism.utils.tesla_manual import get_tesla_manual_url_for_vehicle
 
 _F = "Tesla Fremont, CA"
 _SH = "Giga Shanghai, China"
@@ -356,6 +359,93 @@ def get_derived_specs(model_code: str, drive_code: str, year_code: str, is_legac
 	return {"drivetrain": drivetrain, "trim": trim}
 
 
+def normalize_vin_string(vin: Optional[str]) -> str:
+	"""Strip non-VIN characters and uppercase according to ISO 3779."""
+	if not vin:
+		return ""
+	return re.sub(r"[^A-HJ-NPR-Z0-9]", "", str(vin).upper())
+
+
+def decode_tesla_vin(vin: Optional[str]) -> dict[str, Any]:
+	"""Decode a Tesla VIN strictly offline using bundled WMI/spec/check-digit tables."""
+	normalized = normalize_vin_string(vin)
+	base = {
+		"vin": normalized,
+		"is_valid_length": len(normalized) == 17,
+		"is_tesla_wmi": False,
+		"is_valid_vin": 0,
+		"wmi": normalized[:3] if len(normalized) >= 3 else "",
+		"manufacturer": None,
+		"model": None,
+		"model_year": None,
+		"body_type": None,
+		"trim": None,
+		"drivetrain": None,
+		"battery_type": None,
+		"drive_unit": None,
+		"assembly_plant": None,
+		"production_sequence": None,
+		"autopilot_hardware": None,
+		"recommended_manual_url": "https://service.tesla.com/docs/",
+		"error": None,
+	}
+	if not normalized:
+		base["error"] = "VIN is required."
+		return base
+	if len(normalized) != 17:
+		base["error"] = "VIN must be 17 characters."
+		return base
+
+	wmi = normalized[0:3]
+	if wmi not in ALL_WMI:
+		base["error"] = f'"{wmi}" is not a recognized Tesla manufacturer code. Only Tesla VINs are supported.'
+		return base
+
+	expected_check = compute_vin_check_digit(normalized)
+	is_valid_vin = 1 if normalized[8] == expected_check else 0
+
+	model_code = normalized[3]
+	year_code = normalized[9]
+	is_legacy_s = model_code == "S" and year_code in S_LEGACY_YEARS
+	seq = normalized[12:] if (is_legacy_s and year_code in S_LEGACY["typedSeq"]) else normalized[11:]
+	try:
+		seq_num = int(seq)
+	except ValueError:
+		seq_num = 0
+
+	body_map = (S_LEGACY["body"].get(year_code) or BODY.get("S")) if is_legacy_s else BODY.get(model_code, {})
+	fuel_map = S_LEGACY["fuel"].get(year_code, {}) if is_legacy_s else FUEL.get(model_code, {})
+	drive_map = S_LEGACY["drive"].get(year_code, {}) if is_legacy_s else DRIVE.get(model_code, {})
+
+	hw = get_hardware_generation(model_code, seq_num, normalized[10], year_code)
+	derived = get_derived_specs(model_code, normalized[7], year_code, is_legacy_s)
+
+	decoded_model = MODEL.get(model_code, "Unknown")
+	decoded_year = YEAR.get(year_code, year_code)
+	manual_url = get_tesla_manual_url_for_vehicle({"model": decoded_model, "model_year": decoded_year})
+
+	return {
+		"vin": normalized,
+		"is_valid_length": True,
+		"is_tesla_wmi": True,
+		"is_valid_vin": is_valid_vin,
+		"wmi": wmi,
+		"manufacturer": WMI.get(model_code, {}).get(wmi, "Tesla"),
+		"model": decoded_model,
+		"model_year": decoded_year,
+		"body_type": body_map.get(normalized[4], "Unknown") if body_map else "Unknown",
+		"trim": derived.get("trim") or "Unknown",
+		"drivetrain": derived.get("drivetrain") or "Unknown",
+		"battery_type": fuel_map.get(normalized[6], "Unknown") if fuel_map else "Unknown",
+		"drive_unit": drive_map.get(normalized[7], "Unknown") if drive_map else "Unknown",
+		"assembly_plant": PLANT.get(normalized[10], normalized[10]),
+		"production_sequence": seq,
+		"autopilot_hardware": hw.get("t") if hw else "Unknown",
+		"recommended_manual_url": manual_url,
+		"error": None,
+	}
+
+
 class RepairVehicle(Document):
 	def before_insert(self):
 		self.normalize_vin()
@@ -370,59 +460,31 @@ class RepairVehicle(Document):
 
 	def normalize_vin(self):
 		if self.vin:
-			normalized = re.sub(r"[^A-HJ-NPR-Z0-9]", "", self.vin.upper())
+			normalized = normalize_vin_string(self.vin)
 			if self.vin != normalized:
 				self.vin = normalized
 
 	def decode_vin(self):
-		if not self.vin:
+		if not self.vin or len(self.vin) != 17:
 			self.clear_vin_fields()
 			return
 
-		if len(self.vin) != 17:
-			self.clear_vin_fields()
-			return
-
-		wmi = self.vin[0:3]
-		if wmi not in ALL_WMI:
+		decoded = decode_tesla_vin(self.vin)
+		if not decoded["is_tesla_wmi"]:
 			self.clear_vin_fields()
 			self.is_valid_vin = 0
 			frappe.throw(
-				frappe._('"{0}" is not a recognized Tesla manufacturer code. Only Tesla VINs are supported.').format(wmi)
+				frappe._('"{0}" is not a recognized Tesla manufacturer code. Only Tesla VINs are supported.').format(
+					decoded["wmi"]
+				)
 			)
 
-		expected_check = compute_vin_check_digit(self.vin)
-		actual_check = self.vin[8]
-		self.is_valid_vin = 1 if actual_check == expected_check else 0
-
-		model_code = self.vin[3]
-		year_code = self.vin[9]
-		is_legacy_s = model_code == "S" and year_code in S_LEGACY_YEARS
-
-		seq = self.vin[12:] if (is_legacy_s and year_code in S_LEGACY["typedSeq"]) else self.vin[11:]
-		try:
-			seq_num = int(seq)
-		except ValueError:
-			seq_num = 0
-
-		body_map = (S_LEGACY["body"].get(year_code) or BODY.get("S")) if is_legacy_s else BODY.get(model_code, {})
-		fuel_map = S_LEGACY["fuel"].get(year_code, {}) if is_legacy_s else FUEL.get(model_code, {})
-		drive_map = S_LEGACY["drive"].get(year_code, {}) if is_legacy_s else DRIVE.get(model_code, {})
-
-		hw = get_hardware_generation(model_code, seq_num, self.vin[10], year_code)
-		derived = get_derived_specs(model_code, self.vin[7], year_code, is_legacy_s)
-
-		self.manufacturer = WMI.get(model_code, {}).get(wmi, "Tesla")
-		self.model = MODEL.get(model_code, "Unknown")
-		self.model_year = YEAR.get(year_code, year_code)
-		self.body_type = body_map.get(self.vin[4], "Unknown") if body_map else "Unknown"
-		self.trim = derived.get("trim") or "Unknown"
-		self.drivetrain = derived.get("drivetrain") or "Unknown"
-		self.battery_type = fuel_map.get(self.vin[6], "Unknown") if fuel_map else "Unknown"
-		self.drive_unit = drive_map.get(self.vin[7], "Unknown") if drive_map else "Unknown"
-		self.assembly_plant = PLANT.get(self.vin[10], self.vin[10])
-		self.production_sequence = seq
-		self.autopilot_hardware = hw.get("t") if hw else "Unknown"
+		for field in (
+			"is_valid_vin", "manufacturer", "model", "model_year", "body_type",
+			"trim", "drivetrain", "battery_type", "drive_unit",
+			"assembly_plant", "production_sequence", "autopilot_hardware",
+		):
+			setattr(self, field, decoded.get(field))
 
 	def sync_customers(self):
 		"""Sync top-level primary customer with child customers table."""
@@ -456,9 +518,13 @@ class RepairVehicle(Document):
 			for row in self.customers:
 				row.is_primary = 1 if row.customer == self.customer else 0
 
-	def add_customer(self, customer: str, is_primary: bool = False, relationship: str = None):
-		"""Link a customer to this vehicle."""
+	def add_customer(self, customer: str, is_primary: bool = False, relationship: Optional[str] = None):
+		"""Link or update a customer on this vehicle."""
+		if not customer or not frappe.db.exists("Customer", customer):
+			frappe.throw(frappe._("Customer '{0}' does not exist.").format(customer))
+
 		existing = {row.customer: row for row in (self.customers or [])}
+		changed = False
 		if customer not in existing:
 			self.append("customers", {
 				"customer": customer,
@@ -467,7 +533,19 @@ class RepairVehicle(Document):
 			})
 			if is_primary or not self.customer:
 				self.customer = customer
-			self.save(ignore_permissions=True)
+			changed = True
+		else:
+			row = existing[customer]
+			if relationship is not None and row.relationship != relationship:
+				row.relationship = relationship
+				changed = True
+			if is_primary and self.customer != customer:
+				self.customer = customer
+				changed = True
+
+		if changed:
+			self.check_permission("write")
+			self.save()
 
 	def clear_vin_fields(self):
 		fields = [
@@ -477,6 +555,312 @@ class RepairVehicle(Document):
 		]
 		for f in fields:
 			setattr(self, f, None)
+
+
+def resolve_vehicle_identifier(vehicle_identifier: str) -> str:
+	"""Resolve a Repair Vehicle document name from exact name, normalized VIN, or license plate."""
+	if not isinstance(vehicle_identifier, str):
+		frappe.throw(
+			frappe._("Vehicle identifier (name, VIN, or license plate) must be a string."),
+			frappe.ValidationError,
+		)
+	ident = vehicle_identifier.strip()
+	if not ident:
+		frappe.throw(frappe._("Vehicle identifier (name, VIN, or license plate) is required."))
+
+	if frappe.db.exists("Repair Vehicle", ident):
+		return ident
+
+	norm_vin = normalize_vin_string(ident)
+	if norm_vin:
+		by_vin = frappe.db.get_value("Repair Vehicle", {"vin": norm_vin}, "name")
+		if by_vin:
+			return by_vin
+
+	by_plate = frappe.db.sql(
+		"""
+		SELECT name FROM `tabRepair Vehicle`
+		WHERE LOWER(REPLACE(IFNULL(license_plate, ''), ' ', '')) = LOWER(REPLACE(%s, ' ', ''))
+		LIMIT 1
+		""",
+		(ident,),
+		as_dict=True,
+	)
+	if by_plate:
+		return by_plate[0].name
+
+	frappe.throw(
+		frappe._("Repair Vehicle '{0}' not found by name, VIN, or license plate.").format(ident),
+		frappe.DoesNotExistError,
+	)
+
+
+def build_vehicle_search_results(
+	query: Optional[str] = None,
+	customer: Optional[str] = None,
+	model: Optional[str] = None,
+	limit: int = 20,
+) -> list[dict[str, Any]]:
+	"""Search vehicles across VIN, license plate, model, primary customer, and co-owners."""
+	safe_limit = max(1, min(cint(limit) or 20, 100))
+	conditions = []
+	params: list[Any] = []
+
+	if customer:
+		cust_clean = str(customer).strip()
+		conditions.append(
+			"(rv.customer = %s OR EXISTS ("
+			"SELECT 1 FROM `tabRepair Vehicle Customer` rvc "
+			"WHERE rvc.parent = rv.name AND rvc.parenttype = 'Repair Vehicle' AND rvc.customer = %s"
+			"))"
+		)
+		params.extend([cust_clean, cust_clean])
+
+	if model:
+		conditions.append("LOWER(IFNULL(rv.model, '')) LIKE LOWER(%s)")
+		params.append(f"%{str(model).strip()}%")
+
+	if query:
+		q = str(query).strip()
+		like_q = f"%{q}%"
+		norm_q = normalize_vin_string(q) or q
+		like_norm = f"%{norm_q}%"
+		conditions.append(
+			"("
+			"rv.name LIKE %s OR rv.vin LIKE %s OR rv.vin LIKE %s "
+			"OR IFNULL(rv.license_plate, '') LIKE %s "
+			"OR IFNULL(rv.model, '') LIKE %s "
+			"OR IFNULL(rv.customer, '') LIKE %s "
+			"OR IFNULL(c.customer_name, '') LIKE %s "
+			"OR EXISTS ("
+			"SELECT 1 FROM `tabRepair Vehicle Customer` rvc "
+			"LEFT JOIN `tabCustomer` c2 ON c2.name = rvc.customer "
+			"WHERE rvc.parent = rv.name AND rvc.parenttype = 'Repair Vehicle' "
+			"AND (rvc.customer LIKE %s OR IFNULL(c2.customer_name, '') LIKE %s)"
+			")"
+			")"
+		)
+		params.extend([like_q, like_q, like_norm, like_q, like_q, like_q, like_q, like_q, like_q])
+
+	where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+	params.append(safe_limit)
+
+	rows = frappe.db.sql(
+		f"""
+		SELECT
+			rv.name, rv.vin, rv.license_plate, rv.color, rv.customer, c.customer_name,
+			rv.is_valid_vin, rv.manufacturer, rv.model, rv.model_year, rv.body_type,
+			rv.trim, rv.drivetrain, rv.battery_type, rv.drive_unit, rv.autopilot_hardware,
+			rv.manufactured_month, rv.last_odometer, rv.last_service_date,
+			rv.next_service_odometer, rv.next_service_date
+		FROM `tabRepair Vehicle` rv
+		LEFT JOIN `tabCustomer` c ON c.name = rv.customer
+		{where_sql}
+		ORDER BY rv.modified DESC
+		LIMIT %s
+		""",
+		tuple(params),
+		as_dict=True,
+	)
+
+	results = []
+	for row in rows:
+		item = dict(row)
+		item["recommended_manual_url"] = get_tesla_manual_url_for_vehicle(item)
+		results.append(item)
+	return results
+
+
+def build_vehicle_intelligence(vehicle_identifier: str, history_limit: int = 20) -> dict[str, Any]:
+	"""Return comprehensive vehicle profile, VIN decode, multi-customer owners, RO history, and deferred items."""
+	vehicle_name = resolve_vehicle_identifier(vehicle_identifier)
+	vdoc = frappe.get_doc("Repair Vehicle", vehicle_name)
+	vdoc.check_permission("read")
+	safe_limit = max(1, min(cint(history_limit) or 20, 100))
+
+	owners = _collect_vehicle_owners(vdoc)
+	service_history = _collect_vehicle_service_history(vdoc.name, safe_limit)
+	deferred_summary = _summarize_deferred_services(vdoc)
+	manual_url = get_tesla_manual_url_for_vehicle(vdoc)
+
+	return {
+		"vehicle": {
+			"name": vdoc.name,
+			"vin": vdoc.vin,
+			"is_valid_vin": cint(vdoc.is_valid_vin),
+			"license_plate": vdoc.license_plate or "",
+			"color": vdoc.color or "",
+			"customer": vdoc.customer or "",
+			"manufacturer": vdoc.manufacturer or "",
+			"model": vdoc.model or "",
+			"model_year": vdoc.model_year or "",
+			"body_type": vdoc.body_type or "",
+			"trim": vdoc.trim or "",
+			"drivetrain": vdoc.drivetrain or "",
+			"battery_type": vdoc.battery_type or "",
+			"drive_unit": vdoc.drive_unit or "",
+			"assembly_plant": vdoc.assembly_plant or "",
+			"production_sequence": vdoc.production_sequence or "",
+			"autopilot_hardware": vdoc.autopilot_hardware or "",
+			"manufactured_month": vdoc.manufactured_month or "",
+			"last_odometer": cint(vdoc.last_odometer),
+			"last_service_date": str(vdoc.last_service_date) if vdoc.last_service_date else None,
+			"next_service_odometer": cint(vdoc.next_service_odometer),
+			"next_service_date": str(vdoc.next_service_date) if vdoc.next_service_date else None,
+		},
+		"vin_decode": decode_tesla_vin(vdoc.vin),
+		"recommended_manual_url": manual_url,
+		"owners": owners,
+		"service_history": service_history,
+		"deferred_services": deferred_summary,
+	}
+
+
+def _collect_vehicle_owners(vdoc) -> list[dict[str, Any]]:
+	"""Collect primary and co-owner Customer records linked to a Repair Vehicle."""
+	customer_ids = []
+	for row in (vdoc.customers or []):
+		if row.customer and row.customer not in customer_ids:
+			customer_ids.append(row.customer)
+	if vdoc.customer and vdoc.customer not in customer_ids:
+		customer_ids.insert(0, vdoc.customer)
+
+	customer_meta = {}
+	if customer_ids:
+		for c in frappe.get_all(
+			"Customer",
+			filters={"name": ["in", customer_ids]},
+			fields=["name", "customer_name", "mobile_no", "email_id"],
+		):
+			customer_meta[c.name] = c
+
+	owners = []
+	seen = set()
+	for row in (vdoc.customers or []):
+		if not row.customer or row.customer in seen:
+			continue
+		seen.add(row.customer)
+		meta = customer_meta.get(row.customer) or {}
+		owners.append({
+			"customer": row.customer,
+			"customer_name": row.customer_name or meta.get("customer_name") or row.customer,
+			"is_primary": cint(row.is_primary or (row.customer == vdoc.customer)),
+			"relationship": row.relationship or "",
+			"mobile_no": meta.get("mobile_no") or "",
+			"email_id": meta.get("email_id") or "",
+		})
+
+	if vdoc.customer and vdoc.customer not in seen:
+		meta = customer_meta.get(vdoc.customer) or {}
+		owners.insert(0, {
+			"customer": vdoc.customer,
+			"customer_name": meta.get("customer_name") or vdoc.customer,
+			"is_primary": 1,
+			"relationship": "Primary Owner",
+			"mobile_no": meta.get("mobile_no") or "",
+			"email_id": meta.get("email_id") or "",
+		})
+	return owners
+
+
+def _collect_vehicle_service_history(vehicle_name: str, limit: int) -> list[dict[str, Any]]:
+	"""Fetch recent Repair Orders and summarized services for a vehicle without N+1 queries."""
+	if not frappe.has_permission("Repair Order", "read"):
+		return []
+
+	orders = frappe.get_list(
+		"Repair Order",
+		filters={"vehicle": vehicle_name, "docstatus": ["<", 2]},
+		fields=[
+			"name", "customer", "status", "approval_status", "posting_date",
+			"odometer_in", "odometer_out", "grand_total",
+			"is_mobile_capable", "modified",
+		],
+		order_by="posting_date desc, modified desc",
+		limit_page_length=limit,
+	)
+	if not orders:
+		return []
+
+	order_names = [o.name for o in orders]
+	services_by_ro: dict[str, list[dict[str, Any]]] = {}
+	labor_totals_by_ro: dict[str, float] = {}
+	parts_totals_by_ro: dict[str, float] = {}
+	for svc in frappe.get_all(
+		"Repair Order Service",
+		filters={"parent": ["in", order_names], "parenttype": "Repair Order"},
+		fields=[
+			"parent", "service_title", "correction_code", "service_position",
+			"status", "labor_amount", "parts_total", "total_amount",
+		],
+		order_by="idx asc",
+	):
+		labor_amt = flt(svc.labor_amount, 2)
+		parts_amt = flt(svc.parts_total, 2)
+		labor_totals_by_ro[svc.parent] = flt(labor_totals_by_ro.get(svc.parent, 0.0) + labor_amt, 2)
+		parts_totals_by_ro[svc.parent] = flt(parts_totals_by_ro.get(svc.parent, 0.0) + parts_amt, 2)
+		services_by_ro.setdefault(svc.parent, []).append({
+			"service_title": svc.service_title,
+			"correction_code": svc.correction_code or "",
+			"service_position": svc.service_position or "None",
+			"status": svc.status,
+			"labor_amount": labor_amt,
+			"parts_total": parts_amt,
+			"total_amount": flt(svc.total_amount, 2),
+		})
+
+	history = []
+	for ro in orders:
+		history.append({
+			"name": ro.name,
+			"customer": ro.customer,
+			"status": ro.status,
+			"approval_status": ro.approval_status or "",
+			"posting_date": str(ro.posting_date) if ro.posting_date else None,
+			"odometer_in": cint(ro.odometer_in),
+			"odometer_out": cint(ro.odometer_out),
+			"labor_total": flt(labor_totals_by_ro.get(ro.name, 0.0), 2),
+			"parts_total": flt(parts_totals_by_ro.get(ro.name, 0.0), 2),
+			"grand_total": flt(ro.grand_total, 2),
+			"is_mobile_capable": cint(ro.is_mobile_capable),
+			"services": services_by_ro.get(ro.name, []),
+		})
+	return history
+
+
+def _summarize_deferred_services(vdoc) -> dict[str, Any]:
+	"""Aggregate deferred service items and highlight open safety recommendations."""
+	all_items = []
+	open_items = []
+	safety_hazard_count = 0
+	open_estimated_total = 0.0
+
+	for row in (vdoc.deferred_services or []):
+		entry = {
+			"name": row.name,
+			"job_title": row.job_title,
+			"decline_date": str(row.decline_date) if row.decline_date else None,
+			"repair_order": row.repair_order or "",
+			"estimated_amount": flt(row.estimated_amount, 2),
+			"status": row.status or "Open Recommendation",
+			"safety_hazard": cint(row.safety_hazard),
+			"decline_reason": row.decline_reason or "",
+		}
+		all_items.append(entry)
+		if entry["status"] == "Open Recommendation":
+			open_items.append(entry)
+			open_estimated_total += entry["estimated_amount"]
+			if entry["safety_hazard"]:
+				safety_hazard_count += 1
+
+	return {
+		"open_count": len(open_items),
+		"total_count": len(all_items),
+		"safety_hazard_count": safety_hazard_count,
+		"open_estimated_total": flt(open_estimated_total, 2),
+		"open": open_items,
+		"all": all_items,
+	}
 
 
 def on_customer_trash(doc, method=None):

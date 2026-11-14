@@ -86,39 +86,8 @@ frappe.listview_settings["Schedule Entry"] = {
 			]);
 		}, group_name);
 
-		// Intercept standard "Add Schedule Entry" dialog / shortcut key
-		listview.new_doctype_dialog = function () {
-			if (typeof ism !== "undefined" && ism.SchedulingDialog) {
-				new ism.SchedulingDialog({
-					on_success: () => listview.refresh(),
-				}).show();
-			} else {
-				frappe.new_doc("Schedule Entry");
-			}
-		};
-	},
-
-	refresh: function (listview) {
-		// Ensure primary action button triggers the Shop Capacity Scheduling Dialog
-		listview.page.set_primary_action(__("Schedule Work Allocation"), function () {
-			if (typeof ism !== "undefined" && ism.SchedulingDialog) {
-				new ism.SchedulingDialog({
-					on_success: () => listview.refresh(),
-				}).show();
-			} else {
-				frappe.new_doc("Schedule Entry");
-			}
-		});
-
-		// Also provide a dedicated inner action button on the list page
-		listview.page.add_inner_button(__("Capacity Assistant"), function () {
-			if (typeof ism !== "undefined" && ism.SchedulingDialog) {
-				new ism.SchedulingDialog({
-					on_success: () => listview.refresh(),
-				}).show();
-			} else {
-				frappe.new_doc("Schedule Entry");
-			}
+		listview.page.add_inner_button(__("Calendar View"), function () {
+			frappe.set_route("List", "Schedule Entry", "Calendar");
 		});
 	},
 };

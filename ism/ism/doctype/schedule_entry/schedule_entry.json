@@ -60,7 +60,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Draft\nScheduled\nIn Progress\nCompleted\nCancelled",
+   "options": "Draft\nScheduled\nConfirmed\nIn Progress\nCompleted\nNo Show\nCancelled",
    "reqd": 1
   },
   {
