@@ -2,7 +2,6 @@
 # For license information, please see license.txt
 
 import json
-import unittest
 from unittest.mock import patch
 
 import frappe
@@ -64,7 +63,7 @@ class TestAgentFacade(ISMTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		setup_all()
+		cls.emp_map = setup_all()
 
 	@classmethod
 	def tearDownClass(cls):
@@ -73,7 +72,19 @@ class TestAgentFacade(ISMTestCase):
 
 	def setUp(self):
 		super().setUp()
-		ensure_ism_settings()
+		ensure_ism_settings(holiday_list=None)
+		self.emp_map = self.__class__.emp_map
+
+	def _track_quote_ro(self, res):
+		ro_name = res["data"]["name"]
+		self.track("Repair Order", ro_name)
+		ro_meta = frappe.db.get_value("Repair Order", ro_name, ["customer", "vehicle"], as_dict=True)
+		if ro_meta:
+			if ro_meta.vehicle and ro_meta.vehicle != VEHICLE_VIN:
+				self.track("Repair Vehicle", ro_meta.vehicle)
+			if ro_meta.customer and ro_meta.customer != CUSTOMER:
+				self.track("Customer", ro_meta.customer)
+		return ro_name
 
 	def test_create_quote_basic_flow(self):
 		"""Verify create_quote creates a Draft Estimate Repair Order with exact 13% tax math and summary card."""
@@ -89,8 +100,7 @@ class TestAgentFacade(ISMTestCase):
 		)
 
 		self.assertTrue(res["success"])
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(res)
 
 		# Verify DB state
 		ro = frappe.get_doc("Repair Order", ro_name)
@@ -123,7 +133,7 @@ class TestAgentFacade(ISMTestCase):
 			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
 			include_summary=True,
 		)
-		self.track("Repair Order", res_summary["data"]["name"])
+		self._track_quote_ro(res_summary)
 		self.assertIn("summary_card", res_summary)
 		self.assertIn("Brake Inspection", res_summary["summary_card"])
 
@@ -137,8 +147,7 @@ class TestAgentFacade(ISMTestCase):
 			notes="General check-in inspection",
 		)
 		self.assertTrue(res["success"])
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(res)
 
 		ro = frappe.get_doc("Repair Order", ro_name)
 		self.assertEqual(len(ro.services), 1)
@@ -155,8 +164,7 @@ class TestAgentFacade(ISMTestCase):
 				{"service_title": "Initial Service B", "labor_hours": 2.0, "labor_rate": 100.0},
 			],
 		)
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(res)
 
 		# Amend: remove first service (idx 0), add a new service
 		amend_res = amend_quote(
@@ -182,8 +190,7 @@ class TestAgentFacade(ISMTestCase):
 			odometer_in=41600,
 			services=[{"service_title": "Service A", "labor_hours": 1.0}],
 		)
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(res)
 
 		ro = frappe.get_doc("Repair Order", ro_name)
 		ro.approval_status = "Approved"
@@ -250,6 +257,11 @@ class TestAgentFacade(ISMTestCase):
 		csv_data = "Part Number,Part Description,Price\nAGY-PAD-001,Front Ceramic Pads,85.00\nAGY-ROT-002,Vented Brake Rotor,120.00"
 		res = import_supplier_catalog(raw_text=csv_data, supplier=f"{PREFIX}Supplier", include_summary=True)
 		self.assertTrue(res["success"])
+		self.track("Supplier", f"{PREFIX}Supplier")
+		for item in res["data"].get("created", []):
+			item_code = item.get("item_code") if isinstance(item, dict) else item
+			if item_code:
+				self.track("Item", item_code)
 		self.assertEqual(res["data"]["total_created"], 2)
 		self.assertEqual(res["data"]["supplier"], f"{PREFIX}Supplier")
 		self.assertIn("summary_card", res)
@@ -269,6 +281,9 @@ class TestAgentFacade(ISMTestCase):
 		self.track("Service Package", pkg_name)
 
 		pkg = frappe.get_doc("Service Package", pkg_name)
+		for row in pkg.items:
+			if row.item_code:
+				self.track("Item", row.item_code)
 		self.assertEqual(pkg.applicable_model, "Model Y")
 		self.assertAlmostEqual(pkg.standard_labor_hours, 2.5, places=1)
 		self.assertGreaterEqual(len(pkg.items), 1)
@@ -338,8 +353,7 @@ class TestAgentFacade(ISMTestCase):
 			services=[{"service_title": "Wheel Torque Check", "labor_hours": 1.0}],
 		)
 		self.assertTrue(res["success"])
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(res)
 
 		ro = frappe.get_doc("Repair Order", ro_name)
 		self.assertEqual(ro.services[0].labor_rate, _get_default_labor_rate())
@@ -416,8 +430,7 @@ class TestAgentFacade(ISMTestCase):
 		self.assertIn("/app/repair-order/", quote_res["urls"]["desk"])
 		self.assertIn("/printview?", quote_res["urls"]["print"])
 
-		ro_name = quote_res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(quote_res)
 		ro = frappe.get_doc("Repair Order", ro_name)
 		self.assertEqual(ro.services[0].labor_rate, _get_default_labor_rate())
 
@@ -478,7 +491,9 @@ class TestAgentFacade(ISMTestCase):
 			default_source="OEM",
 			default_condition="Reman",
 		)
+		self.track("Supplier", f"{PREFIX}Parts Co")
 		created_item = cat["data"]["created"][0]
+		self.track("Item", created_item["item_code"])
 		self.assertEqual(created_item["part_condition"], "Reconditioned")
 		self.assertEqual(created_item["item_code"], "OEM-ACC-CAL-01-RCN")
 
@@ -492,8 +507,7 @@ class TestAgentFacade(ISMTestCase):
 			}],
 			odometer_in=12000,
 		)
-		ro_name = q["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(q)
 		self.assertEqual(q["data"]["license_plate"], "FAST-888")
 
 		with self.assertRaises(frappe.ValidationError):
@@ -510,8 +524,8 @@ class TestAgentFacade(ISMTestCase):
 		self.assertEqual(part_info["deficit"], 1.0)
 
 		slots = find_available_slots(repair_order=ro_name, start_date=today(), days_ahead=2)
-		if slots["data"]["slots"]:
-			self.assertIn("available_bay_ids", slots["data"]["slots"][0])
+		self.assertTrue(slots["data"]["slots"])
+		self.assertIn("available_bay_ids", slots["data"]["slots"][0])
 
 		auth = send_quote_for_approval(repair_order=ro_name, communication_medium="link")
 		self.assertGreaterEqual(len(auth["data"]["services"]), 1)
@@ -564,6 +578,16 @@ class TestAgentFacade(ISMTestCase):
 	def test_chunk2_floor_supplements_deferred_and_action_items(self):
 		"""Verify deferred service discovery/intake, opposite-side duplication, supplements, service completion, bay park, and shop action items."""
 		veh_doc = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
+		_skip = {"name", "creation", "modified", "modified_by", "owner", "idx", "docstatus", "parent", "parentfield", "parenttype"}
+		orig_deferred = [{k: v for k, v in r.as_dict().items() if k not in _skip} for r in (veh_doc.deferred_services or [])]
+
+		def _restore_deferred():
+			v = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
+			v.set("deferred_services", orig_deferred)
+			v.save(ignore_permissions=True)
+			frappe.db.commit()
+
+		self.addCleanup(_restore_deferred)
 		veh_doc.append(
 			"deferred_services",
 			{
@@ -763,9 +787,9 @@ class TestAgentFacade(ISMTestCase):
 
 		slots_compact = find_available_slots(repair_order=ro_name, start_date=target_day, days_ahead=2)
 		self.assertIn("resources", slots_compact["data"])
-		if slots_compact["data"]["slots"]:
-			self.assertIn("available_bay_ids", slots_compact["data"]["slots"][0])
-			self.assertNotIn("available_technician_ids", slots_compact["data"]["slots"][0])
+		self.assertTrue(slots_compact["data"]["slots"])
+		self.assertIn("available_bay_ids", slots_compact["data"]["slots"][0])
+		self.assertNotIn("available_technician_ids", slots_compact["data"]["slots"][0])
 
 		slots_full = find_available_slots(
 			repair_order=ro_name,
@@ -965,6 +989,7 @@ class TestAgentFacade(ISMTestCase):
 			include_summary=True,
 		)
 		self.assertTrue(res["success"])
+		self.track("Supplier", f"{PREFIX}Structured Supplier")
 		self.assertEqual(res["data"]["total_created"], 2)
 		self.assertEqual(res["data"]["total_errors"], 0)
 		self.assertIn("summary_card", res)
@@ -1340,8 +1365,9 @@ class TestAgentFacade(ISMTestCase):
 		bay_2 = f"{PREFIX}Bay 2"
 		tomorrow_date = add_days(today(), 1)
 
-		tech_id = frappe.db.get_value("Employee", {"status": "Active", "designation": "Technician"}, "name")
-		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name") if tech_id else None
+		tech_id = self.emp_map["tech_active_1"]
+		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name")
+		self.assertTrue(tech_id and tech_name)
 
 		with self.assertRaises(frappe.ValidationError):
 			find_available_slots(start_date="tomorrow", days_ahead=1, duration_minutes=60)
@@ -1363,12 +1389,11 @@ class TestAgentFacade(ISMTestCase):
 		)
 		self.assertTrue(slots_res["success"])
 		self.assertEqual(slots_res["data"]["service_bay"], bay_1)
-		if tech_id:
-			self.assertEqual(slots_res["data"]["technician"], tech_id)
-			self.assertTrue(slots_res["data"]["slots"])
-			first_slot = slots_res["data"]["slots"][0]
-			self.assertEqual(first_slot["matched_technician"], tech_id)
-			self.assertIn(tech_id, first_slot["available_technician_ids"])
+		self.assertEqual(slots_res["data"]["technician"], tech_id)
+		self.assertTrue(slots_res["data"]["slots"])
+		first_slot = slots_res["data"]["slots"][0]
+		self.assertEqual(first_slot["matched_technician"], tech_id)
+		self.assertIn(tech_id, first_slot["available_technician_ids"])
 
 		ro_res = create_quote(
 			customer_name=CUSTOMER,
@@ -1440,8 +1465,7 @@ class TestAgentFacade(ISMTestCase):
 			include_summary=True,
 		)
 		self.assertTrue(res["success"])
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		self._track_quote_ro(res)
 		self.assertEqual(res["data"]["repair_order"]["status"], "Draft Estimate")
 		self.assertGreaterEqual(res["data"]["duration_minutes"], 60)
 		self.assertIsInstance(res["data"]["slots"], list)
@@ -1462,8 +1486,7 @@ class TestAgentFacade(ISMTestCase):
 			],
 		)
 		self.assertTrue(res["success"])
-		ro_name = res["data"]["name"]
-		self.track("Repair Order", ro_name)
+		ro_name = self._track_quote_ro(res)
 
 		ro = frappe.get_doc("Repair Order", ro_name)
 		self.assertEqual(len(ro.services), 4)
@@ -1490,8 +1513,8 @@ class TestAgentFacade(ISMTestCase):
 	def test_intake_and_find_slots_preserves_filters_and_tech_match(self):
 		"""Verify intake_and_find_slots preserves service_bay/technician and exposes matched_technician on slots."""
 		bay_1 = f"{PREFIX}Bay 1"
-		tech_id = frappe.db.get_value("Employee", {"status": "Active", "designation": "Technician"}, "name")
-		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name") if tech_id else None
+		tech_id = self.emp_map["tech_active_1"]
+		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name")
 		self.assertTrue(tech_id and tech_name)
 
 		res = intake_and_find_slots(
@@ -1506,7 +1529,7 @@ class TestAgentFacade(ISMTestCase):
 			max_slots=3,
 		)
 		self.assertTrue(res["success"])
-		self.track("Repair Order", res["data"]["name"])
+		self._track_quote_ro(res)
 		self.assertEqual(res["data"]["service_bay"], bay_1)
 		self.assertEqual(res["data"]["technician"], tech_id)
 		self.assertTrue(res["data"]["slots"])
@@ -1791,3 +1814,117 @@ class TestAgentFacade(ISMTestCase):
 		self.track("Purchase Receipt", pr_c_res["data"]["purchase_receipt"])
 		self.assertEqual(pr_c_res["data"]["purchase_invoice"], pi_c_name)
 		self.assertEqual(pr_c_res["data"]["per_received"], 100.0)
+
+	def test_shop_action_item_permissions_reporter_spoof_and_reference_checks(self):
+		"""Verify Shop Action Item removes Role: All access, blocks reported_by spoofing, and checks reference read perms."""
+		from ism.ism.doctype.shop_action_item.shop_action_item import (
+			create_shop_action_item as create_action_item_doc,
+		)
+
+		no_role_email = "_test_ism_sai_norole@example.com"
+		maint_email = "_test_ism_sai_maint@example.com"
+
+		for email, roles in ((no_role_email, []), (maint_email, [{"role": "Maintenance User"}])):
+			if frappe.db.exists("User", email):
+				frappe.delete_doc("User", email, force=True, ignore_permissions=True)
+			frappe.get_doc({
+				"doctype": "User",
+				"email": email,
+				"first_name": "SAI",
+				"last_name": "Tester",
+				"enabled": 1,
+				"user_type": "System User",
+				"send_welcome_email": 0,
+				"roles": roles,
+			}).insert(ignore_permissions=True)
+			self.addCleanup(
+				lambda u=email: frappe.db.exists("User", u)
+				and frappe.delete_doc("User", u, force=True, ignore_permissions=True)
+			)
+
+		allowed_cust = self.create_test_customer(f"{PREFIX}SAI Allowed Cust")
+		blocked_cust = self.create_test_customer(f"{PREFIX}SAI Blocked Cust")
+		blocked_veh = self.create_test_vehicle(customer=blocked_cust.name)
+		blocked_ro = self.create_test_repair_order(customer=blocked_cust.name, vehicle=blocked_veh.name)
+
+		user_perm = frappe.get_doc({
+			"doctype": "User Permission",
+			"user": maint_email,
+			"allow": "Customer",
+			"for_value": allowed_cust.name,
+			"apply_to_all_doctypes": 1,
+		}).insert(ignore_permissions=True)
+		self.addCleanup(
+			lambda p=user_perm.name: frappe.db.exists("User Permission", p)
+			and frappe.delete_doc("User Permission", p, force=True, ignore_permissions=True)
+		)
+
+		seed_res = create_shop_action_item(title=f"{PREFIX}Seed SAI Item")
+		self.assertTrue(seed_res["success"])
+		seed_name = seed_res["data"]["name"]
+		self.track("Shop Action Item", seed_name)
+
+		orig_user = frappe.session.user
+		try:
+			frappe.set_user(no_role_email)
+			self.assertFalse(frappe.has_permission("Shop Action Item", "read"))
+			for fn in (
+				lambda: create_shop_action_item(title="No Role Escalation"),
+				lambda: list_shop_action_items(),
+				lambda: resolve_shop_action_item(action_item=seed_name, resolution_notes="Should fail"),
+				lambda: frappe.get_doc("Shop Action Item", seed_name).check_permission("read"),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					fn()
+
+			frappe.set_user(maint_email)
+			created = create_shop_action_item(title=f"{PREFIX}Maint SAI Item")
+			self.assertTrue(created["success"])
+			sai_name = created["data"]["name"]
+			self.track("Shop Action Item", sai_name)
+
+			listed = list_shop_action_items(status="Open")
+			self.assertTrue(any(row["name"] == sai_name for row in listed["data"]["items"]))
+
+			resolved = resolve_shop_action_item(action_item=sai_name, resolution_notes="Resolved by tech")
+			self.assertTrue(resolved["success"])
+			self.assertEqual(resolved["data"]["status"], "Resolved")
+
+			with self.assertRaises(frappe.PermissionError):
+				create_action_item_doc(title=f"{PREFIX}Spoof Reporter", reported_by="Administrator")
+
+			with self.assertRaises(frappe.PermissionError):
+				create_shop_action_item(
+					title=f"{PREFIX}Unauthorized Ref",
+					reference_doctype="Repair Order",
+					reference_name=blocked_ro.name,
+				)
+
+			with self.assertRaises(frappe.PermissionError):
+				create_action_item_doc(
+					title=f"{PREFIX}Unauthorized Ref Doc",
+					reference_doctype="Repair Order",
+					reference_name=blocked_ro.name,
+				)
+		finally:
+			frappe.set_user(orig_user)
+
+	def test_reschedule_appointment_clear_bay(self):
+		"""Verify reschedule_appointment(..., clear_bay=True) clears the assigned service bay."""
+		booked = book_appointment(
+			scheduled_date=add_days(today(), 1),
+			start_time="15:00:00",
+			service_bay=f"{PREFIX}Bay 1",
+			entry_type="Diagnostic",
+			estimated_duration=60,
+			provisional_customer_name=f"{PREFIX}Clear Bay WalkIn",
+		)
+		self.assertTrue(booked["success"])
+		se_name = booked["data"]["name"]
+		self.track("Schedule Entry", se_name)
+		self.assertEqual(booked["data"]["service_bay"], f"{PREFIX}Bay 1")
+
+		cleared = reschedule_appointment(schedule_entry=se_name, clear_bay=True)
+		self.assertTrue(cleared["success"])
+		self.assertFalse(cleared["data"].get("service_bay"))
+		self.assertFalse(frappe.db.get_value("Schedule Entry", se_name, "service_bay"))

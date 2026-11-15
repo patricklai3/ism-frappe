@@ -2,51 +2,43 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote
 
-from frappe.utils import cint, flt, get_url
+from frappe.utils import cint, flt
 
+from ism.api._validation import coerce_bool, normalize_condition, parse_json_arg
 
-def coerce_bool(value: Any) -> bool:
-	"""Coerce bool, numeric, or string flags from HTTP/MCP arguments into bool."""
-	if isinstance(value, bool):
-		return value
-	if isinstance(value, (int, float)):
-		return bool(value)
-	if isinstance(value, str):
-		return value.strip().lower() in ("1", "true", "yes", "on")
-	return bool(value)
-
-
-def parse_json_arg(value: Any, default: Any = None) -> Any:
-	"""Parse JSON-encoded string inputs while passing native Python values through."""
-	if value is None:
-		return default
-	if isinstance(value, str):
-		stripped = value.strip()
-		if not stripped:
-			return default
-		return json.loads(stripped)
-	return value
-
-
-def normalize_condition(condition: Optional[str]) -> str:
-	"""Normalize part condition aliases to ISM Item condition values."""
-	cleaned = (condition or "New").strip().lower()
-	if cleaned in ("used",):
-		return "Used"
-	if cleaned in ("reman", "remanufactured", "reconditioned", "rebuilt", "rec", "rcn", "reb"):
-		return "Reconditioned"
-	return "New"
+__all__ = [
+	"build_agent_envelope",
+	"build_alternates_summary",
+	"build_appointment_summary",
+	"build_catalog_summary",
+	"build_estimate_summary",
+	"build_floor_summary",
+	"build_inspection_summary",
+	"build_quote_summary",
+	"build_ro_urls",
+	"build_slots_summary",
+	"build_vehicle_intel_summary",
+	"build_vin_decode_summary",
+	"coerce_bool",
+	"normalize_condition",
+	"parse_json_arg",
+	"serialize_repair_order_compact",
+	"serialize_service_package_compact",
+]
 
 
 def build_ro_urls(ro_name: str, approval_url: Optional[str] = None) -> Dict[str, str]:
 	"""Build canonical Desk and Print URLs for a Repair Order."""
+	from frappe.utils import get_url
+
 	base = get_url()
+	encoded_ro = quote(str(ro_name), safe="")
 	urls = {
-		"desk": f"{base}/app/repair-order/{ro_name}",
-		"print": f"{base}/printview?doctype=Repair+Order&name={ro_name}&format=Automotive+Repair+Invoice",
+		"desk": f"{base}/app/repair-order/{encoded_ro}",
+		"print": f"{base}/printview?doctype=Repair+Order&name={encoded_ro}&format=Automotive+Repair+Invoice",
 	}
 	if approval_url:
 		urls["approval"] = approval_url
@@ -76,7 +68,10 @@ def build_agent_envelope(
 	return payload
 
 
-def serialize_repair_order_compact(ro: Any) -> Dict[str, Any]:
+def serialize_repair_order_compact(
+	ro: Any,
+	vehicle_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
 	"""Serialize a Repair Order without child HTML blobs or unused DocType metadata."""
 	services: List[Dict[str, Any]] = []
 	for svc in getattr(ro, "services", None) or []:
@@ -96,14 +91,9 @@ def serialize_repair_order_compact(ro: Any) -> Dict[str, Any]:
 			"total_amount": flt(getattr(svc, "total_amount", 0.0), 2),
 		})
 
-	vin = getattr(ro, "vin", None)
-	license_plate = getattr(ro, "license_plate", None)
-	if getattr(ro, "vehicle", None) and (not vin or not license_plate):
-		import frappe
-
-		veh_vals = frappe.db.get_value("Repair Vehicle", ro.vehicle, ["vin", "license_plate"], as_dict=True) or {}
-		vin = vin or veh_vals.get("vin")
-		license_plate = license_plate or veh_vals.get("license_plate")
+	meta = vehicle_meta or {}
+	vin = getattr(ro, "vin", None) or meta.get("vin")
+	license_plate = getattr(ro, "license_plate", None) or meta.get("license_plate")
 
 	return {
 		"name": ro.name,
@@ -173,9 +163,11 @@ def build_quote_summary(
 			f"| {s.service_title} | {flt(s.labor_hours):.1f} | ${flt(s.labor_amount):.2f} "
 			f"| ${flt(s.parts_total):.2f} | ${flt(s.total_amount):.2f} |"
 		)
+	tax_rate = getattr(ro, "tax_rate", None)
+	tax_label = f"Tax ({flt(tax_rate):g}%)" if tax_rate is not None else "Tax"
 	lines.extend([
 		"",
-		f"**Subtotal**: `${flt(ro.net_total):,.2f}` | **HST (13%)**: `${flt(ro.total_taxes_and_charges):,.2f}` "
+		f"**Subtotal**: `${flt(ro.net_total):,.2f}` | **{tax_label}**: `${flt(ro.total_taxes_and_charges):,.2f}` "
 		f"| **Grand Total**: `${flt(ro.grand_total):,.2f}`",
 	])
 	if deferred_services:

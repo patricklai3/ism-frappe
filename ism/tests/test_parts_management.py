@@ -2,10 +2,15 @@
 # For license information, please see license.txt
 
 import json
+from unittest.mock import patch
+
 import frappe
 from frappe.utils import flt
 from ism.tests.base import ISMTestCase, TEST_PREFIX
+from ism.api.agent_procurement import _attach_package_parts
+from ism.api.parts_catalog import _upsert_part_row_on_package_doc
 from ism.api.parts import (
+	_get_items_stock_qty_map,
 	format_item_code,
 	quick_create_part,
 	bulk_import_parts,
@@ -17,7 +22,6 @@ from ism.api.parts import (
 	parse_slot_number,
 	format_slot_label,
 	has_lhrh_designation,
-	detect_part_side,
 	resolve_part_side,
 	ensure_supplier_and_link_to_item,
 	get_repair_order_procurement_data,
@@ -317,6 +321,7 @@ class TestPartsManagement(ISMTestCase):
 			parts_data=[{"item_code": p_code, "qty": 2.0, "supplier": f"{TEST_PREFIX}Resilient Sup", "order_mode": "Purchase Order"}],
 			submit=False,
 		)
+		self.track("Supplier", f"{TEST_PREFIX}Resilient Sup")
 		self.assertEqual(len(res["purchase_orders"]), 1)
 		po = frappe.get_doc("Purchase Order", res["purchase_orders"][0])
 		self.track(po)
@@ -799,6 +804,8 @@ class TestPartsManagement(ISMTestCase):
 		]
 
 		res = submit_procurement_orders(ro.name, parts_payload)
+		self.track("Supplier", sup_a)
+		self.track("Supplier", sup_b)
 		self.assertEqual(res["status"], "success")
 		self.assertEqual(len(res["purchase_orders"]), 1)
 		self.assertEqual(len(res["rfqs"]), 1)
@@ -832,8 +839,6 @@ class TestPartsManagement(ISMTestCase):
 
 	def test_waiting_on_parts_status_assignment_and_override(self):
 		"""Verify zero-stock parts automatically set 'Waiting on Parts', block pickup, reject override, and unblock on stock receipt."""
-		from ism.ism.doctype.repair_order.repair_order import on_stock_update_event
-
 		company = self._get_company()
 		customer = self.create_test_customer()
 		vehicle = self.create_test_vehicle(customer=customer.name)
@@ -907,8 +912,6 @@ class TestPartsManagement(ISMTestCase):
 
 	def test_on_stock_update_event_clears_waiting_on_parts(self):
 		"""Verify on_stock_update_event clears 'Waiting on Parts' when parts become available."""
-		from ism.ism.doctype.repair_order.repair_order import on_stock_update_event
-
 		company = self._get_company()
 		customer = self.create_test_customer()
 		vehicle = self.create_test_vehicle(customer=customer.name)
@@ -1007,7 +1010,7 @@ class TestPartsManagement(ISMTestCase):
 		ensure_supplier_and_link_to_item(sup_name, p_code)
 		self.track(frappe.get_doc("Supplier", sup_name))
 
-		wh = get_default_warehouse(company)
+		self.assertTrue(get_default_warehouse(company))
 		pinv = frappe.get_doc({
 			"doctype": "Purchase Invoice",
 			"company": company,
@@ -1535,21 +1538,6 @@ class TestPartsManagement(ISMTestCase):
 
 	def test_parts_endpoints_enforce_permissions_and_input_types(self):
 		"""Verify whitelisted parts APIs reject unprivileged users and malformed filter dicts."""
-		from ism.api.parts import (
-			get_default_warehouse,
-			search_service_packages,
-			quick_create_part,
-			bulk_import_parts,
-			get_component_alternates,
-			link_part_to_service_packages,
-			quick_create_service_package,
-			ensure_supplier_and_link_to_item,
-			get_repair_order_parts_stock,
-			get_item_procurement_info,
-			get_repair_order_procurement_data,
-			submit_procurement_orders,
-		)
-
 		with self.assertRaises(frappe.ValidationError):
 			get_component_alternates(item_code={"!=": ""})
 		with self.assertRaises(frappe.ValidationError):
@@ -1581,6 +1569,50 @@ class TestPartsManagement(ISMTestCase):
 					call()
 		finally:
 			frappe.set_user(orig_user)
+
+	def test_get_items_stock_qty_map_logs_and_reraises_on_db_error(self):
+		"""Verify _get_items_stock_qty_map logs and re-raises DB query errors instead of returning empty dict."""
+		with (
+			patch("ism.api.parts_stock.frappe.get_all", side_effect=RuntimeError("Simulated Bin query failure")),
+			patch("frappe.log_error") as mock_log,
+		):
+			with self.assertRaises(RuntimeError):
+				_get_items_stock_qty_map(["ERR-ITEM-001"])
+			mock_log.assert_called_once()
+
+	def test_zero_dollar_package_part_rate_preserved(self):
+		"""Verify explicit $0.00 part rates are not clobbered by Item.standard_rate across package helpers and alternates."""
+		item = self.create_test_item(
+			item_code=f"{TEST_PREFIX}ZERO_RATE_ITEM",
+			is_stock_item=0,
+			standard_rate=95.0,
+		)
+		pkg_name = f"{TEST_PREFIX}Zero Rate Pkg"
+		quick_create_service_package(package_name=pkg_name)
+		self.track("Service Package", pkg_name)
+
+		pkg = frappe.get_doc("Service Package", pkg_name)
+		_attach_package_parts(pkg, [{"item_code": item.name, "qty": 1, "rate": 0.0, "slot_number": 1}])
+		pkg.save(ignore_permissions=True)
+		pkg.reload()
+		self.assertEqual(len(pkg.items), 1)
+		self.assertEqual(flt(pkg.items[0].rate), 0.0)
+
+		pkg.items[0].rate = 45.0
+		_upsert_part_row_on_package_doc(pkg, item, slot_number=1, qty=2, rate=0.0)
+		pkg.save(ignore_permissions=True)
+		pkg.reload()
+		self.assertEqual(flt(pkg.items[0].rate), 0.0)
+
+		pkg.items[0].rate = 45.0
+		pkg.save(ignore_permissions=True)
+		link_part_to_service_packages(item.name, [pkg.name], slot_number=1, qty=1, rate=0.0)
+		pkg.reload()
+		self.assertEqual(flt(pkg.items[0].rate), 0.0)
+
+		alts = get_component_alternates(service_package=pkg.name, component_slot="Slot 1")
+		match = next(a for a in alts if a["item_code"] == item.name)
+		self.assertEqual(flt(match["rate"]), 0.0)
 
 
 

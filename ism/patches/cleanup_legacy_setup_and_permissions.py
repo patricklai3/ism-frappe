@@ -61,8 +61,12 @@ def _repair_partial_custom_docperms():
 			continue
 
 		existing_pairs = {
-			(row.role, int(row.permlevel or 0))
-			for row in frappe.get_all("Custom DocPerm", filters={"parent": dt}, fields=["role", "permlevel"])
+			(row.role, int(row.permlevel or 0), int(row.if_owner or 0))
+			for row in frappe.get_all(
+				"Custom DocPerm",
+				filters={"parent": dt},
+				fields=["role", "permlevel", "if_owner"],
+			)
 		}
 		docperms = frappe.get_all(
 			"DocPerm",
@@ -70,7 +74,7 @@ def _repair_partial_custom_docperms():
 			fields=["role", *PERM_FIELDS],
 		)
 		for perm in docperms:
-			key = (perm.role, int(perm.permlevel or 0))
+			key = (perm.role, int(perm.permlevel or 0), int(perm.if_owner or 0))
 			if key in existing_pairs:
 				continue
 			payload = {

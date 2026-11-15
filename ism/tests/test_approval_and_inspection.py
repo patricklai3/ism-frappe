@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.utils import add_days, now_datetime
+from frappe.website.serve import get_response_content
 
 from ism.api.approval import (
 	get_or_create_approval_token,
@@ -22,7 +23,7 @@ from ism.api.inspection import (
 	list_inspection_templates,
 	record_check_in_inspection,
 )
-from ism.api.sms import dispatch_sms, get_sms_unconfigured_reason
+from ism.api.sms import _is_valid_sms_webhook_url, dispatch_sms, get_sms_unconfigured_reason
 from ism.templates.pages.quote_approval import get_context as get_portal_context
 from ism.tests.base import ISMTestCase, TEST_PREFIX
 
@@ -60,9 +61,8 @@ class TestApprovalAndInspection(ISMTestCase):
 			if self._orig_sms_api_key is not None:
 				settings.sms_gateway_api_key = self._orig_sms_api_key
 			settings.save(ignore_permissions=True)
-		except Exception:
-			pass
-		super().tearDown()
+		finally:
+			super().tearDown()
 
 	def _make_ro_with_services(
 		self,
@@ -117,7 +117,7 @@ class TestApprovalAndInspection(ISMTestCase):
 			warranty_period="12 Months / 20,000 km",
 			oem_part_number="OEM-9988",
 		)
-		customer, _veh, ro = self._make_ro_with_services(
+		_customer, _veh, ro = self._make_ro_with_services(
 			services=[
 				{
 					"service_title": "Rear Caliper Rebuild",
@@ -484,3 +484,166 @@ class TestApprovalAndInspection(ISMTestCase):
 				repair_order=ro.name,
 				items=[{"idx": 1, "status": "bogus_status"}],
 			)
+
+	def test_signature_xss_rejection_private_file_and_portal_omission(self):
+		"""Verify SVG/XSS signatures are rejected, saved signatures are private Files, and portal payloads/HTML omit signature_image."""
+		_cust, _veh, ro = self._make_ro_with_services(
+			services=[
+				{
+					"service_title": "Front Rotor Service",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 150.0,
+					"labor_amount": 150.0,
+					"total_amount": 150.0,
+				},
+				{
+					"service_title": "Cabin Filter Service",
+					"status": "Pending Approval",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+					"labor_amount": 50.0,
+					"total_amount": 50.0,
+				},
+			]
+		)
+		token, _url = get_or_create_approval_token(ro.name)
+		row0 = ro.services[0].name
+		row1 = ro.services[1].name
+
+		bad_signatures = (
+			"data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+PC9zdmc+",
+			"<svg onload=alert(1)></svg>",
+			"javascript:alert(1)",
+			"https://evil.example.com/sig.png",
+		)
+		for bad_sig in bad_signatures:
+			with self.assertRaises(frappe.ValidationError):
+				submit_customer_approval(
+					token=token,
+					approvals={row0: "Approved"},
+					signer_name="XSS Tester",
+					signature_data=bad_sig,
+				)
+			with self.assertRaises(frappe.ValidationError):
+				submit_public_quote_approval(
+					token=token,
+					approvals=[{"job_id": row0, "status": "Approved"}],
+					signer_name="XSS Tester",
+					signature_data=bad_sig,
+				)
+
+		# Partial approval stores a private File and leaves row1 pending so portal renders active form + audit logs
+		partial_res = submit_public_quote_approval(
+			token=token,
+			approvals=[{"job_id": row0, "status": "Approved"}],
+			signer_name="Partial Signer",
+			signature_data=TINY_PNG_DATA_URI,
+		)
+		self.assertTrue(partial_res["success"])
+
+		ro.reload()
+		self.assertTrue(ro.signature_image)
+		self.assertTrue(ro.signature_image.startswith("/private/files/"))
+		file_meta = frappe.db.get_value(
+			"File",
+			{"file_url": ro.signature_image},
+			["name", "is_private", "attached_to_doctype", "attached_to_name"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(file_meta)
+		self.assertEqual(int(file_meta.is_private), 1)
+		self.assertEqual(file_meta.attached_to_doctype, "Repair Order")
+		self.assertEqual(file_meta.attached_to_name, ro.name)
+		self.addCleanup(
+			lambda fn=file_meta.name: frappe.db.exists("File", fn)
+			and frappe.delete_doc("File", fn, force=True, ignore_permissions=True)
+		)
+
+		partial_payload = get_public_quote_approval(token)
+		self.assertTrue(partial_payload["valid"])
+		self.assertFalse(partial_payload["already_submitted"])
+		self.assertNotIn("signature_image", partial_payload)
+		self.assertNotIn("signature_image", partial_payload["repair_order"])
+		self.assertTrue(partial_payload["approval_logs"])
+		for log_entry in partial_payload["approval_logs"]:
+			self.assertNotIn("signature_image", log_entry)
+
+		with patch.object(frappe, "form_dict", frappe._dict({"token": token})):
+			partial_html = get_response_content("quote_approval")
+		self.assertIn(ro.name, partial_html)
+		self.assertNotIn("signature_image", partial_html)
+		self.assertNotIn(ro.signature_image, partial_html)
+		self.assertNotIn("/private/files/", partial_html)
+
+		# Final approval marks already_submitted=True and keeps signature_image omitted in confirmation view
+		final_res = submit_customer_approval(
+			token=token,
+			approvals={row1: "Approved"},
+			signer_name="Final Signer",
+			signature_data=TINY_PNG_DATA_URI,
+		)
+		self.assertTrue(final_res["success"])
+
+		final_payload = get_public_quote_approval(token)
+		self.assertTrue(final_payload["valid"])
+		self.assertTrue(final_payload["already_submitted"])
+		self.assertNotIn("signature_image", final_payload)
+		self.assertNotIn("signature_image", final_payload["repair_order"])
+		self.assertTrue(final_payload["approval_logs"])
+		for log_entry in final_payload["approval_logs"]:
+			self.assertNotIn("signature_image", log_entry)
+
+		with patch.object(frappe, "form_dict", frappe._dict({"token": token})):
+			final_html = get_response_content("quote_approval")
+		self.assertIn(ro.name, final_html)
+		self.assertNotIn("signature_image", final_html)
+		self.assertNotIn(ro.signature_image, final_html)
+		self.assertNotIn("/private/files/", final_html)
+
+		template_path = frappe.get_app_path("ism", "templates", "pages", "quote_approval.html")
+		with open(template_path, encoding="utf-8") as tmpl_file:
+			tmpl_src = tmpl_file.read()
+		self.assertNotIn("signature_image", tmpl_src)
+		self.assertNotIn("<img", tmpl_src.lower())
+
+	def test_sms_webhook_url_validation_and_ssrf_guards(self):
+		"""Verify SMS webhook validator rejects plain external HTTP and link-local metadata URLs while allowing HTTPS/loopback."""
+		for blocked_url in (
+			"http://sms.example.test/send",
+			"http://169.254.169.254/latest/meta-data/",
+			"https://169.254.169.254/hook",
+			"ftp://sms.example.test/send",
+			"https://user:pass@sms.example.test/send",
+			"",
+		):
+			self.assertFalse(_is_valid_sms_webhook_url(blocked_url), msg=f"Expected blocked URL: {blocked_url}")
+
+		for allowed_url in (
+			"https://sms.example.test/send",
+			"http://127.0.0.1:8080/webhook",
+			"http://localhost:8080/webhook",
+		):
+			self.assertTrue(_is_valid_sms_webhook_url(allowed_url), msg=f"Expected allowed URL: {allowed_url}")
+
+		settings = frappe.get_single("ISM Settings")
+		settings.sms_gateway_provider = "Custom HTTP Webhook"
+		settings.sms_sender_id = "ISM-TEST"
+
+		for endpoint in ("http://sms.example.test/send", "http://169.254.169.254/hook"):
+			settings.sms_gateway_endpoint = endpoint
+			settings.save(ignore_permissions=True)
+			with patch("ism.api.sms.requests.post") as post_mock:
+				res = dispatch_sms("+14165550199", "Blocked SSRF check")
+				self.assertFalse(res["success"])
+				post_mock.assert_not_called()
+
+		settings.sms_gateway_endpoint = "http://127.0.0.1:8080/webhook"
+		settings.save(ignore_permissions=True)
+		mock_ok = MagicMock(status_code=200, text='{"message_id": "loop_1"}')
+		mock_ok.json.return_value = {"message_id": "loop_1"}
+		with patch("ism.api.sms.requests.post", return_value=mock_ok) as post_mock:
+			ok_res = dispatch_sms("+14165550199", "Loopback dev check")
+			self.assertTrue(ok_res["success"])
+			self.assertEqual(ok_res["message_id"], "loop_1")
+			post_mock.assert_called_once()

@@ -1,14 +1,29 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-from typing import List, Dict, Optional, Union, Any
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Union
 
 import frappe
+from frappe.utils import add_days, getdate
 
-from ism.scheduling.capacity import INACTIVE_WORK_STATUSES, NON_BLOCKING_ENTRY_STATUSES
-from ism.scheduling.time_utils import effective_end_time, format_timedelta, get_shop_settings, to_timedelta
+from ism.scheduling.entry_queries import (
+	build_holiday_checker,
+	fetch_blocking_entries,
+	fetch_leaves_by_employee as _get_leaves_by_employee,
+	fetch_queue_entries_for_date,
+	intervals_overlap,
+	is_employee_on_leave_for_date as _is_employee_on_leave_for_date,
+)
+from ism.scheduling.time_utils import (
+	calculate_working_span,
+	effective_end_time,
+	format_timedelta,
+	get_shop_settings,
+	normalize_date,
+	normalize_time,
+	to_timedelta,
+)
 
 
 @frappe.whitelist()
@@ -31,46 +46,26 @@ def get_active_technicians(date: Optional[Union[str, date, datetime]] = None) ->
 		order_by="employee_name asc, name asc",
 	)
 
+	target_date = (normalize_date(date) or str(date)) if date else None
+	leaves_by_emp: Dict[str, List[Dict[str, Any]]] = {}
+	if target_date and employees:
+		emp_ids = [emp["name"] for emp in employees]
+		leaves_by_emp = _get_leaves_by_employee(emp_ids, target_date, target_date)
+
 	results = []
-	target_date = str(date) if date else None
-
-	# Fetch approved leave applications for target_date if date provided
-	leave_map = {}
-	if target_date and frappe.db.exists("DocType", "Leave Application"):
-		leaves = frappe.get_all(
-			"Leave Application",
-			filters=[
-				["status", "=", "Approved"],
-				["docstatus", "=", 1],
-				["from_date", "<=", target_date],
-				["to_date", ">=", target_date],
-			],
-			fields=["employee", "half_day", "half_day_date"],
-		)
-		for l in leaves:
-			leave_map[l.employee] = l
-
 	for emp in employees:
 		emp_id = emp["name"]
-		leave_info = leave_map.get(emp_id)
-		is_on_leave = False
-		is_half_day = False
-
-		if leave_info:
-			is_half_day = bool(leave_info.get("half_day"))
-			half_day_date = str(leave_info.get("half_day_date")) if leave_info.get("half_day_date") else None
-			if is_half_day:
-				if half_day_date == target_date:
-					is_on_leave = True
-			else:
-				is_on_leave = True
-
+		leave_res = (
+			_is_employee_on_leave_for_date(leaves_by_emp.get(emp_id, ()), target_date)
+			if target_date
+			else {"on_leave": False, "half_day": False}
+		)
 		results.append({
 			"employee": emp_id,
 			"employee_name": emp.get("employee_name") or emp_id,
 			"designation": emp.get("designation") or designation,
-			"on_leave": is_on_leave,
-			"half_day": is_half_day,
+			"on_leave": leave_res["on_leave"],
+			"half_day": leave_res["half_day"],
 		})
 
 	return results
@@ -83,85 +78,36 @@ def check_employee_leave(
 	duration_minutes: Union[int, float],
 ) -> Dict[str, Any]:
 	"""
-	Internal helper to check if an employee is on leave during a specific slot on date.
+	Internal helper to check if an employee is on leave during any active working segment of a slot.
 	"""
-	if not frappe.db.exists("DocType", "Leave Application"):
+	target_date = (normalize_date(date) or str(date)) if date else None
+	if not target_date or not employee or not frappe.db.exists("DocType", "Leave Application"):
 		return {"on_leave": False, "half_day": False}
 
-	target_date = str(date) if date else None
-	if not target_date or not employee:
+	norm_start = normalize_time(start_time) if start_time is not None else None
+	duration_val = float(duration_minutes or 0)
+	if norm_start is not None and duration_val > 0:
+		settings = get_shop_settings()
+		holiday_fn = build_holiday_checker(settings.get("holiday_list"), target_date)
+		span = calculate_working_span(target_date, norm_start, duration_val, is_holiday_fn=holiday_fn)
+		seg_dates = list(dict.fromkeys([s["date"] for s in span["segments"]] or [target_date]))
+	else:
+		seg_dates = [target_date]
+
+	emp_leaves = _get_leaves_by_employee([employee], min(seg_dates), max(seg_dates)).get(employee, [])
+	if not emp_leaves:
 		return {"on_leave": False, "half_day": False}
 
-	leaves = frappe.get_all(
-		"Leave Application",
-		filters=[
-			["employee", "=", employee],
-			["status", "=", "Approved"],
-			["docstatus", "=", 1],
-			["from_date", "<=", target_date],
-			["to_date", ">=", target_date],
-		],
-		fields=["name", "half_day", "half_day_date"],
-	)
+	half_day_hit = False
+	for seg_d in seg_dates:
+		leave_res = _is_employee_on_leave_for_date(emp_leaves, seg_d)
+		if leave_res["on_leave"]:
+			if not leave_res["half_day"]:
+				return {"on_leave": True, "half_day": False}
+			half_day_hit = True
 
-	if not leaves:
-		return {"on_leave": False, "half_day": False}
-
-	for l in leaves:
-		is_half_day = bool(l.get("half_day"))
-		half_day_date = str(l.get("half_day_date")) if l.get("half_day_date") else None
-
-		if not is_half_day:
-			return {"on_leave": True, "half_day": False}
-
-		if half_day_date == target_date:
-			return {"on_leave": True, "half_day": True}
-
-	return {"on_leave": False, "half_day": False}
-
-
-def _get_leaves_by_employee(
-	employees: List[str],
-	min_date: str,
-	max_date: str,
-) -> Dict[str, List[Dict[str, Any]]]:
-	"""Batch fetch approved Leave Applications overlapping [min_date, max_date] for given employees."""
-	if not employees or not frappe.db.exists("DocType", "Leave Application"):
-		return {}
-
-	leaves = frappe.get_all(
-		"Leave Application",
-		filters=[
-			["employee", "in", employees],
-			["status", "=", "Approved"],
-			["docstatus", "=", 1],
-			["from_date", "<=", max_date],
-			["to_date", ">=", min_date],
-		],
-		fields=["employee", "from_date", "to_date", "half_day", "half_day_date"],
-	)
-	leaves_by_emp: Dict[str, List[Dict[str, Any]]] = {}
-	for leave in leaves:
-		leaves_by_emp.setdefault(leave["employee"], []).append(leave)
-	return leaves_by_emp
-
-
-def _is_employee_on_leave_for_date(
-	emp_leaves: List[Dict[str, Any]],
-	target_date: str,
-) -> Dict[str, Any]:
-	"""Check whether pre-fetched leave rows cover target_date."""
-	for leave in emp_leaves:
-		from_date = str(leave.get("from_date")) if leave.get("from_date") else ""
-		to_date = str(leave.get("to_date")) if leave.get("to_date") else ""
-		if from_date and to_date and not (from_date <= target_date <= to_date):
-			continue
-		is_half_day = bool(leave.get("half_day"))
-		half_day_date = str(leave.get("half_day_date")) if leave.get("half_day_date") else None
-		if not is_half_day:
-			return {"on_leave": True, "half_day": False}
-		if half_day_date == target_date:
-			return {"on_leave": True, "half_day": True}
+	if half_day_hit:
+		return {"on_leave": True, "half_day": True}
 	return {"on_leave": False, "half_day": False}
 
 
@@ -190,7 +136,8 @@ def get_technician_pool_availability(
 			"is_available": True,
 		}
 
-	target_date = str(date)
+	target_date = normalize_date(date) or str(date)
+	norm_start = normalize_time(start_time) or start_time
 	technicians = get_active_technicians(date=target_date)
 	total_techs = len(technicians)
 	if total_techs == 0:
@@ -203,28 +150,20 @@ def get_technician_pool_availability(
 			"is_available": False,
 		}
 
-	from frappe.utils import add_days, getdate
-	from ism.api.scheduling import calculate_working_span
-
-	span = calculate_working_span(date, start_time, duration_minutes)
+	holiday_fn = build_holiday_checker(
+		settings.get("holiday_list"),
+		add_days(getdate(target_date), -30),
+	)
+	span = calculate_working_span(target_date, norm_start, duration_minutes, is_holiday_fn=holiday_fn)
 	seg_dates = [s["date"] for s in span["segments"]] or [target_date]
-	min_date = str(add_days(getdate(min(seg_dates)), -30))
-	max_date = max(seg_dates)
 
 	tech_ids = [t["employee"] for t in technicians]
 	leaves_by_emp = _get_leaves_by_employee(tech_ids, min(seg_dates), max(seg_dates))
-	filters = [
-		["assigned_technician", "in", tech_ids],
-		["scheduled_date", "<=", max_date],
-		["scheduled_date", ">=", min_date],
-		["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
-	]
-	if exclude_entry:
-		filters.append(["name", "!=", exclude_entry])
-
-	all_entries = frappe.get_all(
-		"Schedule Entry",
-		filters=filters,
+	all_entries = fetch_blocking_entries(
+		min(seg_dates),
+		max(seg_dates),
+		assigned_technicians=tech_ids,
+		exclude_entry=exclude_entry,
 		fields=["name", "assigned_technician", "scheduled_date", "scheduled_time", "estimated_duration"],
 	)
 
@@ -234,7 +173,12 @@ def get_technician_pool_availability(
 		if not tid:
 			continue
 		e_dur = ent.get("estimated_duration") or 0
-		e_span = calculate_working_span(ent.scheduled_date, ent.scheduled_time, e_dur)
+		e_span = calculate_working_span(
+			ent.get("scheduled_date"),
+			ent.get("scheduled_time"),
+			e_dur,
+			is_holiday_fn=holiday_fn,
+		)
 		tech_segs = entry_segments_by_tech.setdefault(tid, [])
 		for s in e_span["segments"]:
 			tech_segs.append({
@@ -253,7 +197,6 @@ def get_technician_pool_availability(
 		seg_date = prop_seg["date"]
 		seg_start = to_timedelta(prop_seg["start_time"])
 		seg_end = to_timedelta(prop_seg["end_time"])
-		seg_dur = prop_seg["duration"]
 
 		on_duty_in_seg = []
 		on_leave_in_seg = 0
@@ -268,7 +211,7 @@ def get_technician_pool_availability(
 		occupied_in_seg = set()
 		for emp_id in on_duty_in_seg:
 			for ts in entry_segments_by_tech.get(emp_id, ()):
-				if ts["date"] == seg_date and max(seg_start, ts["start"]) < min(seg_end, ts["end"]):
+				if ts["date"] == seg_date and intervals_overlap(seg_start, seg_end, ts["start"], ts["end"]):
 					occupied_in_seg.add(emp_id)
 					break
 
@@ -347,15 +290,18 @@ def check_technician_availability(
 			"conflicts": [],
 		}
 
-	from frappe.utils import add_days, getdate
-	from ism.api.scheduling import calculate_working_span
-
-	span = calculate_working_span(date, start_time, duration_minutes)
-	seg_dates = [s["date"] for s in span["segments"]] or [str(date)]
+	target_date = normalize_date(date) or str(date)
+	norm_start = normalize_time(start_time) or start_time
+	holiday_fn = build_holiday_checker(
+		settings.get("holiday_list"),
+		add_days(getdate(target_date), -30),
+	)
+	span = calculate_working_span(target_date, norm_start, duration_minutes, is_holiday_fn=holiday_fn)
+	seg_dates = [s["date"] for s in span["segments"]] or [target_date]
 	emp_leaves = _get_leaves_by_employee([employee], min(seg_dates), max(seg_dates)).get(employee, [])
 
-	for seg in span["segments"]:
-		leave_res = _is_employee_on_leave_for_date(emp_leaves, str(seg["date"]))
+	for seg_d in dict.fromkeys(seg_dates):
+		leave_res = _is_employee_on_leave_for_date(emp_leaves, str(seg_d))
 		if leave_res["on_leave"]:
 			return {
 				"is_available": False,
@@ -365,21 +311,11 @@ def check_technician_availability(
 				"conflicts": [],
 			}
 
-	min_date = str(add_days(getdate(min(seg_dates)), -30))
-	max_date = max(seg_dates)
-
-	filters = [
-		["assigned_technician", "=", employee],
-		["scheduled_date", "<=", max_date],
-		["scheduled_date", ">=", min_date],
-		["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
-	]
-	if exclude_entry:
-		filters.append(["name", "!=", exclude_entry])
-
-	existing_entries = frappe.get_all(
-		"Schedule Entry",
-		filters=filters,
+	existing_entries = fetch_blocking_entries(
+		min(seg_dates),
+		max(seg_dates),
+		assigned_technician=employee,
+		exclude_entry=exclude_entry,
 		fields=[
 			"name",
 			"scheduled_date",
@@ -396,7 +332,12 @@ def check_technician_availability(
 	conflicts = []
 	for entry in existing_entries:
 		ex_dur = entry.get("estimated_duration") or 0
-		ex_span = calculate_working_span(entry.scheduled_date, entry.scheduled_time, ex_dur)
+		ex_span = calculate_working_span(
+			entry.get("scheduled_date"),
+			entry.get("scheduled_time"),
+			ex_dur,
+			is_holiday_fn=holiday_fn,
+		)
 		conflict_found = False
 		for prop_seg in span["segments"]:
 			p_date = prop_seg["date"]
@@ -406,7 +347,7 @@ def check_technician_availability(
 				if ex_seg["date"] == p_date:
 					e_start = to_timedelta(ex_seg["start_time"])
 					e_end = to_timedelta(ex_seg["end_time"])
-					if max(p_start, e_start) < min(p_end, e_end):
+					if intervals_overlap(p_start, p_end, e_start, e_end):
 						conflicts.append({
 							"name": entry.get("name"),
 							"scheduled_date": str(entry.get("scheduled_date")),
@@ -462,7 +403,11 @@ def _build_queue_from_entries(
 	for entry in entries:
 		st_td = to_timedelta(entry.get("scheduled_time"))
 		dur = entry.get("estimated_duration") or 0
-		eff_end_td = effective_end_time(st_td, dur, bs_td, be_td)
+		eff_end_td = (
+			to_timedelta(entry["_day_end_time"])
+			if entry.get("_day_end_time")
+			else effective_end_time(st_td, dur, bs_td, be_td)
+		)
 
 		total_minutes += dur
 		if entry.get("status") == "Completed":
@@ -536,29 +481,17 @@ def get_technician_queue(employee: str, date: Union[str, date, datetime]) -> Dic
 	bs_td = settings.get("break_start")
 	be_td = settings.get("break_end")
 
-	target_date = str(date)
+	target_date = normalize_date(date) or str(date)
 	emp_name = frappe.db.get_value("Employee", employee, "employee_name") or employee
 	leave_res = check_employee_leave(employee, target_date, op_start, 0)
-
-	entries = frappe.get_list(
-		"Schedule Entry",
-		filters=[
-			["assigned_technician", "=", employee],
-			["scheduled_date", "=", target_date],
-			["status", "not in", list(INACTIVE_WORK_STATUSES)],
-		],
-		fields=[
-			"name",
-			"scheduled_time",
-			"estimated_duration",
-			"service_bay",
-			"customer",
-			"repair_vehicle",
-			"items_summary",
-			"status",
-			"repair_order",
-		],
-		order_by="scheduled_time asc",
+	holiday_fn = build_holiday_checker(
+		settings.get("holiday_list"),
+		add_days(getdate(target_date), -30),
+	)
+	entries = fetch_queue_entries_for_date(
+		target_date,
+		employee=employee,
+		is_holiday_fn=holiday_fn,
 	)
 
 	return _build_queue_from_entries(
@@ -586,7 +519,7 @@ def get_daily_technician_overview(date: Union[str, date, datetime]) -> Dict[str,
 	bs_td = settings.get("break_start")
 	be_td = settings.get("break_end")
 
-	target_date = str(date)
+	target_date = normalize_date(date) or str(date)
 
 	operating_minutes = int((op_end - op_start).total_seconds() // 60)
 	if bs_td and be_td and be_td > bs_td:
@@ -594,26 +527,11 @@ def get_daily_technician_overview(date: Union[str, date, datetime]) -> Dict[str,
 	operating_minutes = max(1, operating_minutes)
 
 	active_techs = get_active_technicians(date=target_date)
-	day_entries = frappe.get_list(
-		"Schedule Entry",
-		filters=[
-			["scheduled_date", "=", target_date],
-			["status", "not in", list(INACTIVE_WORK_STATUSES)],
-		],
-		fields=[
-			"name",
-			"assigned_technician",
-			"scheduled_time",
-			"estimated_duration",
-			"service_bay",
-			"customer",
-			"repair_vehicle",
-			"items_summary",
-			"status",
-			"repair_order",
-		],
-		order_by="scheduled_time asc",
+	holiday_fn = build_holiday_checker(
+		settings.get("holiday_list"),
+		add_days(getdate(target_date), -30),
 	)
+	day_entries = fetch_queue_entries_for_date(target_date, is_holiday_fn=holiday_fn)
 
 	entries_by_tech: Dict[str, List[Dict[str, Any]]] = {}
 	unassigned = []

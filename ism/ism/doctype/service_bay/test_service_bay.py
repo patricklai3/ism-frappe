@@ -92,6 +92,7 @@ class TestServiceBay(ISMTestCase):
 			"is_active": 1,
 			"equipment": [{"equipment_tag": test_tag_name}],
 		}).insert(ignore_permissions=True)
+		self.track(bay)
 
 		# Attempting to delete tag while assigned to bay should raise ValidationError
 		with self.assertRaises(frappe.ValidationError):
@@ -131,3 +132,32 @@ class TestServiceBay(ISMTestCase):
 
 		frappe.delete_doc("Service Bay", self.bay_alpha, force=True, ignore_permissions=True)
 		self.assertFalse(frappe.db.exists("Service Bay", self.bay_alpha))
+
+	def test_service_bay_deletion_blocked_with_confirmed_schedule_entry(self):
+		"""Verify Service Bay cannot be deleted when it has Confirmed schedule entries."""
+		bay = frappe.get_doc({
+			"doctype": "Service Bay",
+			"bay_name": self.bay_beta,
+			"is_active": 1,
+		}).insert(ignore_permissions=True)
+		self.track(bay)
+
+		se = frappe.get_doc({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"service_bay": self.bay_beta,
+			"scheduled_date": frappe.utils.today(),
+			"scheduled_time": "11:00:00",
+			"estimated_duration": 60,
+			"status": "Confirmed",
+		}).insert(ignore_permissions=True)
+		self.track(se)
+
+		with self.assertRaises(frappe.ValidationError):
+			frappe.delete_doc("Service Bay", self.bay_beta, force=True, ignore_permissions=True)
+
+		se.status = "Cancelled"
+		se.save(ignore_permissions=True)
+
+		frappe.delete_doc("Service Bay", self.bay_beta, force=True, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("Service Bay", self.bay_beta))

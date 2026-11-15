@@ -5,9 +5,16 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import frappe
+from frappe.query_builder.functions import Coalesce
 from frappe.utils import add_days, cint, getdate
 
-from ism.scheduling.time_utils import effective_end_time, format_timedelta, get_shop_settings, to_timedelta
+from ism.scheduling.time_utils import (
+	calculate_working_span,
+	effective_end_time,
+	format_timedelta,
+	get_shop_settings,
+	to_timedelta,
+)
 
 # Entries in these states release both bay and technician capacity.
 NON_BLOCKING_ENTRY_STATUSES: Tuple[str, ...] = ("Cancelled", "Completed", "No Show")
@@ -21,9 +28,15 @@ def parse_required_tags(required_tags: Optional[Union[str, List[str]]]) -> List[
 	if isinstance(required_tags, str):
 		try:
 			parsed = frappe.parse_json(required_tags)
-			return list(parsed) if parsed else []
-		except Exception:
+			if isinstance(parsed, (list, tuple, set)):
+				return [str(t).strip() for t in parsed if str(t).strip()]
+			if parsed:
+				return [str(parsed).strip()]
+			return []
+		except (ValueError, TypeError):
 			return [t.strip() for t in required_tags.split(",") if t.strip()]
+	if isinstance(required_tags, (list, tuple, set)):
+		return [str(t).strip() for t in required_tags if str(t).strip()]
 	return list(required_tags) if required_tags else []
 
 
@@ -175,27 +188,65 @@ class ShopCapacityWindow:
 		start_str: str,
 		end_str: str,
 	) -> Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]]:
-		entries = frappe.get_all(
-			"Schedule Entry",
-			filters=[
-				["scheduled_date", ">=", start_str],
-				["scheduled_date", "<=", end_str],
-				["status", "not in", list(NON_BLOCKING_ENTRY_STATUSES)],
-			],
-			fields=["scheduled_date", "service_bay", "assigned_technician", "scheduled_time", "estimated_duration"],
-		)
+		se = frappe.qb.DocType("Schedule Entry")
+		entries = (
+			frappe.qb.from_(se)
+			.select(
+				se.scheduled_date,
+				se.scheduled_time,
+				se.completion_date,
+				se.completion_time,
+				se.estimated_duration,
+				se.service_bay,
+				se.assigned_technician,
+			)
+			.where(se.scheduled_date <= end_str)
+			.where(Coalesce(se.completion_date, se.scheduled_date) >= start_str)
+			.where(se.status.notin(list(NON_BLOCKING_ENTRY_STATUSES)))
+		).run(as_dict=True)
+
 		by_date: Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]] = {}
 		for entry in entries:
-			dt_str = str(entry.get("scheduled_date"))
+			if not entry.get("scheduled_date"):
+				continue
+			s_dt = getdate(entry["scheduled_date"])
 			ex_start = to_timedelta(entry.get("scheduled_time"))
 			ex_duration = entry.get("estimated_duration") or 0
-			ex_end = effective_end_time(ex_start, ex_duration, self.bs_td, self.be_td)
-			by_date.setdefault(dt_str, []).append((
-				ex_start,
-				ex_end,
-				entry.get("service_bay"),
-				entry.get("assigned_technician"),
-			))
+			comp_date_raw = entry.get("completion_date")
+			comp_time_raw = entry.get("completion_time")
+
+			if comp_date_raw and comp_time_raw is not None and str(comp_time_raw).strip() != "":
+				c_dt = getdate(comp_date_raw)
+				c_td = to_timedelta(comp_time_raw)
+				if c_dt == s_dt and c_td <= ex_start:
+					c_td = effective_end_time(ex_start, ex_duration, self.bs_td, self.be_td)
+			else:
+				eff_end = effective_end_time(ex_start, ex_duration, self.bs_td, self.be_td)
+				if self.op_start >= self.op_end or eff_end <= self.op_end:
+					c_dt = s_dt
+					c_td = eff_end
+				else:
+					span = calculate_working_span(
+						s_dt,
+						ex_start,
+						ex_duration,
+						is_holiday_fn=self.is_holiday if self.skip_holidays else None,
+					)
+					c_dt = getdate(span["completion_date"])
+					c_td = to_timedelta(span["completion_time"])
+
+			bay = entry.get("service_bay")
+			tech = entry.get("assigned_technician")
+			curr_dt = max(s_dt, self.start_dt)
+			last_dt = min(c_dt, self.end_dt)
+			while curr_dt <= last_dt:
+				dt_key = str(curr_dt)
+				if not (self.skip_holidays and dt_key in self.holidays):
+					day_start = ex_start if curr_dt == s_dt else self.op_start
+					day_end = c_td if curr_dt == c_dt else self.op_end
+					if day_end > day_start:
+						by_date.setdefault(dt_key, []).append((day_start, day_end, bay, tech))
+				curr_dt = add_days(curr_dt, 1)
 		return by_date
 
 	def is_holiday(self, target_date: Union[str, date, datetime]) -> bool:

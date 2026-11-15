@@ -2,11 +2,12 @@
 # For license information, please see license.txt
 
 import json
+import math
 from typing import Any, Dict, List, Optional, Union
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt
+from frappe.utils import flt
 
 from ism.scheduling.estimation_light import (
 	DEFAULT_SIGMA,
@@ -14,6 +15,17 @@ from ism.scheduling.estimation_light import (
 	estimate_total_duration,
 	get_sigma_for_item,
 )
+
+_MIN_PERCENTILE = 0.50
+_MAX_PERCENTILE = 1.0
+_MIN_SIGMA = 0.01
+_MAX_SIGMA = 2.0
+
+
+def _ensure_authenticated_estimation_user() -> None:
+	"""Deny anonymous Guest calls on whitelisted estimation endpoints."""
+	if not frappe.session.user or frappe.session.user == "Guest":
+		frappe.throw(_("Authentication is required to estimate repair durations."), frappe.PermissionError)
 
 
 def _get_ism_settings():
@@ -26,9 +38,186 @@ def _get_ism_settings():
 		return None
 
 
+def _parse_json_value(raw: Any, *, allow_csv: bool = False) -> Any:
+	"""Parse JSON string payloads, optionally falling back to comma-separated tokens."""
+	if not isinstance(raw, str):
+		return raw
+	stripped = raw.strip()
+	if not stripped:
+		return []
+	try:
+		return frappe.parse_json(stripped)
+	except Exception:
+		try:
+			return json.loads(stripped)
+		except Exception:
+			if allow_csv and not stripped.startswith(("[", "{")):
+				return [token.strip() for token in stripped.split(",") if token.strip()]
+			if stripped.startswith(("[", "{")):
+				frappe.throw(_("Invalid JSON format in estimation payload."), frappe.ValidationError)
+			return []
+
+
+def _parse_numeric(
+	value: Any,
+	*,
+	label: str,
+	as_int: bool = False,
+	min_val: Optional[float] = None,
+	max_val: Optional[float] = None,
+	min_exclusive: bool = False,
+	max_exclusive: bool = False,
+	scale_percent: bool = False,
+) -> Union[int, float]:
+	"""Strictly parse a finite numeric value (rejecting booleans) and enforce bounds."""
+	if isinstance(value, bool):
+		frappe.throw(_("{0} cannot be a boolean value.").format(label), frappe.ValidationError)
+	try:
+		num = float(value)
+	except (ValueError, TypeError):
+		frappe.throw(_("Invalid numeric value for {0}: {1}").format(label, value), frappe.ValidationError)
+
+	if not math.isfinite(num):
+		frappe.throw(_("{0} must be a finite number.").format(label), frappe.ValidationError)
+
+	if scale_percent and num > 1.0:
+		num = num / 100.0
+
+	if min_val is not None:
+		too_small = num <= min_val if min_exclusive else num < min_val
+		if too_small:
+			op = ">" if min_exclusive else ">="
+			frappe.throw(_("{0} must be {1} {2}.").format(label, op, min_val), frappe.ValidationError)
+
+	if max_val is not None:
+		too_large = num >= max_val if max_exclusive else num > max_val
+		if too_large:
+			op = "<" if max_exclusive else "<="
+			frappe.throw(_("{0} must be {1} {2}.").format(label, op, max_val), frappe.ValidationError)
+
+	return int(num) if as_int else num
+
+
+def _get_numeric_setting(
+	settings,
+	fieldname: str,
+	default: Union[int, float],
+	*,
+	as_int: bool = False,
+	min_val: Optional[float] = None,
+	max_val: Optional[float] = None,
+	min_exclusive: bool = False,
+	max_exclusive: bool = False,
+	scale_percent: bool = False,
+) -> Union[int, float]:
+	"""Read and validate a numeric setting from ISM Settings, returning default if unset/invalid."""
+	val = getattr(settings, fieldname, None) if settings else None
+	if val is None or val == "":
+		return default
+	try:
+		return _parse_numeric(
+			val,
+			label=fieldname,
+			as_int=as_int,
+			min_val=min_val,
+			max_val=max_val,
+			min_exclusive=min_exclusive,
+			max_exclusive=max_exclusive,
+			scale_percent=scale_percent,
+		)
+	except frappe.ValidationError:
+		return default
+
+
+def _parse_bool_flag(value: Any, default: bool = False) -> bool:
+	if value is None:
+		return default
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, int):
+		return bool(value)
+	if isinstance(value, str):
+		return value.strip().lower() in ("1", "true", "yes", "on")
+	frappe.throw(_("Invalid boolean flag in estimation options."), frappe.ValidationError)
+
+
+def _resolve_estimation_options(settings, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+	"""Resolve and validate shared estimation kwargs against ISM Settings defaults."""
+	raw_pct = kwargs.get("percentile")
+	if raw_pct is not None and raw_pct != "":
+		percentile = float(
+			_parse_numeric(
+				raw_pct,
+				label="percentile",
+				min_val=_MIN_PERCENTILE,
+				max_val=_MAX_PERCENTILE,
+				max_exclusive=True,
+				scale_percent=True,
+			)
+		)
+	else:
+		percentile = float(
+			_get_numeric_setting(
+				settings,
+				"estimation_percentile",
+				0.80,
+				min_val=_MIN_PERCENTILE,
+				max_val=_MAX_PERCENTILE,
+				max_exclusive=True,
+				scale_percent=True,
+			)
+		)
+
+	raw_buf = kwargs.get("buffer_padding")
+	if raw_buf is None:
+		raw_buf = kwargs.get("buffer_padding_minutes")
+	if raw_buf is not None and raw_buf != "":
+		buffer_padding = int(_parse_numeric(raw_buf, label="buffer_padding", as_int=True, min_val=0))
+	else:
+		buffer_padding = int(
+			_get_numeric_setting(settings, "buffer_padding_minutes", 0, as_int=True, min_val=0)
+		)
+
+	settings_sigma = float(
+		_get_numeric_setting(settings, "estimation_sigma", DEFAULT_SIGMA, min_val=_MIN_SIGMA, max_val=_MAX_SIGMA)
+	)
+	raw_sigma = kwargs.get("sigma")
+	if raw_sigma is not None and raw_sigma != "":
+		sigma_override: Optional[float] = float(
+			_parse_numeric(raw_sigma, label="sigma", min_val=_MIN_SIGMA, max_val=_MAX_SIGMA)
+		)
+		default_sigma = sigma_override
+	else:
+		sigma_override = None
+		default_sigma = settings_sigma
+
+	raw_fallback = kwargs.get("fallback_frt")
+	if raw_fallback is not None and raw_fallback != "":
+		fallback_frt: Optional[float] = float(
+			_parse_numeric(raw_fallback, label="fallback_frt", min_val=0.0)
+		)
+	else:
+		fallback_frt = None
+
+	default_diag = float(
+		_get_numeric_setting(settings, "default_diagnostic_duration", 60.0, min_val=0.0, min_exclusive=True)
+	)
+	skip_missing = _parse_bool_flag(kwargs.get("skip_missing", False), default=False)
+
+	return {
+		"percentile": percentile,
+		"buffer_padding": buffer_padding,
+		"sigma_override": sigma_override,
+		"default_sigma": default_sigma,
+		"fallback_frt": fallback_frt,
+		"default_diagnostic": default_diag,
+		"skip_missing": skip_missing,
+	}
+
+
 def _prefetch_items_meta(item_codes: List[str]) -> Dict[str, Dict[str, Any]]:
 	"""Batch-load item_group and optional custom_frt for a list of item codes."""
-	unique_codes = list({str(c).strip() for c in item_codes if c})
+	unique_codes = list({str(c).strip() for c in item_codes if isinstance(c, str) and c.strip()})
 	if not unique_codes or not frappe.db.exists("DocType", "Item"):
 		return {}
 
@@ -62,222 +251,106 @@ def _extract_part_item_codes(parts_raw: Any) -> List[str]:
 	"""Extract item codes from JSON string, list of dicts, or child documents."""
 	if not parts_raw:
 		return []
-	parsed = parts_raw
-	if isinstance(parts_raw, str):
-		try:
-			parsed = frappe.parse_json(parts_raw)
-		except Exception:
-			try:
-				parsed = json.loads(parts_raw)
-			except Exception:
-				return []
+	parsed = _parse_json_value(parts_raw, allow_csv=False) if isinstance(parts_raw, str) else parts_raw
 	if not isinstance(parsed, (list, tuple)):
 		return []
 	codes: List[str] = []
 	for entry in parsed:
 		code = entry.get("item_code") if isinstance(entry, dict) else getattr(entry, "item_code", None)
-		if code:
-			codes.append(str(code).strip())
+		if isinstance(code, str) and code.strip():
+			codes.append(code.strip())
 	return codes
 
 
-def _get_setting_percentile(settings, default: float = 0.80) -> float:
-	val = getattr(settings, "estimation_percentile", None)
-	if val is None or val == "":
-		return default
-	try:
-		p = float(val)
-		if p > 1.0:
-			p = p / 100.0
-		if 0.50 <= p <= 0.999:
-			return p
-	except (ValueError, TypeError):
-		pass
-	return default
+def _estimate_operations_core(
+	operations: List[Dict[str, float]],
+	*,
+	percentile: float,
+	buffer_padding: int,
+) -> Dict[str, Any]:
+	"""Run Fenton-Wilkinson summation + buffer over pre-resolved operations."""
+	if not operations:
+		return {
+			"total_duration_minutes": 0,
+			"p_pure": 0,
+			"buffer_padding": buffer_padding,
+			"operations_count": 0,
+		}
+
+	p_pure = estimate_total_duration(operations, percentile=percentile)
+	return {
+		"total_duration_minutes": p_pure + buffer_padding,
+		"p_pure": p_pure,
+		"buffer_padding": buffer_padding,
+		"operations_count": len(operations),
+	}
 
 
-def _get_setting_sigma(settings, default: float = DEFAULT_SIGMA) -> float:
-	val = getattr(settings, "estimation_sigma", None)
-	if val is None or val == "":
-		return default
-	try:
-		s = float(val)
-		if 0.05 <= s <= 1.0:
-			return s
-	except (ValueError, TypeError):
-		pass
-	return default
+def _resolve_explicit_frt_minutes(source: Dict[str, Any], allow_qty_alias: bool = False) -> Optional[float]:
+	"""Resolve explicit flat rate time in minutes from minute or hour keys, rejecting booleans."""
+	for min_key in ("flat_rate_minutes", "frt_minutes"):
+		if source.get(min_key) is not None and source.get(min_key) != "":
+			return float(_parse_numeric(source[min_key], label=min_key, min_val=0.0))
 
+	hour_keys = ("flat_rate_hours", "frt_hours", "custom_frt", "qty") if allow_qty_alias else (
+		"custom_frt",
+		"flat_rate_hours",
+	)
+	for hr_key in hour_keys:
+		if source.get(hr_key) is not None and source.get(hr_key) != "":
+			return float(_parse_numeric(source[hr_key], label=hr_key, min_val=0.0)) * 60.0
 
-def _get_setting_buffer(settings, default: int = 0) -> int:
-	val = getattr(settings, "buffer_padding_minutes", None)
-	if val is None or val == "":
-		return default
-	try:
-		b = int(float(val))
-		return max(0, b)
-	except (ValueError, TypeError):
-		return default
-
-
-def _get_setting_default_diagnostic(settings, default: float = 60.0) -> float:
-	val = getattr(settings, "default_diagnostic_duration", None)
-	if val is None or val == "":
-		return default
-	try:
-		d = float(val)
-		return d if d > 0 else default
-	except (ValueError, TypeError):
-		return default
-
-
-def _get_frt(item_code: str, fallback: Optional[float] = None) -> Optional[float]:
-	"""Safely retrieve FRT in MINUTES from Item DocType.
-
-	Item.custom_frt is stored in HOURS (e.g. 1.0 hour, 1.5 hours).
-	Returns FRT in MINUTES (e.g. 60.0 minutes, 90.0 minutes).
-	"""
-	if not item_code:
-		return fallback
-
-	if frappe.db.has_column("Item", "custom_frt"):
-		if frappe.db.exists("Item", item_code):
-			frt = frappe.db.get_value("Item", item_code, "custom_frt")
-			if frt is not None:
-				try:
-					val = float(frt)
-					if val > 0:
-						return val * 60.0
-				except (ValueError, TypeError):
-					pass
-
-	return fallback
+	return None
 
 
 @frappe.whitelist()
 def get_estimate(item_code: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-	"""Get risk-adjusted duration estimate for a single operation.
-
-	Args:
-		item_code: Item code to look up in Frappe database.
-		**kwargs:
-			- fallback_frt: Default FRT in minutes if item/custom_frt missing.
-			- flat_rate_minutes / frt_minutes: Explicit FRT in minutes.
-			- custom_frt / flat_rate_hours: Explicit FRT in hours.
-			- sigma: Custom sigma override.
-			- percentile: Target percentile (0.50 to 0.99, or 50 to 99).
-			- buffer_padding / buffer_padding_minutes: Padding in minutes override.
-
-	Returns:
-		Dict with:
-			- duration_minutes: int (p_pure + buffer_padding, or 0)
-			- p_pure: int (pure log-normal estimate)
-			- buffer_padding: int
-			- percentile: float
-			- sigma: float
-	"""
-	frappe.has_permission("Item", "read", throw=True)
+	"""Get risk-adjusted duration estimate for a single operation."""
+	_ensure_authenticated_estimation_user()
 	if item_code is not None and not isinstance(item_code, str):
-		frappe.throw(frappe._("Invalid item_code identifier."), frappe.ValidationError)
+		frappe.throw(_("Invalid item_code identifier."), frappe.ValidationError)
+
+	clean_code = item_code.strip() if isinstance(item_code, str) and item_code.strip() else None
+	if clean_code:
+		frappe.has_permission("Item", "read", throw=True)
+
 	settings = _get_ism_settings()
+	opts = _resolve_estimation_options(settings, kwargs)
+	items_meta = _prefetch_items_meta([clean_code]) if clean_code else {}
+	meta = items_meta.get(clean_code) if clean_code else None
 
-	# Resolve percentile
-	percentile = kwargs.get("percentile")
-	if percentile is not None and percentile != "":
-		try:
-			p = float(percentile)
-			if p > 1.0:
-				p = p / 100.0
-			percentile = p
-		except (ValueError, TypeError):
-			percentile = _get_setting_percentile(settings)
-	else:
-		percentile = _get_setting_percentile(settings)
-
-	# Resolve buffer padding
-	buffer_padding = kwargs.get("buffer_padding")
-	if buffer_padding is None:
-		buffer_padding = kwargs.get("buffer_padding_minutes")
-	if buffer_padding is not None and buffer_padding != "":
-		try:
-			buffer_padding = max(0, int(float(buffer_padding)))
-		except (ValueError, TypeError):
-			buffer_padding = _get_setting_buffer(settings)
-	else:
-		buffer_padding = _get_setting_buffer(settings)
-
-	# Resolve default sigma from settings
-	settings_sigma = _get_setting_sigma(settings)
-
-	# Resolve fallback FRT
-	fallback_frt = kwargs.get("fallback_frt")
-	if fallback_frt is not None and fallback_frt != "":
-		try:
-			fallback_frt = float(fallback_frt)
-		except (ValueError, TypeError):
-			fallback_frt = None
-
-	# Resolve FRT in minutes
-	frt = None
-	if kwargs.get("flat_rate_minutes") is not None:
-		try:
-			frt = float(kwargs["flat_rate_minutes"])
-		except (ValueError, TypeError):
-			frt = None
-	elif kwargs.get("frt_minutes") is not None:
-		try:
-			frt = float(kwargs["frt_minutes"])
-		except (ValueError, TypeError):
-			frt = None
-	elif kwargs.get("custom_frt") is not None:
-		try:
-			frt = float(kwargs["custom_frt"]) * 60.0
-		except (ValueError, TypeError):
-			frt = None
-	elif kwargs.get("flat_rate_hours") is not None:
-		try:
-			frt = float(kwargs["flat_rate_hours"]) * 60.0
-		except (ValueError, TypeError):
-			frt = None
-
-	if frt is None and item_code:
-		default_fb = fallback_frt if fallback_frt is not None else _get_setting_default_diagnostic(settings)
-		frt = _get_frt(str(item_code), fallback=default_fb)
-	elif frt is None and fallback_frt is not None:
-		frt = fallback_frt
-
-	# Resolve sigma
-	sigma = kwargs.get("sigma")
-	if sigma is not None and sigma != "":
-		try:
-			sigma = float(sigma)
-		except (ValueError, TypeError):
-			sigma = None
-
-	if sigma is None:
-		if item_code and frappe.db.exists("Item", item_code):
-			item_group = frappe.db.get_value("Item", item_code, "item_group")
-			sigma = get_sigma_for_item(item_group, default_sigma=settings_sigma)
+	frt = _resolve_explicit_frt_minutes(kwargs, allow_qty_alias=False)
+	if frt is None and clean_code:
+		raw_custom_frt = meta.get("custom_frt") if meta else None
+		if raw_custom_frt is not None and flt(raw_custom_frt) > 0:
+			frt = flt(raw_custom_frt) * 60.0
 		else:
-			sigma = settings_sigma
+			frt = opts["fallback_frt"] if opts["fallback_frt"] is not None else opts["default_diagnostic"]
+	elif frt is None and opts["fallback_frt"] is not None:
+		frt = opts["fallback_frt"]
+
+	if opts["sigma_override"] is not None:
+		sigma = opts["sigma_override"]
+	elif meta and meta.get("item_group"):
+		sigma = get_sigma_for_item(meta.get("item_group"), default_sigma=opts["default_sigma"])
+	else:
+		sigma = opts["default_sigma"]
 
 	if frt is None or frt <= 0:
 		return {
 			"duration_minutes": 0,
 			"p_pure": 0,
-			"buffer_padding": buffer_padding,
-			"percentile": percentile,
+			"buffer_padding": opts["buffer_padding"],
+			"percentile": opts["percentile"],
 			"sigma": sigma,
 		}
 
-	p_pure = estimate_duration(frt, sigma=sigma, percentile=percentile)
-	duration_minutes = p_pure + buffer_padding
-
+	p_pure = estimate_duration(frt, sigma=sigma, percentile=opts["percentile"])
 	return {
-		"duration_minutes": duration_minutes,
+		"duration_minutes": p_pure + opts["buffer_padding"],
 		"p_pure": p_pure,
-		"buffer_padding": buffer_padding,
-		"percentile": percentile,
+		"buffer_padding": opts["buffer_padding"],
+		"percentile": opts["percentile"],
 		"sigma": sigma,
 	}
 
@@ -287,135 +360,40 @@ def get_total_estimate(
 	item_codes: Union[str, List[Union[str, Dict[str, Any]]]],
 	**kwargs,
 ) -> Dict[str, Any]:
-	"""Get multi-operation duration estimate using Fenton-Wilkinson summation + buffer.
-
-	Args:
-		item_codes: JSON string, list of item codes, or list of operation dicts.
-		**kwargs:
-			- fallback_frt: Default FRT in minutes for missing items.
-			- skip_missing: If True, ignore missing items without valid FRT.
-			- sigma: Custom default sigma override.
-			- percentile: Target percentile (0.50 to 0.99, or 50 to 99).
-			- buffer_padding / buffer_padding_minutes: Padding in minutes override.
-
-	Returns:
-		Dict with:
-			- total_duration_minutes: int (p_pure + buffer_padding, or 0)
-			- p_pure: int (pure F-W log-normal estimate)
-			- buffer_padding: int
-			- operations_count: int
-	"""
-	frappe.has_permission("Item", "read", throw=True)
+	"""Get multi-operation duration estimate using Fenton-Wilkinson summation + buffer."""
+	_ensure_authenticated_estimation_user()
 	settings = _get_ism_settings()
+	opts = _resolve_estimation_options(settings, kwargs)
 
-	# Resolve percentile
-	percentile = kwargs.get("percentile")
-	if percentile is not None and percentile != "":
-		try:
-			p = float(percentile)
-			if p > 1.0:
-				p = p / 100.0
-			percentile = p
-		except (ValueError, TypeError):
-			percentile = _get_setting_percentile(settings)
-	else:
-		percentile = _get_setting_percentile(settings)
-
-	# Resolve buffer padding
-	buffer_padding = kwargs.get("buffer_padding")
-	if buffer_padding is None:
-		buffer_padding = kwargs.get("buffer_padding_minutes")
-	if buffer_padding is not None and buffer_padding != "":
-		try:
-			buffer_padding = max(0, int(float(buffer_padding)))
-		except (ValueError, TypeError):
-			buffer_padding = _get_setting_buffer(settings)
-	else:
-		buffer_padding = _get_setting_buffer(settings)
-
-	# Resolve default sigma from settings
-	settings_sigma = _get_setting_sigma(settings)
-	override_default_sigma = kwargs.get("sigma")
-	if override_default_sigma is not None and override_default_sigma != "":
-		try:
-			default_sigma = float(override_default_sigma)
-		except (ValueError, TypeError):
-			default_sigma = settings_sigma
-	else:
-		default_sigma = settings_sigma
-
-	# Parse skip_missing
-	skip_missing = kwargs.get("skip_missing", False)
-	if isinstance(skip_missing, str):
-		skip_missing = skip_missing.lower() in ("true", "1")
-	else:
-		skip_missing = bool(skip_missing)
-
-	# Fallback FRT
-	fallback_frt = kwargs.get("fallback_frt")
-	if fallback_frt is not None and fallback_frt != "":
-		try:
-			fallback_frt = float(fallback_frt)
-		except (ValueError, TypeError):
-			fallback_frt = None
-
-	# Parse item_codes
-	if isinstance(item_codes, str):
-		try:
-			item_codes = frappe.parse_json(item_codes)
-		except Exception:
-			try:
-				item_codes = json.loads(item_codes)
-			except Exception:
-				item_codes = [c.strip() for c in item_codes.split(",") if c.strip()]
-
-	if item_codes is None or item_codes == [] or item_codes == ():
-		return {
-			"total_duration_minutes": 0,
-			"p_pure": 0,
-			"buffer_padding": buffer_padding,
-			"operations_count": 0,
-		}
-	if not isinstance(item_codes, (list, tuple)):
+	parsed_items = _parse_json_value(item_codes, allow_csv=True) if isinstance(item_codes, str) else item_codes
+	if parsed_items is None or parsed_items == [] or parsed_items == ():
+		return _estimate_operations_core([], percentile=opts["percentile"], buffer_padding=opts["buffer_padding"])
+	if not isinstance(parsed_items, (list, tuple)):
 		frappe.throw(_("Operations must be a list of item codes or operation specs."), frappe.ValidationError)
 
 	normalized_items = []
 	candidate_codes: List[str] = []
-	for item in item_codes:
+	for item in parsed_items:
+		if isinstance(item, bool):
+			frappe.throw(_("Boolean entries are not permitted in operations list."), frappe.ValidationError)
 		if isinstance(item, dict):
-			code = item.get("item_code")
-			if code is not None and not isinstance(code, str):
+			raw_code = item.get("item_code")
+			if raw_code is not None and not isinstance(raw_code, str):
 				frappe.throw(_("Invalid item_code: expected string."), frappe.ValidationError)
+			code = raw_code.strip() if isinstance(raw_code, str) and raw_code.strip() else None
 			if code:
-				code = code.strip()
-				if code:
-					candidate_codes.append(code)
-			item_frt_min = item.get("flat_rate_minutes")
-			if item_frt_min is None:
-				item_frt_min = item.get("frt_minutes")
-			item_frt_hr = (
-				item.get("flat_rate_hours")
-				or item.get("frt_hours")
-				or item.get("custom_frt")
-				or item.get("qty")
-			)
-			item_sig = item.get("sigma")
-
-			if item_frt_min is not None:
-				try:
-					item_frt = float(item_frt_min)
-				except (ValueError, TypeError):
-					item_frt = None
-			elif item_frt_hr is not None:
-				try:
-					item_frt = float(item_frt_hr) * 60.0
-				except (ValueError, TypeError):
-					item_frt = None
+				candidate_codes.append(code)
+			item_frt = _resolve_explicit_frt_minutes(item, allow_qty_alias=True)
+			raw_sig = item.get("sigma")
+			if raw_sig is not None and raw_sig != "":
+				item_sig: Optional[float] = float(
+					_parse_numeric(raw_sig, label="sigma", min_val=_MIN_SIGMA, max_val=_MAX_SIGMA)
+				)
 			else:
-				item_frt = None
+				item_sig = None
 		elif isinstance(item, (int, float)):
 			code = None
-			item_frt = float(item)
+			item_frt = float(_parse_numeric(item, label="flat_rate_minutes", min_val=0.0))
 			item_sig = None
 		elif isinstance(item, str):
 			code = item.strip() or None
@@ -426,14 +404,18 @@ def get_total_estimate(
 		elif item is None:
 			continue
 		else:
-			frappe.throw(_("Invalid item entry in operations: expected string, number, or dict."), frappe.ValidationError)
+			frappe.throw(
+				_("Invalid item entry in operations: expected string, number, or dict."),
+				frappe.ValidationError,
+			)
 
-		normalized_items.append((code.strip() if isinstance(code, str) and code.strip() else None, item_frt, item_sig))
+		normalized_items.append((code, item_frt, item_sig))
 
-	items_meta = _prefetch_items_meta(candidate_codes)
-	default_diag = _get_setting_default_diagnostic(settings)
+	if candidate_codes:
+		frappe.has_permission("Item", "read", throw=True)
+	items_meta = _prefetch_items_meta(candidate_codes) if candidate_codes else {}
 
-	operations = []
+	operations: List[Dict[str, float]] = []
 	for code, item_frt, item_sig in normalized_items:
 		meta = items_meta.get(code) if code else None
 
@@ -441,47 +423,30 @@ def get_total_estimate(
 			frt_hours = meta.get("custom_frt") if meta else None
 			if frt_hours is not None and flt(frt_hours) > 0:
 				item_frt = flt(frt_hours) * 60.0
-			elif not skip_missing:
-				item_frt = fallback_frt if fallback_frt is not None else default_diag
+			elif not opts["skip_missing"]:
+				item_frt = opts["fallback_frt"] if opts["fallback_frt"] is not None else opts["default_diagnostic"]
 
 		if item_frt is None or item_frt <= 0:
-			if skip_missing:
+			if opts["skip_missing"]:
 				continue
-			item_frt = fallback_frt if fallback_frt and fallback_frt > 0 else None
+			item_frt = opts["fallback_frt"] if opts["fallback_frt"] and opts["fallback_frt"] > 0 else None
 
 		if item_frt is None or item_frt <= 0:
 			continue
 
 		if item_sig is None:
 			if meta and meta.get("item_group"):
-				item_sig = get_sigma_for_item(meta.get("item_group"), default_sigma=default_sigma)
+				item_sig = get_sigma_for_item(meta.get("item_group"), default_sigma=opts["default_sigma"])
 			else:
-				item_sig = default_sigma
-		else:
-			try:
-				item_sig = float(item_sig)
-			except (ValueError, TypeError):
-				item_sig = default_sigma
+				item_sig = opts["default_sigma"]
 
 		operations.append({"flat_rate_minutes": float(item_frt), "sigma": float(item_sig)})
 
-	if not operations:
-		return {
-			"total_duration_minutes": 0,
-			"p_pure": 0,
-			"buffer_padding": buffer_padding,
-			"operations_count": 0,
-		}
-
-	p_pure = estimate_total_duration(operations, percentile=percentile)
-	total_duration_minutes = p_pure + buffer_padding
-
-	return {
-		"total_duration_minutes": total_duration_minutes,
-		"p_pure": p_pure,
-		"buffer_padding": buffer_padding,
-		"operations_count": len(operations),
-	}
+	return _estimate_operations_core(
+		operations,
+		percentile=opts["percentile"],
+		buffer_padding=opts["buffer_padding"],
+	)
 
 
 def _resolve_service_frt_minutes(
@@ -490,23 +455,15 @@ def _resolve_service_frt_minutes(
 	items_meta: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Optional[float]:
 	"""Extract flat rate time in minutes from a Repair Order Service row."""
-	labor_hours = getattr(s, "labor_hours", None)
-	if labor_hours is not None:
-		try:
-			val = float(labor_hours)
-			if val > 0:
-				return val * 60.0
-		except (ValueError, TypeError):
-			pass
-
-	frt_val = getattr(s, "frt", None)
-	if frt_val is not None:
-		try:
-			val = float(frt_val)
-			if val > 0:
-				return val * 60.0
-		except (ValueError, TypeError):
-			pass
+	for attr in ("labor_hours", "frt"):
+		raw = getattr(s, attr, None)
+		if raw is not None and not isinstance(raw, bool):
+			try:
+				val = float(raw)
+				if math.isfinite(val) and val > 0:
+					return val * 60.0
+			except (ValueError, TypeError):
+				pass
 
 	pkg_name = getattr(s, "service_package", None)
 	if pkg_name:
@@ -514,21 +471,17 @@ def _resolve_service_frt_minutes(
 			if pkg_name in package_hours:
 				return package_hours[pkg_name] * 60.0
 		elif frappe.db.exists("Service Package", pkg_name):
-			pkg_hours = frappe.db.get_value("Service Package", pkg_name, "standard_labor_hours")
-			if pkg_hours is not None and flt(pkg_hours) > 0:
-				return flt(pkg_hours) * 60.0
+			pkg_hr = frappe.db.get_value("Service Package", pkg_name, "standard_labor_hours")
+			if pkg_hr is not None and flt(pkg_hr) > 0:
+				return flt(pkg_hr) * 60.0
 
 	item_code = getattr(s, "item_code", None)
-	if item_code:
-		code = str(item_code).strip()
-		if items_meta is not None:
-			meta = items_meta.get(code)
-			if meta and flt(meta.get("custom_frt")) > 0:
-				return flt(meta.get("custom_frt")) * 60.0
-		else:
-			item_frt = _get_frt(code)
-			if item_frt and item_frt > 0:
-				return item_frt
+	if isinstance(item_code, str) and item_code.strip():
+		code = item_code.strip()
+		meta_map = items_meta if items_meta is not None else _prefetch_items_meta([code])
+		meta = meta_map.get(code)
+		if meta and flt(meta.get("custom_frt")) > 0:
+			return flt(meta.get("custom_frt")) * 60.0
 
 	return None
 
@@ -570,27 +523,7 @@ def _resolve_service_sigma(
 
 @frappe.whitelist()
 def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-	"""Estimate duration for a Repair Order based on its active services.
-
-	Filters out declined services, extracts flat rate times from services or linked
-	service packages/items, assigns category-specific variance (sigma), and applies
-	Fenton-Wilkinson summation + buffer padding.
-
-	Falls back to default diagnostic duration if the Repair Order has no active services.
-
-	Args:
-		repair_order: Name/ID of the Repair Order.
-		**kwargs: Overrides for percentile, buffer_padding, sigma, fallback_frt.
-
-	Returns:
-		Dict with:
-			- total_minutes: int (same as total_duration_minutes, for modal compatibility)
-			- total_duration_minutes: int
-			- p_pure: int
-			- buffer_padding: int
-			- operations_count: int
-			- repair_order: Optional[str]
-	"""
+	"""Estimate duration for a Repair Order based on its active services."""
 	if not repair_order:
 		frappe.has_permission("Repair Order", "read", throw=True)
 		return {
@@ -608,7 +541,7 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 		repair_order_name = ro.name
 	else:
 		if not isinstance(repair_order, str):
-			frappe.throw(frappe._("Invalid Repair Order identifier."), frappe.ValidationError)
+			frappe.throw(_("Invalid Repair Order identifier."), frappe.ValidationError)
 		frappe.has_permission("Repair Order", "read", throw=True)
 		repair_order_name = repair_order.strip()
 		if repair_order_name.startswith("new-"):
@@ -622,56 +555,48 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 			}
 		if not frappe.db.exists("Repair Order", repair_order_name):
 			frappe.throw(
-				frappe._("Repair Order {0} does not exist").format(repair_order_name),
+				_("Repair Order {0} does not exist").format(repair_order_name),
 				frappe.DoesNotExistError,
 			)
 		ro = frappe.get_doc("Repair Order", repair_order_name)
 		ro.check_permission("read")
 
 	settings = _get_ism_settings()
-	default_sigma = _get_setting_sigma(settings)
-	if kwargs.get("sigma") is not None and kwargs.get("sigma") != "":
-		try:
-			default_sigma = float(kwargs["sigma"])
-		except (ValueError, TypeError):
-			pass
+	opts = _resolve_estimation_options(settings, kwargs)
 
 	services = [s for s in (getattr(ro, "services", []) or []) if getattr(s, "status", None) != "Declined"]
 	pkg_names = [getattr(s, "service_package", None) for s in services if getattr(s, "service_package", None)]
 	item_codes: List[str] = []
 	for s in services:
-		if getattr(s, "item_code", None):
-			item_codes.append(str(getattr(s, "item_code")).strip())
+		item_code = getattr(s, "item_code", None)
+		if item_code:
+			item_codes.append(str(item_code).strip())
 		item_codes.extend(_extract_part_item_codes(getattr(s, "parts", None)))
 
 	package_hours = _prefetch_package_hours(pkg_names)
 	items_meta = _prefetch_items_meta(item_codes)
 
-	operations = []
+	operations: List[Dict[str, float]] = []
 	for s in services:
 		frt_min = _resolve_service_frt_minutes(s, package_hours=package_hours, items_meta=items_meta)
 		if frt_min is not None and frt_min > 0:
-			sig = _resolve_service_sigma(s, default_sigma, items_meta=items_meta)
+			sig = _resolve_service_sigma(s, opts["default_sigma"], items_meta=items_meta)
 			operations.append({"flat_rate_minutes": float(frt_min), "sigma": float(sig)})
 
 	if not operations:
-		fallback_frt = kwargs.get("fallback_frt")
-		if fallback_frt is not None and fallback_frt != "":
-			try:
-				diag_duration = float(fallback_frt)
-			except (ValueError, TypeError):
-				diag_duration = _get_setting_default_diagnostic(settings, default=60.0)
-		else:
-			diag_duration = _get_setting_default_diagnostic(settings, default=60.0)
-
+		diag_duration = opts["fallback_frt"] if opts["fallback_frt"] is not None else opts["default_diagnostic"]
 		if diag_duration > 0:
-			diag_sigma = get_sigma_for_item("Diagnostic", default_sigma=default_sigma)
+			diag_sigma = get_sigma_for_item("Diagnostic", default_sigma=opts["default_sigma"])
 			operations.append({
 				"flat_rate_minutes": float(diag_duration),
 				"sigma": float(diag_sigma),
 			})
 
-	res = get_total_estimate(operations, **kwargs)
+	res = _estimate_operations_core(
+		operations,
+		percentile=opts["percentile"],
+		buffer_padding=opts["buffer_padding"],
+	)
 	res["total_minutes"] = res["total_duration_minutes"]
 	res["repair_order"] = repair_order_name
 	return res

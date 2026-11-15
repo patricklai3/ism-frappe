@@ -34,7 +34,7 @@ class ServiceBay(Document):
 				"Schedule Entry",
 				filters={
 					"service_bay": self.name,
-					"status": ["in", ["Draft", "Scheduled", "In Progress"]],
+					"status": ["in", ["Draft", "Confirmed", "Scheduled", "In Progress"]],
 				},
 				pluck="name",
 				limit=5,

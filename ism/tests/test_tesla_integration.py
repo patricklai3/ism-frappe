@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 from unittest.mock import MagicMock, patch
+import urllib.request
 
 import frappe
 from frappe.utils import flt
@@ -11,7 +12,6 @@ from ism.utils.tesla_manual import (
 	get_category_for_correction_code,
 	parse_tesla_manual_url,
 	parse_vehicle_year_month,
-	is_in_generation_range,
 	get_tesla_manual_url_for_vehicle,
 	validate_vehicle_compatibility,
 	parse_tesla_procedure_html,
@@ -32,14 +32,12 @@ from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
 
 class TestTeslaIntegration(ISMTestCase):
 	def setUp(self):
-		frappe.db.rollback()
 		super().setUp()
 		_MANIFEST_CACHE.clear()
 
 	def tearDown(self):
 		_MANIFEST_CACHE.clear()
 		super().tearDown()
-		frappe.db.rollback()
 
 	def test_category_taxonomy_mapping(self):
 		# 00 -> INSPECTION AND SERVICE
@@ -390,7 +388,7 @@ class TestTeslaIntegration(ISMTestCase):
 		self.assertEqual(ro.approval_status, "Partially Approved")
 
 	def test_symmetrical_procedure_import(self):
-		from ism.utils.tesla_manual import swap_side_in_title, detect_service_side
+		from ism.utils.tesla_manual import swap_side_in_title
 
 		# 1. Helper tests
 		self.assertEqual(swap_side_in_title("Door - Front - LH (Remove and Replace)", "RH"), "Door - Front - RH (Remove and Replace)")
@@ -654,5 +652,42 @@ class TestTeslaIntegration(ISMTestCase):
 		):
 			with self.assertRaises((frappe.ValidationError, frappe.exceptions.FrappeTypeError)):
 				fn(**kwargs)
+
+	def test_tesla_safe_redirect_handler_and_bounded_html(self):
+		"""Verify _TeslaSafeRedirectHandler blocks unsafe redirects and _read_bounded_tesla_response caps payload size."""
+		handler = tesla_api._TeslaSafeRedirectHandler()
+		req = urllib.request.Request("https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-TEST.html")
+
+		for unsafe_target in (
+			"https://evil.example.com/payload",
+			"http://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-TEST.html",
+			"//evil.example.com/redirect",
+		):
+			with self.assertRaises(frappe.ValidationError):
+				handler.redirect_request(req, None, 302, "Found", {}, unsafe_target)
+
+		allowed_req = handler.redirect_request(
+			req,
+			None,
+			302,
+			"Found",
+			{},
+			"https://service.teslamotors.com/docs/Model3/ServiceManual/en-us/GUID-NEXT.html",
+		)
+		self.assertEqual(
+			allowed_req.full_url,
+			"https://service.teslamotors.com/docs/Model3/ServiceManual/en-us/GUID-NEXT.html",
+		)
+
+		ok_resp = MagicMock()
+		ok_resp.geturl.return_value = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-TEST.html"
+		ok_resp.read.return_value = b"<html><body>Procedure OK</body></html>"
+		self.assertEqual(tesla_api._read_bounded_tesla_response(ok_resp), "<html><body>Procedure OK</body></html>")
+
+		oversized_resp = MagicMock()
+		oversized_resp.geturl.return_value = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-TEST.html"
+		oversized_resp.read.return_value = b"x" * (tesla_api._MAX_TESLA_HTML_BYTES + 1)
+		with self.assertRaises(frappe.ValidationError):
+			tesla_api._read_bounded_tesla_response(oversized_resp)
 
 

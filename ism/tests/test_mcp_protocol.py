@@ -1,7 +1,6 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-import json
 import frappe
 from frappe.core.doctype.user.user import generate_keys
 from frappe.mcp.test_utils import McpTestCase
@@ -134,7 +133,7 @@ class TestMcpProtocol(McpTestCase):
 			except Exception:
 				frappe.db.rollback()
 				if attempt == 2:
-					pass
+					raise
 
 	def tearDown(self):
 		try:
@@ -349,7 +348,7 @@ class TestMcpProtocol(McpTestCase):
 
 		# 3. Create dedicated agent user
 		user_email = f"shop_agent_{frappe.generate_hash(length=6).lower()}@example.com"
-		agent_user = frappe.get_doc(
+		frappe.get_doc(
 			doctype="User",
 			email=user_email,
 			first_name="Shop",
@@ -396,6 +395,21 @@ class TestMcpProtocol(McpTestCase):
 	def test_mcp_chunk2_tools_end_to_end(self):
 		"""Verify Chunk 2 tools (deferred services, opposite side, toggle completion, supplement, park, action items) via MCP."""
 		veh_doc = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
+		_sys_fields = {"name", "owner", "creation", "modified", "modified_by", "parent", "parentfield", "parenttype", "idx", "docstatus", "doctype"}
+		orig_deferred = [
+			{k: v for k, v in row.as_dict().items() if k not in _sys_fields}
+			for row in (veh_doc.deferred_services or [])
+		]
+
+		def _restore_vehicle_deferred_services():
+			frappe.set_user("Administrator")
+			frappe.db.rollback()
+			veh = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
+			veh.set("deferred_services", orig_deferred)
+			veh.save(ignore_permissions=True)
+			frappe.db.commit()  # nosemgrep
+
+		self.addCleanup(_restore_vehicle_deferred_services)
 		veh_doc.append(
 			"deferred_services",
 			{

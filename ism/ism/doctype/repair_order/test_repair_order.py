@@ -3,7 +3,6 @@
 
 import json
 import frappe
-from frappe.tests.utils import FrappeTestCase
 from frappe.utils import cint, flt, today
 
 from ism.ism.doctype.repair_order.repair_order import (
@@ -484,6 +483,7 @@ class TestRepairOrder(ISMTestCase):
 			parts=[{"item_code": part2.name, "qty": 1, "rate": 200}],
 			notes="Rotor thickness below discard spec",
 		)
+		self.assertEqual(supp_res.get("status"), "success")
 		ro.reload()
 		self.assertEqual(len(ro.services), 2)
 		self.assertEqual(ro.services[1].is_supplement, 1)
@@ -1194,6 +1194,7 @@ class TestRepairOrder(ISMTestCase):
 		ro.save()
 
 		rel_res = ro.process_payment_and_release(paid_amount=0, odometer_out=35020)
+		self.assertEqual(rel_res.get("status"), "success")
 		ro.reload()
 		self.assertEqual(ro.status, "Closed / Released")
 		self.assertEqual(ro.vehicle_location, "Released to Customer")
@@ -1762,10 +1763,143 @@ class TestRepairOrder(ISMTestCase):
 		self.assertIn("Upper Control Arm", job_card_html)
 		self.assertIn(part.name, job_card_html)
 
+	def test_zero_dollar_package_part_rate_preserved(self):
+		"""Verify explicit $0.00 part rates on Service Package Items are not overwritten by Item standard_rate."""
+		free_part = self.create_test_item(item_code="ZERO-RATE-PRT-1", is_stock_item=0, standard_rate=45.0)
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": f"{TEST_PREFIX}Zero Rate Part Pkg",
+			"category": "Maintenance",
+			"standard_labor_hours": 1.0,
+			"hourly_rate": 100.0,
+			"items": [
+				{"item_code": free_part.name, "qty": 2, "rate": 0.0, "slot_number": 1},
+			],
+		}).insert()
+		self.track(pkg)
 
+		details = get_service_package_details(pkg.name)
+		self.assertEqual(len(details["parts"]), 1)
+		self.assertEqual(flt(details["parts"][0]["rate"]), 0.0)
+		self.assertEqual(flt(details["parts"][0]["amount"]), 0.0)
+		self.assertEqual(flt(details["parts_total"]), 0.0)
 
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 48000,
+		}).insert()
+		self.track(ro)
 
+		ro.add_service_package(pkg.name)
+		ro.reload()
+		self.assertEqual(len(ro.services), 1)
+		saved_parts = json.loads(ro.services[0].parts)
+		self.assertEqual(len(saved_parts), 1)
+		self.assertEqual(flt(saved_parts[0]["rate"]), 0.0)
+		self.assertEqual(flt(saved_parts[0]["amount"]), 0.0)
+		self.assertEqual(flt(ro.services[0].parts_total), 0.0)
+		self.assertEqual(flt(ro.services[0].total_amount), 100.0)
 
+	def test_process_payment_and_release_guards_and_zero_tax(self):
+		"""Verify payment/release validates odometer_out, paid_amount, duplicate release, and tax_rate=0."""
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": self.vehicle.name,
+			"odometer_in": 55000,
+			"tax_rate": 0,
+			"approval_status": "Approved",
+			"status": "Work Completed",
+			"services": [
+				{
+					"service_title": "Tax Exempt Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+				}
+			],
+		}).insert()
+		self.track(ro)
 
+		self.assertEqual(flt(ro.tax_rate), 0.0)
+		self.assertIsNone(ro.taxes_and_charges)
+		self.assertEqual(flt(ro.total_taxes_and_charges), 0.0)
+		self.assertEqual(flt(ro.grand_total), 100.0)
 
+		for bad_odo in ("not-a-number", True, -5):
+			with self.assertRaises(frappe.ValidationError):
+				ro.process_payment_and_release(payment_method="Cash", odometer_out=bad_odo)
+
+		with self.assertRaises(frappe.ValidationError):
+			ro.process_payment_and_release(payment_method="Cash", paid_amount=-10, odometer_out=55010)
+
+		with self.assertRaises(frappe.ValidationError):
+			ro.process_payment_and_release(payment_method="Cash", paid_amount=150, odometer_out=55010)
+
+		res = ro.process_payment_and_release(payment_method="Cash", paid_amount=100.0, odometer_out=55010)
+		self.assertEqual(res.get("status"), "success")
+
+		ro.reload()
+		si = frappe.get_doc("Sales Invoice", ro.sales_invoice)
+		self.assertEqual(flt(si.net_total), 100.0)
+		self.assertEqual(flt(si.total_taxes_and_charges), 0.0)
+		self.assertEqual(flt(si.grand_total), 100.0)
+		self.assertEqual(len(si.taxes), 0)
+
+		with self.assertRaises(frappe.ValidationError):
+			ro.process_payment_and_release(payment_method="Cash", paid_amount=100.0, odometer_out=55020)
+
+	def test_filtered_vehicles_and_search_respect_user_permissions(self):
+		"""Verify get_filtered_vehicles and build_vehicle_search_results enforce Customer User Permissions."""
+		from ism.ism.doctype.repair_vehicle.repair_vehicle import build_vehicle_search_results
+
+		allowed_cust = self.create_test_customer(customer_name=f"{TEST_PREFIX}100% EV Allowed")
+		blocked_cust = self.create_test_customer(customer_name=f"{TEST_PREFIX}Blocked Fleet")
+		allowed_veh = self.create_test_vehicle(license_plate="PERM-OK-1", customer=allowed_cust.name)
+		blocked_veh = self.create_test_vehicle(license_plate="PERM-NO-1", customer=blocked_cust.name)
+
+		test_user = "test_vehicle_perm_scope@example.com"
+		if not frappe.db.exists("User", test_user):
+			user_doc = frappe.new_doc("User")
+			user_doc.email = test_user
+			user_doc.first_name = "Restricted"
+			user_doc.last_name = "Advisor"
+			user_doc.append("roles", {"role": "Sales User"})
+			user_doc.flags.ignore_password_policy = True
+			user_doc.insert(ignore_permissions=True)
+			self.track(user_doc)
+
+		user_perm = frappe.get_doc({
+			"doctype": "User Permission",
+			"user": test_user,
+			"allow": "Customer",
+			"for_value": allowed_cust.name,
+			"apply_to_all_doctypes": 1,
+		}).insert(ignore_permissions=True)
+
+		orig_user = frappe.session.user
+		try:
+			frappe.set_user(test_user)
+			filtered = get_filtered_vehicles(
+				doctype="Repair Vehicle",
+				txt="",
+				searchfield="name",
+				start=0,
+				page_len=50,
+				filters=None,
+			)
+			filtered_names = [row[0] for row in filtered]
+			self.assertIn(allowed_veh.name, filtered_names)
+			self.assertNotIn(blocked_veh.name, filtered_names)
+
+			searched = build_vehicle_search_results(query="", limit=50)
+			searched_names = [row["name"] for row in searched]
+			self.assertIn(allowed_veh.name, searched_names)
+			self.assertNotIn(blocked_veh.name, searched_names)
+		finally:
+			frappe.set_user(orig_user)
+			if frappe.db.exists("User Permission", user_perm.name):
+				frappe.delete_doc("User Permission", user_perm.name, force=True, ignore_permissions=True)
 

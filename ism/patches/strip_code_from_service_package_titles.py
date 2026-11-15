@@ -20,7 +20,10 @@ def execute():
 			try:
 				frappe.rename_doc("Service Package", pkg.name, target_name, force=True, ignore_permissions=True)
 			except Exception:
-				pass
+				frappe.log_error(
+					message=frappe.get_traceback(),
+					title=f"Service Package rename failed: {pkg.name} -> {target_name}"[:140],
+				)
 
 	services = frappe.get_all("Repair Order Service", fields=["name", "service_title", "correction_code"])
 	for srv in services:

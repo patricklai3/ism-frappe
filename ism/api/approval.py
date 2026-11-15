@@ -1,14 +1,33 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import base64
+import binascii
 import json
-from datetime import timedelta
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, get_datetime, get_url, now_datetime
+from frappe.utils import cint, escape_html, flt, get_datetime, get_url, now_datetime
 
 from ism.api.sms import dispatch_sms, get_sms_unconfigured_reason
+
+_MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
+_ALLOWED_SIGNATURE_PREFIXES = (
+	"data:image/png;base64,",
+	"data:image/jpeg;base64,",
+	"data:image/webp;base64,",
+)
+
+
+def _ensure_approval_token_for_doc(doc) -> tuple[str, str]:
+	"""Delegate token creation/reuse to RepairOrder.generate_approval_token without reloading."""
+	doc.check_permission("write")
+	token_res = doc.generate_approval_token()
+	token = doc.approval_token or (token_res.get("approval_token") if isinstance(token_res, dict) else None)
+	if not token:
+		frappe.throw(_("Unable to generate approval token for Repair Order {0}.").format(doc.name))
+	approval_url = f"{get_url()}/quote-approval?token={token}"
+	return token, approval_url
 
 
 def get_or_create_approval_token(repair_order_name: str) -> tuple[str, str]:
@@ -17,46 +36,10 @@ def get_or_create_approval_token(repair_order_name: str) -> tuple[str, str]:
 	Returns:
 		tuple[str, str]: (token, approval_url)
 	"""
-	doc = frappe.get_doc("Repair Order", repair_order_name)
-	doc.check_permission("write")
-
-	now = now_datetime()
-	settings = frappe.get_single("ISM Settings")
-	expiry_hours = cint(settings.authorization_token_expiry_hours) or 48
-
-	token = doc.approval_token
-	expiry = get_datetime(doc.approval_token_expiry) if doc.approval_token_expiry else None
-
-	# Advance uncommunicated draft/estimating services upon dispatching for authorization
-	doc_changed = False
-	services = getattr(doc, "services", [])
-	for service in services:
-		if service.status in ("Draft", "Estimating"):
-			service.status = "Pending Approval"
-			doc_changed = True
-			if service.name and not str(service.name).startswith("new-"):
-				frappe.db.set_value(
-					"Repair Order Service",
-					service.name,
-					"status",
-					"Pending Approval",
-					update_modified=False,
-				)
-
-	if not token or not expiry or now > expiry:
-		token = frappe.generate_hash(length=32)
-		doc.approval_token = token
-		doc.approval_token_expiry = now + timedelta(hours=expiry_hours)
-		doc_changed = True
-
-	if doc_changed:
-		doc.approval_status = _derive_approval_status(services)
-		doc.flags.ignore_validate = True
-		doc.flags.ignore_mandatory = True
-		doc.save(ignore_permissions=True)
-
-	approval_url = f"{get_url()}/quote-approval?token={token}"
-	return token, approval_url
+	if not isinstance(repair_order_name, str) or not repair_order_name.strip():
+		frappe.throw(_("Repair Order ID is required."))
+	doc = frappe.get_doc("Repair Order", repair_order_name.strip())
+	return _ensure_approval_token_for_doc(doc)
 
 
 @frappe.whitelist()
@@ -67,24 +50,28 @@ def send_approval_request(
 ) -> dict:
 	"""Dispatch digital approval link via SMS or Email, or generate a shareable URL."""
 	normalized_channel = _normalize_dispatch_channel(channel)
-	doc = frappe.get_doc("Repair Order", repair_order_name)
-	doc.check_permission("write")
+	if not isinstance(repair_order_name, str) or not repair_order_name.strip():
+		frappe.throw(_("Repair Order ID is required."))
+	if recipient is not None and not isinstance(recipient, str):
+		frappe.throw(_("Recipient must be a string."))
 
-	_token, approval_url = get_or_create_approval_token(repair_order_name)
+	doc = frappe.get_doc("Repair Order", repair_order_name.strip())
+	_token, approval_url = _ensure_approval_token_for_doc(doc)
 	vehicle_display = _format_vehicle_display(doc.vehicle)
 	customer_name = doc.customer or _("Customer")
+	clean_recipient = recipient.strip() if isinstance(recipient, str) and recipient.strip() else None
 
 	if normalized_channel == "sms":
-		return _dispatch_sms_approval(doc, approval_url, vehicle_display, customer_name, recipient)
+		return _dispatch_sms_approval(doc, approval_url, vehicle_display, customer_name, clean_recipient)
 
 	if normalized_channel == "email":
-		return _dispatch_email_approval(doc, approval_url, vehicle_display, customer_name, recipient)
+		return _dispatch_email_approval(doc, approval_url, vehicle_display, customer_name, clean_recipient)
 
 	return {
 		"success": True,
 		"channel": "link",
 		"requested_channel": "link",
-		"recipient": recipient,
+		"recipient": clean_recipient,
 		"approval_url": approval_url,
 		"delivery_status": "Link Generated",
 		"message": _("Approval link generated."),
@@ -151,10 +138,49 @@ def get_public_quote_approval(token: str) -> dict:
 		"disclaimer_text": disclaimer,
 		"authorized_by": doc.authorized_by,
 		"authorized_at": doc.authorized_at,
-		"signature_image": doc.signature_image,
 		"audit_hash": getattr(doc, "audit_hash", None),
 		"approval_logs": _serialize_approval_logs(doc),
 	}
+
+
+def _validate_signature_data(signature_data: str | None, require_signature: bool) -> str | None:
+	"""Enforce allowlisted raster data URIs with strict base64 decoding and byte-size cap."""
+	if signature_data is None or (isinstance(signature_data, str) and not signature_data.strip()):
+		if require_signature:
+			frappe.throw(_("Digital signature is required to approve services."))
+		return None
+
+	if not isinstance(signature_data, str):
+		frappe.throw(_("Digital signature must be a raster image data URI."))
+
+	cleaned = signature_data.strip()
+	lower = cleaned.lower()
+	matched_prefix = None
+	for prefix in _ALLOWED_SIGNATURE_PREFIXES:
+		if lower.startswith(prefix):
+			matched_prefix = prefix
+			break
+
+	if not matched_prefix:
+		frappe.throw(_("Unsupported signature format. Allowed raster types: PNG, JPEG, WebP."))
+
+	b64_payload = cleaned[len(matched_prefix) :].strip()
+	if not b64_payload:
+		frappe.throw(_("Digital signature image payload cannot be empty."))
+
+	max_b64_len = (_MAX_SIGNATURE_BYTES * 4 // 3) + 16
+	if len(b64_payload) > max_b64_len:
+		frappe.throw(_("Digital signature exceeds maximum allowed size (2 MB)."))
+
+	try:
+		decoded = base64.b64decode(b64_payload, validate=True)
+	except (binascii.Error, ValueError):
+		frappe.throw(_("Digital signature contains invalid base64 data."))
+
+	if not decoded or len(decoded) > _MAX_SIGNATURE_BYTES:
+		frappe.throw(_("Digital signature exceeds allowed size bounds."))
+
+	return f"{matched_prefix}{b64_payload}"
 
 
 @frappe.whitelist(allow_guest=True)
@@ -175,11 +201,20 @@ def submit_customer_approval(
 	if not isinstance(signer_name, str) or not signer_name.strip():
 		frappe.throw(_("Signer name is required."))
 
-	ro_name = frappe.db.get_value("Repair Order", {"approval_token": token.strip()}, "name")
-	if not ro_name:
+	locked_rows = frappe.db.sql(
+		"""
+		SELECT name
+		FROM `tabRepair Order`
+		WHERE approval_token = %s
+		FOR UPDATE
+		""",
+		(token.strip(),),
+		as_dict=True,
+	)
+	if not locked_rows:
 		frappe.throw(_("Repair Order not found for token."))
 
-	doc = frappe.get_doc("Repair Order", ro_name)
+	doc = frappe.get_doc("Repair Order", locked_rows[0].name)
 	if doc.approval_token_expiry and now_datetime() > get_datetime(doc.approval_token_expiry):
 		frappe.throw(_("Authorization token has expired."))
 
@@ -191,24 +226,31 @@ def submit_customer_approval(
 		frappe.throw(_("This repair estimate has already been authorized."))
 
 	normalized_approvals = _normalize_approvals_payload(approvals)
-	if "Approved" in normalized_approvals.values() and (
-		not isinstance(signature_data, str) or not signature_data.strip()
-	):
-		frappe.throw(_("Digital signature is required to approve services."))
-
-	client_ip = ip_address if ip_address is not None else getattr(frappe.local, "request_ip", None)
-	client_ua = user_agent
-	if client_ua is None and getattr(frappe.local, "request", None):
-		client_ua = frappe.get_request_header("User-Agent")
-
-	doc.authorize_jobs(
-		approvals=normalized_approvals,
-		channel="Remote Web Link",
-		signer_name=signer_name.strip(),
-		signature_image=signature_data,
-		ip_address=client_ip,
-		user_agent=client_ua,
+	validated_signature = _validate_signature_data(
+		signature_data,
+		require_signature="Approved" in normalized_approvals.values(),
 	)
+
+	if getattr(frappe.local, "request", None):
+		client_ip = getattr(frappe.local, "request_ip", None)
+		client_ua = frappe.get_request_header("User-Agent")
+	else:
+		client_ip = ip_address if isinstance(ip_address, str) else getattr(frappe.local, "request_ip", None)
+		client_ua = user_agent if isinstance(user_agent, str) else None
+
+	prev_portal_flag = getattr(frappe.flags, "_ism_public_approval_portal", False)
+	frappe.flags._ism_public_approval_portal = True
+	try:
+		doc.authorize_jobs(
+			approvals=normalized_approvals,
+			channel="Remote Web Link",
+			signer_name=signer_name.strip(),
+			signature_image=validated_signature,
+			ip_address=client_ip,
+			user_agent=client_ua,
+		)
+	finally:
+		frappe.flags._ism_public_approval_portal = prev_portal_flag
 
 	return {
 		"success": True,
@@ -242,23 +284,6 @@ def submit_public_quote_approval(
 	)
 
 
-def _derive_approval_status(services: list) -> str:
-	"""Compute Repair Order approval_status from current service row statuses."""
-	has_pending = any(s.status in ("Draft", "Estimating", "Pending Approval") for s in services)
-	has_approved = any(s.status == "Approved" for s in services)
-	has_declined = any(s.status == "Declined" for s in services)
-
-	if has_approved and has_pending:
-		return "Partially Approved"
-	if has_pending or not services:
-		return "Pending Approval"
-	if has_approved:
-		return "Approved"
-	if has_declined:
-		return "Declined"
-	return "Pending Approval"
-
-
 def _normalize_dispatch_channel(channel: str | None) -> str:
 	"""Normalize and validate approval dispatch channel names."""
 	normalized = (channel or "sms").strip().lower()
@@ -290,7 +315,12 @@ def _dispatch_sms_approval(
 	recipient: str | None,
 ) -> dict:
 	"""Send approval link over SMS or fall back cleanly to link-only when SMS is unconfigured."""
-	raw_phone = recipient if recipient is not None else frappe.db.get_value("Customer", doc.customer, "mobile_no")
+	explicit_recipient = recipient.strip() if isinstance(recipient, str) and recipient.strip() else None
+	raw_phone = (
+		explicit_recipient
+		if explicit_recipient is not None
+		else frappe.db.get_value("Customer", doc.customer, "mobile_no")
+	)
 	if not raw_phone and getattr(doc, "contact_person", None):
 		raw_phone = frappe.db.get_value("Contact", doc.contact_person, "mobile_no") or frappe.db.get_value(
 			"Contact", doc.contact_person, "phone"
@@ -342,18 +372,28 @@ def _dispatch_email_approval(
 	recipient: str | None,
 ) -> dict:
 	"""Send approval link via email."""
-	raw_email = recipient if recipient is not None else frappe.db.get_value("Customer", doc.customer, "email_id")
+	explicit_recipient = recipient.strip() if isinstance(recipient, str) and recipient.strip() else None
+	raw_email = (
+		explicit_recipient
+		if explicit_recipient is not None
+		else frappe.db.get_value("Customer", doc.customer, "email_id")
+	)
 	if not raw_email and getattr(doc, "contact_person", None):
 		raw_email = frappe.db.get_value("Contact", doc.contact_person, "email_id")
 	email = raw_email.strip() if isinstance(raw_email, str) and raw_email.strip() else None
 	if not email:
 		frappe.throw(_("No customer email available. Please specify an email address."))
 
-	subject = _("Repair Estimate Authorization - {0}").format(vehicle_display)
+	safe_vehicle_subject = str(vehicle_display or "").replace("\r", " ").replace("\n", " ")
+	safe_vehicle = escape_html(safe_vehicle_subject)
+	safe_customer = escape_html(str(customer_name or ""))
+	safe_url = escape_html(str(approval_url or ""))
+
+	subject = _("Repair Estimate Authorization - {0}").format(safe_vehicle)
 	message = _(
-		"<p>Hello {0},</p><p>Please review and authorize your automotive repair estimate by clicking the link below:</p>"
-		"<p><a href='{1}' class='btn btn-primary'>Review & Authorize Estimate</a></p>"
-	).format(customer_name, approval_url)
+		"<p>Hello {0},</p><p>Please review and authorize your automotive repair estimate for {1} by clicking the link below:</p>"
+		"<p><a href='{2}' class='btn btn-primary'>Review & Authorize Estimate</a></p>"
+	).format(safe_customer, safe_vehicle, safe_url)
 
 	frappe.sendmail(recipients=[email], subject=subject, message=message, now=True)
 	return {
@@ -428,7 +468,7 @@ def _serialize_portal_services(services: list) -> list[dict]:
 		items_meta = {row.name: row for row in rows}
 
 	serialized = []
-	for service, raw_parts in zip(services, parsed_parts_by_idx):
+	for service, raw_parts in zip(services, parsed_parts_by_idx, strict=True):
 		enriched_parts = []
 		for part in raw_parts:
 			if not isinstance(part, dict):
@@ -495,7 +535,6 @@ def _serialize_approval_logs(doc) -> list[dict]:
 			"authorized_amount": flt(log.authorized_amount),
 			"approved_services": log.approved_services,
 			"declined_services": log.declined_services,
-			"signature_image": log.signature_image,
 			"audit_hash": getattr(log, "audit_hash", None),
 		}
 		for log in getattr(doc, "approval_logs", [])
@@ -514,7 +553,6 @@ def _serialize_approval_logs(doc) -> list[dict]:
 			)
 			or _("None"),
 			"declined_services": ", ".join(s.service_title for s in prior_declined) or _("None"),
-			"signature_image": doc.signature_image,
 			"audit_hash": getattr(doc, "audit_hash", None),
 		})
 	return logs

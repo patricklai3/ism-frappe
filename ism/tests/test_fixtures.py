@@ -1,13 +1,24 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-import time as _time
-import frappe
-from datetime import time, timedelta
-from frappe.utils import add_days, today
+import warnings
 
-PREFIX = "Test "
-TEST_PREFIX = "_TEST_ISM_"
+import frappe
+from frappe.utils import today
+
+from ism.tests.base import retry_on_deadlock
+from ism.tests.constants import (
+	LEGACY_TEST_PREFIX,
+	PRESERVED_PAYMENT_ENTRIES,
+	PRESERVED_REPAIR_ORDERS,
+	PRESERVED_SALES_INVOICES,
+	STATIC_FIXTURE_CUSTOMER,
+	STATIC_FIXTURE_EMPLOYEES,
+	STATIC_FIXTURE_VEHICLE_VIN,
+	TEST_PREFIX,
+)
+
+PREFIX = LEGACY_TEST_PREFIX
 
 EQUIPMENT_TAGS = ["Lift", "Alignment Rack", "HV Battery Station"]
 
@@ -15,18 +26,18 @@ SERVICE_BAYS = {
 	f"{PREFIX}Bay 1": {
 		"is_active": 1,
 		"description": "Primary service bay with 2-post lift",
-		"equipment": [{"equipment_tag": "Lift"}]
+		"equipment": [{"equipment_tag": "Lift"}],
 	},
 	f"{PREFIX}Bay 2": {
 		"is_active": 1,
 		"description": "Alignment bay with lift and rack",
-		"equipment": [{"equipment_tag": "Lift"}, {"equipment_tag": "Alignment Rack"}]
+		"equipment": [{"equipment_tag": "Lift"}, {"equipment_tag": "Alignment Rack"}],
 	},
 	f"{PREFIX}Bay 3": {
 		"is_active": 0,
 		"description": "Inactive bay",
-		"equipment": []
-	}
+		"equipment": [],
+	},
 }
 
 SCHEDULE_ENTRY_TYPES = [
@@ -114,8 +125,8 @@ ITEMS = {
 	},
 }
 
-CUSTOMER = f"{PREFIX}Customer"
-VEHICLE_VIN = "5YJSA1E26CF000001"
+CUSTOMER = STATIC_FIXTURE_CUSTOMER
+VEHICLE_VIN = STATIC_FIXTURE_VEHICLE_VIN
 
 
 def get_default_company():
@@ -184,7 +195,7 @@ def ensure_equipment_tags():
 					"doctype": "Equipment Tag",
 					"tag_name": tag,
 				}).insert(ignore_permissions=True)
-			except Exception:
+			except frappe.DuplicateEntryError:
 				pass
 
 
@@ -204,7 +215,7 @@ def ensure_service_bays():
 					for eq in data["equipment"]:
 						doc.append("equipment", eq)
 				doc.insert(ignore_permissions=True)
-			except Exception:
+			except frappe.DuplicateEntryError:
 				pass
 
 
@@ -220,7 +231,7 @@ def ensure_schedule_entry_types():
 					"color": item["color"],
 					"is_service_appointment": item.get("is_service_appointment", 1),
 				}).insert(ignore_permissions=True)
-			except Exception:
+			except frappe.DuplicateEntryError:
 				pass
 
 
@@ -242,11 +253,10 @@ def ensure_employees():
 				"company": company,
 			}
 			if "designation" in data and frappe.db.has_column("Employee", "designation"):
-				# Ensure designation exists
 				if not frappe.db.exists("Designation", data["designation"]):
 					try:
 						frappe.get_doc({"doctype": "Designation", "designation_name": data["designation"]}).insert(ignore_permissions=True)
-					except Exception:
+					except frappe.DuplicateEntryError:
 						pass
 				doc_dict["designation"] = data["designation"]
 			if "relieving_date" in data:
@@ -269,18 +279,21 @@ def ensure_items():
 				"is_stock_item": data.get("is_stock_item", 0),
 				"standard_rate": data.get("standard_rate", 100.0),
 			}
-			# Ensure Item Group exists
 			ig = data.get("item_group")
 			if ig and not frappe.db.exists("Item Group", ig):
 				try:
-					frappe.get_doc({"doctype": "Item Group", "item_group_name": ig, "parent_item_group": "All Item Groups"}).insert(ignore_permissions=True)
-				except Exception:
+					frappe.get_doc({
+						"doctype": "Item Group",
+						"item_group_name": ig,
+						"parent_item_group": "All Item Groups",
+					}).insert(ignore_permissions=True)
+				except frappe.DuplicateEntryError:
 					pass
 			if "custom_frt" in data and frappe.db.has_column("Item", "custom_frt"):
 				doc_dict["custom_frt"] = data["custom_frt"]
 			try:
 				frappe.get_doc(doc_dict).insert(ignore_permissions=True)
-			except Exception:
+			except frappe.DuplicateEntryError:
 				pass
 		else:
 			if "custom_frt" in data and frappe.db.has_column("Item", "custom_frt"):
@@ -293,34 +306,31 @@ def ensure_ism_settings(**kwargs):
 	"""Set up standard scheduling and estimation parameters in ISM Settings."""
 	if not frappe.db.exists("DocType", "ISM Settings"):
 		return None
-	try:
-		settings = frappe.get_single("ISM Settings")
-		fields = {
-			"operating_hours_start": "08:00:00",
-			"operating_hours_end": "17:00:00",
-			"break_start": "12:00:00",
-			"break_end": "12:30:00",
-			"default_slot_interval": 30,
-			"scheduling_horizon_days": 30,
-			"enable_technician_capacity": 1,
-			"technician_designation": "Technician",
-			"estimation_percentile": 80.0,
-			"estimation_sigma": 0.30,
-			"buffer_padding_minutes": 0,
-			"default_diagnostic_duration": 60,
-		}
-		fields.update(kwargs)
-		for k, v in fields.items():
-			if hasattr(settings, k):
-				setattr(settings, k, v)
-		settings.save(ignore_permissions=True)
-		return settings
-	except Exception:
-		return None
+	settings = frappe.get_single("ISM Settings")
+	fields = {
+		"operating_hours_start": "08:00:00",
+		"operating_hours_end": "17:00:00",
+		"break_start": "12:00:00",
+		"break_end": "12:30:00",
+		"default_slot_interval": 30,
+		"scheduling_horizon_days": 30,
+		"enable_technician_capacity": 1,
+		"technician_designation": "Technician",
+		"estimation_percentile": 80.0,
+		"estimation_sigma": 0.30,
+		"buffer_padding_minutes": 0,
+		"default_diagnostic_duration": 60,
+	}
+	fields.update(kwargs)
+	for k, v in fields.items():
+		if hasattr(settings, k):
+			setattr(settings, k, v)
+	settings.save(ignore_permissions=True)
+	return settings
 
 
 def create_test_schedule_entry(repair_order=None, **kwargs):
-	"""Helper to create a transactional Schedule Entry record with 3-attempt restart loop on error 1020."""
+	"""Helper to create a transactional Schedule Entry record with deadlock retries."""
 	if not frappe.db.exists("DocType", "Schedule Entry"):
 		return None
 	date = kwargs.pop("scheduled_date", today())
@@ -330,99 +340,145 @@ def create_test_schedule_entry(repair_order=None, **kwargs):
 	entry_type = kwargs.pop("entry_type", "Diagnostic")
 	status = kwargs.pop("status", "Scheduled")
 
-	for attempt in range(3):
-		try:
-			data = {
-				"doctype": "Schedule Entry",
-				"scheduled_date": date,
-				"scheduled_time": time_val,
-				"estimated_duration": duration,
-				"service_bay": bay,
-				"entry_type": entry_type,
-				"status": status,
-				**kwargs,
-			}
-			if repair_order:
-				data["repair_order"] = repair_order
-			doc = frappe.get_doc(data).insert(ignore_permissions=True)
-			return doc
-		except Exception as e:
-			if ("1020" in str(e) or "Deadlock" in str(e) or isinstance(e, frappe.QueryDeadlockError)) and attempt < 2:
-				_time.sleep(0.05 * (attempt + 1))
-				continue
-			raise
+	def _insert():
+		data = {
+			"doctype": "Schedule Entry",
+			"scheduled_date": date,
+			"scheduled_time": time_val,
+			"estimated_duration": duration,
+			"service_bay": bay,
+			"entry_type": entry_type,
+			"status": status,
+			**kwargs,
+		}
+		if repair_order:
+			data["repair_order"] = repair_order
+		return frappe.get_doc(data).insert(ignore_permissions=True)
+
+	return retry_on_deadlock(_insert)
 
 
 def create_test_repair_order(customer=None, vehicle=None, **kwargs):
-	"""Helper to create a transactional Repair Order record with 3-attempt restart loop on error 1020."""
+	"""Helper to create a transactional Repair Order record with deadlock retries."""
 	cust = customer or CUSTOMER
 	veh = vehicle or VEHICLE_VIN
 	odometer_in = kwargs.pop("odometer_in", 50000)
 
-	for attempt in range(3):
-		try:
-			data = {
-				"doctype": "Repair Order",
-				"customer": cust,
-				"vehicle": veh,
-				"odometer_in": odometer_in,
-				**kwargs,
-			}
-			doc = frappe.get_doc(data).insert(ignore_permissions=True)
-			return doc
-		except Exception as e:
-			if ("1020" in str(e) or "Deadlock" in str(e) or isinstance(e, frappe.QueryDeadlockError)) and attempt < 2:
-				_time.sleep(0.05 * (attempt + 1))
-				continue
-			raise
+	def _insert():
+		data = {
+			"doctype": "Repair Order",
+			"customer": cust,
+			"vehicle": veh,
+			"odometer_in": odometer_in,
+			**kwargs,
+		}
+		return frappe.get_doc(data).insert(ignore_permissions=True)
+
+	return retry_on_deadlock(_insert)
+
+
+def _cancel_and_delete_doc(doctype, name, errors):
+	if not frappe.db.exists(doctype, name):
+		return
+	try:
+		doc = frappe.get_doc(doctype, name)
+		if doc.docstatus == 1:
+			doc.cancel()
+		frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+	except frappe.DoesNotExistError:
+		pass
+	except Exception as err:
+		msg = f"{doctype} {name}: {err}"
+		errors.append(msg)
+		warnings.warn(f"teardown_transactional failed on {msg}", RuntimeWarning, stacklevel=2)
 
 
 def teardown_transactional():
 	"""Purge transactional test records in FK-safe reverse dependency order."""
-	# 1. Clean Schedule Entries with test bays, temp bays, or test repair orders
-	if frappe.db.exists("DocType", "Schedule Entry"):
-		entries = set(
-			frappe.get_all("Schedule Entry", filters=[["service_bay", "like", f"{PREFIX}%"]], pluck="name")
-			+ frappe.get_all("Schedule Entry", filters=[["service_bay", "like", f"{TEST_PREFIX}%"]], pluck="name")
-			+ frappe.get_all("Schedule Entry", filters=[["service_bay", "like", "TEMP%"]], pluck="name")
-			+ frappe.get_all("Schedule Entry", filters=[["customer", "in", [CUSTOMER, f"{TEST_PREFIX}Cust%"]]], pluck="name")
-		)
-		for e in entries:
-			try:
-				frappe.delete_doc("Schedule Entry", e, force=True, ignore_permissions=True)
-			except Exception:
-				pass
+	errors = []
+	try:
+		ro_names = []
+		if frappe.db.exists("DocType", "Repair Order"):
+			ro_set = set(
+				frappe.get_all("Repair Order", filters=[["customer", "=", CUSTOMER]], pluck="name")
+				+ frappe.get_all("Repair Order", filters=[["customer", "like", f"{TEST_PREFIX}Cust%"]], pluck="name")
+				+ frappe.get_all("Repair Order", filters=[["customer", "like", f"{TEST_PREFIX}%"]], pluck="name")
+			)
+			ro_names = [r for r in ro_set if r not in PRESERVED_REPAIR_ORDERS]
 
-	# 2. Clean Leave Applications created for test techs
-	if frappe.db.exists("DocType", "Leave Application"):
-		leaves = frappe.get_all(
-			"Leave Application",
-			filters=[["employee", "like", f"{PREFIX}%"]],
-			pluck="name",
-		)
-		for l_name in leaves:
-			try:
-				doc = frappe.get_doc("Leave Application", l_name)
-				if doc.docstatus == 1:
-					doc.cancel()
-				frappe.delete_doc("Leave Application", l_name, force=True, ignore_permissions=True)
-			except Exception:
-				pass
+		# 1. Clean Schedule Entries with test bays, temp bays, test customers, or test ROs
+		if frappe.db.exists("DocType", "Schedule Entry"):
+			entries = set(
+				frappe.get_all("Schedule Entry", filters=[["service_bay", "like", f"{PREFIX}%"]], pluck="name")
+				+ frappe.get_all("Schedule Entry", filters=[["service_bay", "like", f"{TEST_PREFIX}%"]], pluck="name")
+				+ frappe.get_all("Schedule Entry", filters=[["service_bay", "like", "TEMP%"]], pluck="name")
+				+ frappe.get_all("Schedule Entry", filters=[["customer", "=", CUSTOMER]], pluck="name")
+				+ frappe.get_all("Schedule Entry", filters=[["customer", "like", f"{TEST_PREFIX}Cust%"]], pluck="name")
+				+ frappe.get_all("Schedule Entry", filters=[["customer", "like", f"{TEST_PREFIX}%"]], pluck="name")
+			)
+			if ro_names:
+				entries.update(
+					frappe.get_all(
+						"Schedule Entry",
+						filters=[["repair_order", "in", ro_names]],
+						pluck="name",
+					)
+				)
+			for e in entries:
+				_cancel_and_delete_doc("Schedule Entry", e, errors)
 
-	# 3. Clean Repair Orders created for Test Customer or TEST_PREFIX
-	if frappe.db.exists("DocType", "Repair Order"):
-		ros = frappe.get_all(
-			"Repair Order",
-			filters=[["customer", "in", [CUSTOMER, f"{TEST_PREFIX}Cust%"]]],
-			pluck="name",
-		)
-		for ro_name in ros:
+		# 2. Clean Leave Applications created for test techs
+		if frappe.db.exists("DocType", "Leave Application"):
+			leaves = set(
+				frappe.get_all("Leave Application", filters=[["employee", "like", f"{PREFIX}%"]], pluck="name")
+				+ frappe.get_all("Leave Application", filters=[["employee", "like", f"{TEST_PREFIX}%"]], pluck="name")
+				+ frappe.get_all(
+					"Leave Application",
+					filters=[["employee_name", "in", list(STATIC_FIXTURE_EMPLOYEES)]],
+					pluck="name",
+				)
+			)
+			for l_name in leaves:
+				_cancel_and_delete_doc("Leave Application", l_name, errors)
+
+		# 3. Clean Repair Orders (and linked Payment Entries / Sales Invoices first)
+		for ro_name in ro_names:
+			if not frappe.db.exists("Repair Order", ro_name):
+				continue
 			try:
 				doc = frappe.get_doc("Repair Order", ro_name)
+				if frappe.db.exists("DocType", "Schedule Entry"):
+					for se_name in frappe.get_all("Schedule Entry", filters={"repair_order": ro_name}, pluck="name"):
+						_cancel_and_delete_doc("Schedule Entry", se_name, errors)
+
+				si_name = getattr(doc, "sales_invoice", None)
+				if si_name and si_name not in PRESERVED_SALES_INVOICES and frappe.db.exists("Sales Invoice", si_name):
+					pe_refs = frappe.get_all(
+						"Payment Entry Reference",
+						filters={"reference_doctype": "Sales Invoice", "reference_name": si_name},
+						pluck="parent",
+					)
+					for pe_name in set(pe_refs):
+						if pe_name not in PRESERVED_PAYMENT_ENTRIES:
+							_cancel_and_delete_doc("Payment Entry", pe_name, errors)
+					_cancel_and_delete_doc("Sales Invoice", si_name, errors)
+					doc.db_set("sales_invoice", None)
+					doc.reload()
+				elif si_name and not frappe.db.exists("Sales Invoice", si_name):
+					doc.db_set("sales_invoice", None)
+					doc.reload()
+
 				if doc.docstatus == 1:
 					doc.cancel()
 				frappe.delete_doc("Repair Order", ro_name, force=True, ignore_permissions=True)
-			except Exception:
+			except frappe.DoesNotExistError:
 				pass
+			except Exception as err:
+				msg = f"Repair Order {ro_name}: {err}"
+				errors.append(msg)
+				warnings.warn(f"teardown_transactional failed on {msg}", RuntimeWarning, stacklevel=2)
+	finally:
+		frappe.db.rollback()
 
-	frappe.db.rollback()
+	if errors:
+		raise RuntimeError("teardown_transactional failed: " + "; ".join(errors))

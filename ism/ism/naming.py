@@ -31,12 +31,16 @@ def generate_safe_series_name(doctype: str, series_pattern: str, doc=None) -> st
 			prefix_parts.append(part)
 
 	prefix = "".join(prefix_parts)
-	existing = frappe.get_all(
-		doctype,
-		filters=[["name", "like", f"{prefix}%"]],
-		order_by="name desc",
-		limit=1,
-		pluck="name",
+	escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+	dt = frappe.qb.DocType(doctype)
+	existing = (
+		frappe.qb.from_(dt)
+		.select(dt.name)
+		.where(dt.name.like(f"{escaped_prefix}%"))
+		.orderby(dt.name, order=frappe.qb.desc)
+		.limit(1)
+		.for_update()
+		.run(pluck=True)
 	)
 
 	next_num = 1

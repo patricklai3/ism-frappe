@@ -16,6 +16,12 @@ def get_context(context):
 		res = get_public_quote_approval(token)
 	except frappe.ValidationError as exc:
 		res = {"valid": False, "error": str(exc) or _("Invalid or missing approval token.")}
+	except Exception:
+		frappe.log_error(
+			title="Quote Approval Portal Load Error",
+			message=frappe.get_traceback(),
+		)
+		res = {"valid": False, "error": _("Unable to load repair estimate authorization at this time.")}
 
 	context.token = token
 	context.approval_data = res

@@ -47,6 +47,46 @@ def get_sigma_for_item(
 	return _LOWER_SIGMA.get(cleaned, default_sigma)
 
 
+def _parse_finite_float(value: Any, label: str) -> float:
+	if isinstance(value, bool):
+		raise ValueError(f"Invalid {label}: {value}")
+	try:
+		num = float(value)
+	except (ValueError, TypeError):
+		raise ValueError(f"Invalid {label}: {value}") from None
+	if not math.isfinite(num):
+		raise ValueError(f"Invalid {label}: {value}")
+	return num
+
+
+def _resolve_estimation_params(
+	flat_rate_minutes: Any = None,
+	sigma: Any = DEFAULT_SIGMA,
+	percentile: Any = 0.80,
+	require_frt: bool = True,
+	**kwargs,
+) -> tuple[Optional[float], float, float]:
+	"""Parse and bounds-check FRT, sigma, and percentile for log-normal estimation."""
+	pct = _parse_finite_float(percentile, "percentile")
+	if pct < 0.50 or pct >= 1.0:
+		raise ValueError(f"Percentile must be between 0.50 and 0.999..., got {percentile}")
+
+	sig = _parse_finite_float(sigma, "sigma")
+	if sig < 0.01 or sig > 2.0:
+		raise ValueError(f"Sigma must be between 0.01 and 2.0, got {sigma}")
+
+	frt_raw = kwargs.get("frt_minutes") if flat_rate_minutes is None else flat_rate_minutes
+	if frt_raw is None:
+		if require_frt:
+			raise ValueError("Flat rate time must be specified")
+		return None, sig, pct
+
+	frt = _parse_finite_float(frt_raw, "flat rate time")
+	if frt <= 0:
+		raise ValueError("Flat rate time must be positive (> 0)")
+	return frt, sig, pct
+
+
 def approximate_z_score(percentile: float) -> float:
 	"""
 	Rational approximation of the standard normal inverse cumulative distribution function
@@ -61,11 +101,11 @@ def approximate_z_score(percentile: float) -> float:
 	Raises:
 		ValueError: If percentile < 0.50 or percentile >= 1.0.
 	"""
-	if percentile is None or not isinstance(percentile, (int, float)):
+	if percentile is None or isinstance(percentile, bool) or not isinstance(percentile, (int, float)):
 		raise ValueError(f"Percentile must be a numeric value, got {percentile}")
 
 	p = float(percentile)
-	if p < 0.50 or p >= 1.0:
+	if not math.isfinite(p) or p < 0.50 or p >= 1.0:
 		raise ValueError(f"Percentile must be in [0.50, 1.0), got {percentile}")
 
 	if p == 0.50:
@@ -86,7 +126,7 @@ def approximate_z_score(percentile: float) -> float:
 
 
 def estimate_duration(
-	flat_rate_minutes: float = None,
+	flat_rate_minutes: float | None = None,
 	sigma: float = DEFAULT_SIGMA,
 	percentile: float = 0.80,
 	**kwargs,
@@ -107,35 +147,12 @@ def estimate_duration(
 	Raises:
 		ValueError: If flat_rate_minutes <= 0, sigma outside [0.01, 2.0], or percentile outside [0.50, 1.0).
 	"""
-	if flat_rate_minutes is None:
-		flat_rate_minutes = kwargs.get("frt_minutes")
-
-	if flat_rate_minutes is None:
-		raise ValueError("Flat rate time must be specified")
-
-	try:
-		frt = float(flat_rate_minutes)
-	except (ValueError, TypeError):
-		raise ValueError(f"Invalid flat rate time: {flat_rate_minutes}")
-
-	if frt <= 0:
-		raise ValueError("Flat rate time must be positive (> 0)")
-
-	try:
-		sig = float(sigma)
-	except (ValueError, TypeError):
-		raise ValueError(f"Invalid sigma: {sigma}")
-
-	if sig < 0.01 or sig > 2.0:
-		raise ValueError(f"Sigma must be between 0.01 and 2.0, got {sigma}")
-
-	try:
-		pct = float(percentile)
-	except (ValueError, TypeError):
-		raise ValueError(f"Invalid percentile: {percentile}")
-
-	if pct < 0.50 or pct >= 1.0:
-		raise ValueError(f"Percentile must be between 0.50 and 0.999..., got {percentile}")
+	frt, sig, pct = _resolve_estimation_params(
+		flat_rate_minutes,
+		sigma=sigma,
+		percentile=percentile,
+		**kwargs,
+	)
 
 	z = _Z_SCORES.get(pct)
 	if z is None:
@@ -169,13 +186,12 @@ def estimate_total_duration(
 	if not flat_rate_list:
 		return 0
 
-	try:
-		pct = float(percentile)
-	except (ValueError, TypeError):
-		raise ValueError(f"Invalid percentile: {percentile}")
-
-	if pct < 0.50 or pct >= 1.0:
-		raise ValueError(f"Percentile must be between 0.50 and 0.999..., got {percentile}")
+	_, _, pct = _resolve_estimation_params(
+		None,
+		sigma=sigma,
+		percentile=percentile,
+		require_frt=False,
+	)
 
 	parsed_ops = []
 	for op in flat_rate_list:
@@ -188,25 +204,7 @@ def estimate_total_duration(
 			frt = op
 			op_sigma = sigma
 
-		if frt is None:
-			raise ValueError("Flat rate time must be specified")
-
-		try:
-			frt_val = float(frt)
-		except (ValueError, TypeError):
-			raise ValueError(f"Invalid flat rate time: {frt}")
-
-		if frt_val <= 0:
-			raise ValueError("Flat rate time must be positive (> 0)")
-
-		try:
-			sig_val = float(op_sigma)
-		except (ValueError, TypeError):
-			raise ValueError(f"Invalid sigma: {op_sigma}")
-
-		if sig_val < 0.01 or sig_val > 2.0:
-			raise ValueError(f"Sigma must be between 0.01 and 2.0, got {op_sigma}")
-
+		frt_val, sig_val, _ = _resolve_estimation_params(frt, sigma=op_sigma, percentile=pct)
 		parsed_ops.append((frt_val, sig_val))
 
 	# Single operation bypasses summation and matches estimate_duration exactly

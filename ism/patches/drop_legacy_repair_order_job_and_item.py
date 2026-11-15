@@ -2,16 +2,18 @@ import frappe
 
 
 def _migrate_user_tech_to_employee(table: str, column: str):
-	if not frappe.db.table_exists(table) or not frappe.db.has_column(table.replace("tab", "", 1), column):
+	doctype = table[3:] if table.startswith("tab") else table
+	if not frappe.db.table_exists(table) or not frappe.db.has_column(doctype, column):
 		return
 
-	rows = frappe.db.sql(
-		f"""
-		SELECT DISTINCT `{column}` AS tech_val
-		FROM `{table}`
-		WHERE `{column}` IS NOT NULL AND `{column}` != ''
-		""",
-		as_dict=True,
+	tbl = frappe.qb.DocType(doctype)
+	col = tbl[column]
+	rows = (
+		frappe.qb.from_(tbl)
+		.select(col.as_("tech_val"))
+		.distinct()
+		.where(col.isnotnull() & (col != ""))
+		.run(as_dict=True)
 	)
 	for row in rows:
 		tech_val = row.tech_val
@@ -19,13 +21,13 @@ def _migrate_user_tech_to_employee(table: str, column: str):
 			continue
 		emp_name = frappe.db.get_value("Employee", {"user_id": tech_val}, "name")
 		if emp_name:
-			frappe.db.sql(
-				f"UPDATE `{table}` SET `{column}` = %s WHERE `{column}` = %s",
-				(emp_name, tech_val),
-			)
+			frappe.qb.update(tbl).set(col, emp_name).where(col == tech_val).run()
 
 
 def execute():
+	_migrate_user_tech_to_employee("tabRepair Order Time Log", "technician")
+	_migrate_user_tech_to_employee("tabRepair Order Service", "assigned_technician")
+
 	for doctype_name, table_name in (
 		("Repair Order Job", "tabRepair Order Job"),
 		("Repair Order Item", "tabRepair Order Item"),
@@ -33,6 +35,3 @@ def execute():
 		if frappe.db.exists("DocType", doctype_name):
 			frappe.delete_doc("DocType", doctype_name, force=True, ignore_permissions=True)
 		frappe.db.sql_ddl(f"DROP TABLE IF EXISTS `{table_name}`")
-
-	_migrate_user_tech_to_employee("tabRepair Order Time Log", "technician")
-	_migrate_user_tech_to_employee("tabRepair Order Service", "assigned_technician")

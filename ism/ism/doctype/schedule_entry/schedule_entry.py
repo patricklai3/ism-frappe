@@ -10,10 +10,17 @@ from frappe.utils import cint
 
 from ism.ism.naming import generate_safe_series_name
 from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES
-from ism.scheduling.time_utils import effective_end_time
+from ism.scheduling.time_utils import (
+	calculate_working_span,
+	effective_end_time,
+	format_timedelta,
+	get_shop_settings,
+	normalize_time,
+	to_timedelta,
+)
 
 
-def sync_repair_order_schedule_entries(repair_order_name: str, exclude_entry: str = None):
+def sync_repair_order_schedule_entries(repair_order_name: str, exclude_entry: str | None = None):
 	"""Sync the informational Repair Order Schedule Entry child rows without saving the parent RO."""
 	if not repair_order_name or not frappe.db.exists("Repair Order", repair_order_name):
 		return
@@ -57,8 +64,11 @@ def sync_repair_order_schedule_entries(repair_order_name: str, exclude_entry: st
 				"status": entry.status,
 			})
 			child.db_insert()
-	except Exception as e:
-		frappe.log_error(f"Failed to sync schedule entries to Repair Order {repair_order_name}: {e}")
+	except Exception:
+		frappe.log_error(
+			title=f"Schedule Entry Sync Failed: {repair_order_name}",
+			message=frappe.get_traceback(),
+		)
 
 
 class ScheduleEntry(Document):
@@ -117,15 +127,15 @@ class ScheduleEntry(Document):
 			self.title = f"{customer} ({entry_type_str})"
 
 	def before_insert(self):
-		self.update_working_span()
 		self.populate_from_repair_order()
 		self.set_title()
 
 	def before_save(self):
-		self.update_working_span()
+		if getattr(self.flags, "ignore_validate", False) or not self.completion_date or not self.completion_time:
+			self.update_working_span()
 		self._prev_repair_order = (
 			frappe.db.get_value("Schedule Entry", self.name, "repair_order")
-			if self.name and frappe.db.exists("Schedule Entry", self.name)
+			if self.name and not self.is_new()
 			else None
 		)
 		self.populate_from_repair_order()
@@ -135,9 +145,18 @@ class ScheduleEntry(Document):
 		"""Calculate and persist completion_date and completion_time."""
 		if not self.scheduled_date or not self.scheduled_time:
 			return
+		span_key = (
+			str(self.scheduled_date),
+			str(self.scheduled_time),
+			cint(self.estimated_duration or 60),
+		)
+		if (
+			getattr(self, "_last_span_key", None) == span_key
+			and self.completion_date
+			and self.completion_time
+		):
+			return
 		try:
-			from ism.api.scheduling import calculate_working_span
-
 			span = calculate_working_span(
 				self.scheduled_date,
 				self.scheduled_time,
@@ -145,12 +164,18 @@ class ScheduleEntry(Document):
 			)
 			self.completion_date = span["completion_date"]
 			self.completion_time = span["completion_time"]
+			self._last_span_key = span_key
+		except frappe.ValidationError:
+			raise
 		except Exception:
-			from ism.scheduling.time_utils import to_timedelta
-
+			frappe.log_error(
+				title="Schedule Entry Working Span Calculation Failed",
+				message=frappe.get_traceback(),
+			)
 			self.completion_date = self.scheduled_date
 			end_td = to_timedelta(self.scheduled_time) + timedelta(minutes=self.estimated_duration or 60)
-			self.completion_time = str(end_td)
+			self.completion_time = format_timedelta(end_td)
+			self._last_span_key = span_key
 
 	def on_update(self):
 		prev_ro = getattr(self, "_prev_repair_order", None)
@@ -247,9 +272,6 @@ class ScheduleEntry(Document):
 		if not self.entry_type:
 			return
 
-		if not frappe.db.exists("Schedule Entry Type", self.entry_type):
-			return
-
 		requires_ro = frappe.db.get_value("Schedule Entry Type", self.entry_type, "requires_repair_order")
 		if requires_ro and not self.repair_order:
 			frappe.throw(
@@ -265,6 +287,10 @@ class ScheduleEntry(Document):
 		if self.status in NON_BLOCKING_ENTRY_STATUSES:
 			return
 
+		# Serialize concurrent bay overlap checks with an indexed row lock on the Service Bay.
+		sb = frappe.qb.DocType("Service Bay")
+		frappe.qb.from_(sb).select(sb.name).where(sb.name == self.service_bay).for_update().run()
+
 		from ism.api.scheduling import check_bay_availability
 
 		duration = self.estimated_duration or 60
@@ -277,9 +303,11 @@ class ScheduleEntry(Document):
 		)
 
 		if not is_available:
-			s_time_short = str(self.scheduled_time)[:5]
+			s_norm = normalize_time(self.scheduled_time) or str(self.scheduled_time)
+			s_time_short = s_norm[:5]
 			c_date = self.completion_date or self.scheduled_date
-			c_time_short = str(self.completion_time or "")[:5]
+			c_norm = normalize_time(self.completion_time) if self.completion_time else ""
+			c_time_short = (c_norm or "")[:5]
 			frappe.throw(
 				_("Service Bay '{0}' is already occupied during the requested time window ({1} {2} to {3} {4}).").format(
 					self.service_bay, self.scheduled_date, s_time_short, c_date, c_time_short
@@ -297,11 +325,22 @@ class ScheduleEntry(Document):
 			return
 
 		from ism.api.technician_availability import get_technician_pool_availability
-		from ism.scheduling.time_utils import get_shop_settings
 
 		settings = get_shop_settings()
 		if not settings.get("enable_technician_capacity"):
 			return
+
+		designation = settings.get("technician_designation") or "Technician"
+		emp = frappe.qb.DocType("Employee")
+		(
+			frappe.qb.from_(emp)
+			.select(emp.name)
+			.where(emp.designation == designation)
+			.where(emp.status == "Active")
+			.orderby(emp.name)
+			.for_update()
+			.run()
+		)
 
 		pool = get_technician_pool_availability(
 			date=str(self.scheduled_date),

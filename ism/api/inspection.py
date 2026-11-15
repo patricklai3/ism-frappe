@@ -1,7 +1,11 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import base64
+import binascii
 import json
+import math
+from urllib.parse import urlparse
 
 import frappe
 from frappe import _
@@ -9,6 +13,13 @@ from frappe.utils import cint, now_datetime
 
 DEFAULT_INSPECTION_TEMPLATE = "Standard Vehicle Walkaround"
 VALID_INSPECTION_STATUSES = ("Pending", "Pass", "Attention", "Fail", "N/A")
+_MAX_INSPECTION_PHOTO_BYTES = 5 * 1024 * 1024
+_MAX_PHOTOS_PER_ITEM = 20
+_ALLOWED_IMAGE_DATA_PREFIXES = (
+	("data:image/png;base64,", "png"),
+	("data:image/jpeg;base64,", "jpg"),
+	("data:image/webp;base64,", "webp"),
+)
 _STATUS_ALIASES = {
 	"pending": "Pending",
 	"pass": "Pass",
@@ -43,7 +54,7 @@ def list_inspection_templates(include_inactive: bool | int | str = False) -> dic
 	frappe.has_permission("Inspection Template", "read", throw=True)
 	filters = {} if _as_bool(include_inactive) else {"is_active": 1}
 
-	rows = frappe.get_all(
+	rows = frappe.get_list(
 		"Inspection Template",
 		filters=filters,
 		fields=["name", "template_name", "is_active", "description"],
@@ -53,13 +64,18 @@ def list_inspection_templates(include_inactive: bool | int | str = False) -> dic
 	item_counts: dict[str, int] = {}
 	if rows:
 		template_names = [row.name for row in rows]
-		child_rows = frappe.get_all(
-			"Inspection Template Item",
-			filters={"parent": ["in", template_names], "parenttype": "Inspection Template"},
-			fields=["parent"],
+		count_rows = frappe.db.sql(
+			"""
+			SELECT parent, COUNT(*) AS item_count
+			FROM `tabInspection Template Item`
+			WHERE parent IN %s AND parenttype = 'Inspection Template'
+			GROUP BY parent
+			""",
+			(tuple(template_names),),
+			as_dict=True,
 		)
-		for child in child_rows:
-			item_counts[child.parent] = item_counts.get(child.parent, 0) + 1
+		for count_row in count_rows:
+			item_counts[count_row.parent] = cint(count_row.item_count)
 
 	templates = [
 		{
@@ -78,8 +94,11 @@ def list_inspection_templates(include_inactive: bool | int | str = False) -> dic
 def get_inspection_template(template_name: str | None = None) -> dict:
 	"""Retrieve an Inspection Template and its ordered checklist items."""
 	frappe.has_permission("Inspection Template", "read", throw=True)
+	if template_name is not None and not isinstance(template_name, str):
+		frappe.throw(_("Inspection Template name must be a string."))
 	resolved_name = _resolve_template_name(template_name)
 	doc = frappe.get_doc("Inspection Template", resolved_name)
+	doc.check_permission("read")
 
 	return {
 		"name": doc.name,
@@ -108,8 +127,12 @@ def apply_inspection_template(
 ) -> dict:
 	"""Apply an Inspection Template's checklist items onto Repair Order.inspection_items."""
 	ro = _get_repair_order(repair_order, "write")
+	frappe.has_permission("Inspection Template", "read", throw=True)
+	if template_name is not None and not isinstance(template_name, str):
+		frappe.throw(_("Inspection Template name must be a string."))
 	resolved_name = _resolve_template_name(template_name or getattr(ro, "inspection_template", None))
 	template_doc = frappe.get_doc("Inspection Template", resolved_name)
+	template_doc.check_permission("read")
 
 	ro.inspection_template = template_doc.name
 	if _as_bool(replace_existing):
@@ -146,21 +169,31 @@ def record_check_in_inspection(
 ) -> dict:
 	"""Record or update vehicle check-in intake fields and inspection item findings."""
 	ro = _get_repair_order(repair_order, "write")
+	if template_name is not None and not isinstance(template_name, str):
+		frappe.throw(_("Inspection Template name must be a string."))
+	if customer_concern is not None and not isinstance(customer_concern, str):
+		frappe.throw(_("Customer concern must be a string."))
 
 	if _as_bool(auto_apply_template):
+		frappe.has_permission("Inspection Template", "read", throw=True)
 		resolved_tpl = _resolve_template_name(template_name or getattr(ro, "inspection_template", None))
 		template_doc = frappe.get_doc("Inspection Template", resolved_tpl)
+		template_doc.check_permission("read")
 		ro.inspection_template = template_doc.name
 		_merge_template_items(ro, template_doc)
-	elif template_name and isinstance(template_name, str) and template_name.strip():
-		ro.inspection_template = _resolve_template_name(template_name)
+	elif template_name and template_name.strip():
+		frappe.has_permission("Inspection Template", "read", throw=True)
+		resolved_tpl = _resolve_template_name(template_name)
+		template_doc = frappe.get_doc("Inspection Template", resolved_tpl)
+		template_doc.check_permission("read")
+		ro.inspection_template = template_doc.name
 
 	raw_odo = odometer_in if odometer_in is not None else odometer
 	if raw_odo is not None and raw_odo != "":
 		ro.odometer_in = _parse_odometer(raw_odo)
 
 	if customer_concern is not None:
-		ro.customer_concern = customer_concern.strip() if isinstance(customer_concern, str) else customer_concern
+		ro.customer_concern = customer_concern.strip()
 
 	parsed_items = _parse_items_input(items)
 	updated_count = 0
@@ -201,10 +234,12 @@ def _resolve_template_name(template_name: str | None = None) -> str:
 
 	if frappe.db.exists("Inspection Template", DEFAULT_INSPECTION_TEMPLATE):
 		is_active = frappe.db.get_value("Inspection Template", DEFAULT_INSPECTION_TEMPLATE, "is_active")
-		if is_active is None or cint(is_active):
+		if (is_active is None or cint(is_active)) and frappe.has_permission(
+			"Inspection Template", "read", doc=DEFAULT_INSPECTION_TEMPLATE
+		):
 			return DEFAULT_INSPECTION_TEMPLATE
 
-	fallback = frappe.get_all(
+	fallback = frappe.get_list(
 		"Inspection Template",
 		filters={"is_active": 1},
 		pluck="name",
@@ -264,18 +299,40 @@ def _parse_items_input(items: list | str | None) -> list[dict]:
 
 def _find_or_create_inspection_row(ro, entry: dict):
 	rows = getattr(ro, "inspection_items", [])
-	row_id = entry.get("name") or entry.get("row_id")
-	if row_id:
+	has_name = entry.get("name") is not None
+	has_row_id = entry.get("row_id") is not None
+	if has_name or has_row_id:
+		raw_id = entry.get("name") if has_name else entry.get("row_id")
+		if not isinstance(raw_id, str) or not raw_id.strip():
+			frappe.throw(_("Inspection item row identifier must be a non-empty string."))
+		row_id = raw_id.strip()
 		for row in rows:
 			if row.name == row_id:
 				return row, False
+		frappe.throw(
+			_("Inspection row '{0}' was not found on Repair Order {1}.").format(row_id, ro.name),
+			frappe.DoesNotExistError,
+		)
 
 	raw_idx = entry.get("idx")
-	if raw_idx is not None and not isinstance(raw_idx, bool):
-		target_idx = cint(raw_idx)
+	if raw_idx is not None:
+		if isinstance(raw_idx, bool):
+			frappe.throw(_("Inspection item idx must be a positive integer."))
+		if isinstance(raw_idx, int):
+			target_idx = raw_idx
+		elif isinstance(raw_idx, str) and raw_idx.strip().isdigit():
+			target_idx = int(raw_idx.strip())
+		else:
+			frappe.throw(_("Inspection item idx must be a positive integer."))
+		if target_idx <= 0:
+			frappe.throw(_("Inspection item idx must be a positive integer."))
 		for row in rows:
 			if row.idx == target_idx:
 				return row, False
+		frappe.throw(
+			_("Inspection row #{0} was not found on Repair Order {1}.").format(target_idx, ro.name),
+			frappe.DoesNotExistError,
+		)
 
 	desc = entry.get("inspection_description")
 	if isinstance(desc, str) and desc.strip():
@@ -291,19 +348,28 @@ def _find_or_create_inspection_row(ro, entry: dict):
 
 def _apply_item_findings(ro, row, entry: dict, stamp) -> None:
 	touched = False
-	if isinstance(entry.get("inspection_description"), str) and entry["inspection_description"].strip():
-		row.inspection_description = entry["inspection_description"].strip()
+	if "inspection_description" in entry and entry.get("inspection_description") is not None:
+		raw_desc = entry["inspection_description"]
+		if not isinstance(raw_desc, str) or not raw_desc.strip():
+			frappe.throw(_("Inspection description must be a non-empty string."))
+		row.inspection_description = raw_desc.strip()
 
 	if "status" in entry and entry["status"] is not None:
 		row.status = _normalize_inspection_status(entry["status"])
 		touched = True
 
 	if "condition" in entry:
-		row.condition = entry["condition"]
+		cond = entry["condition"]
+		if cond is not None and not isinstance(cond, str):
+			frappe.throw(_("Inspection condition must be a string."))
+		row.condition = cond
 		touched = True
 
 	if "notes" in entry:
-		row.notes = entry["notes"]
+		notes = entry["notes"]
+		if notes is not None and not isinstance(notes, str):
+			frappe.throw(_("Inspection notes must be a string."))
+		row.notes = notes
 		touched = True
 
 	if "image" in entry or "photos" in entry:
@@ -317,40 +383,101 @@ def _apply_item_findings(ro, row, entry: dict, stamp) -> None:
 		row.inspected_at = stamp
 
 
+def _decode_raster_data_uri(value: str) -> tuple[bytes, str]:
+	"""Validate an allowlisted raster base64 data URI and return decoded bytes + extension."""
+	lower = value.lower()
+	matched_prefix = None
+	ext = None
+	for prefix, candidate_ext in _ALLOWED_IMAGE_DATA_PREFIXES:
+		if lower.startswith(prefix):
+			matched_prefix = prefix
+			ext = candidate_ext
+			break
+
+	if not matched_prefix or not ext:
+		frappe.throw(_("Unsupported photo data URI. Allowed formats: PNG, JPEG, WebP."))
+
+	b64_payload = value[len(matched_prefix) :].strip()
+	if not b64_payload:
+		frappe.throw(_("Inspection photo payload cannot be empty."))
+
+	max_b64_len = (_MAX_INSPECTION_PHOTO_BYTES * 4 // 3) + 16
+	if len(b64_payload) > max_b64_len:
+		frappe.throw(_("Inspection photo exceeds maximum allowed size (5 MB)."))
+
+	try:
+		decoded = base64.b64decode(b64_payload, validate=True)
+	except (binascii.Error, ValueError):
+		frappe.throw(_("Inspection photo contains invalid base64 data."))
+
+	if not decoded or len(decoded) > _MAX_INSPECTION_PHOTO_BYTES:
+		frappe.throw(_("Inspection photo exceeds allowed size bounds."))
+
+	return decoded, ext
+
+
+def _is_safe_persisted_file_url(value: str) -> bool:
+	"""Allow only safe local Frappe file URLs under /files/ or /private/files/."""
+	if not value or not value.startswith(("/private/files/", "/files/")):
+		return False
+	if "\\" in value or any(ch.isspace() or ord(ch) < 32 for ch in value):
+		return False
+	parsed = urlparse(value)
+	if parsed.scheme or parsed.netloc or parsed.path != value or parsed.query or parsed.fragment:
+		return False
+	if ".." in value.split("/"):
+		return False
+	return True
+
+
 def _collect_and_save_photos(ro, row, entry: dict) -> list[str]:
 	from frappe.utils.file_manager import save_file
 
 	incoming: list[str] = []
-	if entry.get("image"):
-		incoming.append(str(entry["image"]).strip())
+	raw_image = entry.get("image")
+	if raw_image is not None:
+		if not isinstance(raw_image, str):
+			frappe.throw(_("Inspection image must be a string."))
+		if raw_image.strip():
+			incoming.append(raw_image.strip())
 
 	raw_photos = entry.get("photos")
-	if isinstance(raw_photos, str):
-		try:
-			raw_photos = json.loads(raw_photos) if raw_photos.strip() else []
-		except Exception:
-			frappe.throw(_("Invalid JSON format for inspection photos."))
-	if isinstance(raw_photos, list):
+	if raw_photos is not None:
+		if isinstance(raw_photos, str):
+			try:
+				raw_photos = json.loads(raw_photos) if raw_photos.strip() else []
+			except Exception:
+				frappe.throw(_("Invalid JSON format for inspection photos."))
+		if not isinstance(raw_photos, list):
+			frappe.throw(_("Inspection photos must be a list of URLs or data URIs."))
 		for photo in raw_photos:
-			if isinstance(photo, str) and photo.strip():
+			if not isinstance(photo, str):
+				frappe.throw(_("Each inspection photo entry must be a string."))
+			if photo.strip():
 				incoming.append(photo.strip())
+
+	if len(incoming) > _MAX_PHOTOS_PER_ITEM:
+		frappe.throw(_("Too many photos attached to a single inspection item."))
 
 	# Preserve existing photos unless the caller explicitly passed a replacement photos list
 	base_photos = [] if "photos" in entry else _parse_row_photos(row)
 	saved_urls = list(base_photos)
 
-	for idx, value in enumerate(incoming, start=1):
-		if value.startswith("data:image"):
+	for value in incoming:
+		if value.lower().startswith("data:"):
+			decoded, ext = _decode_raster_data_uri(value)
 			file_doc = save_file(
-				fname=f"inspect_{ro.name}_{row.idx or 'new'}_{int(now_datetime().timestamp())}_{idx}.png",
-				content=value,
+				fname=f"inspect_{frappe.generate_hash(length=12)}.{ext}",
+				content=decoded,
 				dt="Repair Order",
 				dn=ro.name,
-				decode=True,
-				is_private=0,
+				decode=False,
+				is_private=1,
 			)
 			url = file_doc.file_url
 		else:
+			if not _is_safe_persisted_file_url(value):
+				frappe.throw(_("Invalid inspection photo URL. Only local /files/ or /private/files/ paths are permitted."))
 			url = value
 		if url and url not in saved_urls:
 			saved_urls.append(url)
@@ -429,20 +556,27 @@ def _normalize_inspection_status(value: str) -> str:
 
 
 def _parse_odometer(value: int | float | str) -> int:
-	if isinstance(value, bool):
+	if isinstance(value, bool) or not isinstance(value, (int, float, str)):
 		frappe.throw(_("Invalid odometer reading."))
 	try:
-		parsed = int(float(value))
+		numeric = float(value)
 	except (TypeError, ValueError):
 		frappe.throw(_("Odometer reading must be a valid integer."))
+	if not math.isfinite(numeric):
+		frappe.throw(_("Odometer reading must be a finite number."))
+	parsed = int(numeric)
 	if parsed < 0:
 		frappe.throw(_("Odometer reading cannot be negative."))
 	return parsed
 
 
 def _as_bool(value: bool | int | str) -> bool:
+	if value is None:
+		return False
 	if isinstance(value, bool):
 		return value
+	if isinstance(value, int):
+		return bool(value)
 	if isinstance(value, str):
 		return value.strip().lower() in ("1", "true", "yes", "on")
-	return bool(cint(value))
+	frappe.throw(_("Boolean flag must be a bool, int, or string."))

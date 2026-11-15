@@ -175,19 +175,8 @@ canvas#sig-canvas {
 							<b>{{ _("Declined:") }}</b> {{ log.declined_services }}
 						</div>
 						{% endif %}
-						{% if log.signature_image %}
-						<div class="mt-2">
-							<img src="{{ log.signature_image }}" alt="Signature" style="max-height: 50px; border: 1px solid #cbd5e0; border-radius: 4px; padding: 2px; background: #fff;">
-						</div>
-						{% endif %}
 					</div>
 					{% endfor %}
-				</div>
-				{% elif approval_data.signature_image %}
-				<div class="mt-4 border-top pt-3">
-					<h6>{{ _("Signature on File") }}:</h6>
-					<img src="{{ approval_data.signature_image }}" alt="Signature" style="max-height: 80px; border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px;">
-					<p class="small text-muted mt-1">{{ _("Authorized by") }}: {{ approval_data.authorized_by }} ({{ approval_data.authorized_at }})</p>
 				</div>
 				{% endif %}
 
@@ -400,11 +389,6 @@ canvas#sig-canvas {
 							{% if log.declined_services and log.declined_services != 'None' %}
 							<div class="small text-danger">
 								<b>{{ _("Declined:") }}</b> {{ log.declined_services }}
-							</div>
-							{% endif %}
-							{% if log.signature_image %}
-							<div class="mt-2">
-								<img src="{{ log.signature_image }}" alt="Signature" style="max-height: 45px; border: 1px solid #cbd5e0; border-radius: 4px; padding: 2px; background: #fff;">
 							</div>
 							{% endif %}
 						</div>

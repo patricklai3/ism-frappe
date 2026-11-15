@@ -103,6 +103,13 @@ def normalize_time(val: Union[str, time, timedelta, int, float, None]) -> Option
 	return f"{hour:02d}:{minute:02d}:{second:02d}"
 
 
+def _log_warning(context: str, exc: Exception) -> None:
+	try:
+		frappe.logger("ism").warning(f"{context}: {exc}")
+	except Exception:
+		pass
+
+
 def to_timedelta(val: Union[str, time, timedelta, int, float, None]) -> timedelta:
 	"""Convert time strings, datetime.time, numeric seconds, or timedelta into timedelta."""
 	if val is None:
@@ -123,7 +130,8 @@ def to_timedelta(val: Union[str, time, timedelta, int, float, None]) -> timedelt
 			minutes = int(parts[1]) if len(parts) > 1 else 0
 			seconds = int(float(parts[2])) if len(parts) > 2 else 0
 			return timedelta(hours=hours, minutes=minutes, seconds=seconds)
-		except (ValueError, IndexError):
+		except (ValueError, IndexError) as exc:
+			_log_warning(f"Unable to parse time value '{text}' in to_timedelta", exc)
 			return timedelta(0)
 	return timedelta(0)
 
@@ -148,7 +156,8 @@ def _get_cache():
 		return None
 	try:
 		return cache_fn()
-	except Exception:
+	except Exception as exc:
+		_log_warning("Failed to acquire frappe.cache()", exc)
 		return None
 
 
@@ -158,8 +167,8 @@ def invalidate_shop_settings_cache(doc=None, method=None) -> None:
 	if cache is not None:
 		try:
 			cache.delete_value(SHOP_SETTINGS_CACHE_KEY)
-		except Exception:
-			pass
+		except Exception as exc:
+			_log_warning("Failed to invalidate shop settings cache", exc)
 
 
 def invalidate_holiday_cache(doc=None, method=None) -> None:
@@ -173,8 +182,8 @@ def invalidate_holiday_cache(doc=None, method=None) -> None:
 			cache.delete_value(f"{HOLIDAY_LIST_CACHE_PREFIX}{name}")
 		elif hasattr(cache, "delete_keys"):
 			cache.delete_keys(HOLIDAY_LIST_CACHE_PREFIX)
-	except Exception:
-		pass
+	except Exception as exc:
+		_log_warning("Failed to invalidate holiday cache", exc)
 
 
 def _has_time_value(val: Any) -> bool:
@@ -189,8 +198,8 @@ def get_shop_settings() -> Dict[str, Any]:
 			cached = cache.get_value(SHOP_SETTINGS_CACHE_KEY)
 			if isinstance(cached, dict):
 				return dict(cached)
-		except Exception:
-			pass
+		except Exception as exc:
+			_log_warning("Failed to read cached shop settings", exc)
 
 	settings = dict(DEFAULT_SHOP_SETTINGS)
 
@@ -199,7 +208,8 @@ def get_shop_settings() -> Dict[str, Any]:
 
 	try:
 		doc = frappe.get_single("ISM Settings")
-	except Exception:
+	except frappe.DoesNotExistError as exc:
+		_log_warning("ISM Settings not found; using defaults", exc)
 		return settings
 
 	if _has_time_value(doc.operating_hours_start):
@@ -226,8 +236,8 @@ def get_shop_settings() -> Dict[str, Any]:
 	if cache is not None:
 		try:
 			cache.set_value(SHOP_SETTINGS_CACHE_KEY, dict(settings), expires_in_sec=300)
-		except Exception:
-			pass
+		except Exception as exc:
+			_log_warning("Failed to cache shop settings", exc)
 
 	return settings
 
@@ -270,8 +280,8 @@ def _default_is_holiday(target_date: date, holiday_list: Optional[str]) -> bool:
 			cached_dates = cache.get_value(cache_key)
 			if isinstance(cached_dates, (list, set, tuple)):
 				return str(target_date) in cached_dates
-		except Exception:
-			pass
+		except Exception as exc:
+			_log_warning("Failed to read holiday list cache", exc)
 
 	if not frappe.db.exists("DocType", "Holiday"):
 		return False
@@ -285,9 +295,40 @@ def _default_is_holiday(target_date: date, holiday_list: Optional[str]) -> bool:
 	if cache is not None:
 		try:
 			cache.set_value(cache_key, holiday_dates, expires_in_sec=3600)
-		except Exception:
-			pass
+		except Exception as exc:
+			_log_warning("Failed to write holiday list cache", exc)
 	return str(target_date) in holiday_dates
+
+
+def _consume_window_minutes(
+	segments: list[Dict[str, Any]],
+	curr_date: date,
+	curr_time: timedelta,
+	window_end: timedelta,
+	rem_minutes: float,
+) -> tuple[timedelta, float, bool]:
+	"""Consume working minutes within [curr_time, window_end]; return (next_time, remaining, completed)."""
+	avail_minutes = (window_end - curr_time).total_seconds() / 60.0
+	if avail_minutes <= 0:
+		return curr_time, rem_minutes, False
+
+	if rem_minutes <= avail_minutes:
+		seg_end = curr_time + timedelta(minutes=rem_minutes)
+		segments.append({
+			"date": str(curr_date),
+			"start_time": format_timedelta(curr_time),
+			"end_time": format_timedelta(seg_end),
+			"duration": rem_minutes,
+		})
+		return seg_end, 0.0, True
+
+	segments.append({
+		"date": str(curr_date),
+		"start_time": format_timedelta(curr_time),
+		"end_time": format_timedelta(window_end),
+		"duration": avail_minutes,
+	})
+	return window_end, rem_minutes - avail_minutes, False
 
 
 def calculate_working_span(
@@ -346,7 +387,7 @@ def calculate_working_span(
 	holiday_list = settings.get("holiday_list")
 	has_lunch = bool(bs_td and be_td and op_start < bs_td < be_td < op_end)
 	rem_minutes = duration_val
-	segments = []
+	segments: list[Dict[str, Any]] = []
 	spans_lunch = False
 	days_checked = 0
 
@@ -363,56 +404,29 @@ def calculate_working_span(
 			spans_lunch = True
 
 		if has_lunch and curr_time < bs_td:
-			avail_morning = (bs_td - curr_time).total_seconds() / 60.0
-			if avail_morning > 0:
-				if rem_minutes <= avail_morning:
-					seg_end = curr_time + timedelta(minutes=rem_minutes)
-					segments.append({
-						"date": str(curr_date),
-						"start_time": format_timedelta(curr_time),
-						"end_time": format_timedelta(seg_end),
-						"duration": rem_minutes,
-					})
-					curr_time = seg_end
-					rem_minutes = 0
-					break
-				segments.append({
-					"date": str(curr_date),
-					"start_time": format_timedelta(curr_time),
-					"end_time": format_timedelta(bs_td),
-					"duration": avail_morning,
-				})
-				rem_minutes -= avail_morning
-				curr_time = be_td
-				spans_lunch = True
+			curr_time, rem_minutes, completed = _consume_window_minutes(
+				segments, curr_date, curr_time, bs_td, rem_minutes
+			)
+			if completed:
+				break
+			curr_time = be_td
+			spans_lunch = True
 
 		if rem_minutes > 0 and curr_time < op_end:
-			avail_afternoon = (op_end - curr_time).total_seconds() / 60.0
-			if avail_afternoon > 0:
-				if rem_minutes <= avail_afternoon:
-					seg_end = curr_time + timedelta(minutes=rem_minutes)
-					segments.append({
-						"date": str(curr_date),
-						"start_time": format_timedelta(curr_time),
-						"end_time": format_timedelta(seg_end),
-						"duration": rem_minutes,
-					})
-					curr_time = seg_end
-					rem_minutes = 0
-					break
-				segments.append({
-					"date": str(curr_date),
-					"start_time": format_timedelta(curr_time),
-					"end_time": format_timedelta(op_end),
-					"duration": avail_afternoon,
-				})
-				rem_minutes -= avail_afternoon
-				curr_date = add_days(curr_date, 1)
-				curr_time = op_start
-				continue
+			curr_time, rem_minutes, completed = _consume_window_minutes(
+				segments, curr_date, curr_time, op_end, rem_minutes
+			)
+			if completed:
+				break
 
 		curr_date = add_days(curr_date, 1)
 		curr_time = op_start
+
+	if rem_minutes > 0:
+		_log_warning(
+			"calculate_working_span reached 60-day horizon with remaining minutes",
+			ValueError(f"{rem_minutes} minutes unallocated from {s_date}"),
+		)
 
 	spans_days = (curr_date - s_date).days + 1
 	is_multi = spans_days > 1 or curr_date > s_date

@@ -2,9 +2,6 @@
 # For license information, please see license.txt
 
 import json
-import math
-import unittest
-from unittest.mock import patch
 import frappe
 
 from ism.tests.base import ISMTestCase
@@ -216,24 +213,19 @@ class TestEstimationMath(ISMTestCase):
 		self._require_service()
 		ensure_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80, estimation_sigma=0.30)
 		res = get_estimate(self.item_brake1)  # Brake FRT 1.0 hr = 60m, sigma 0.20 -> P80 pure is 71
-		if isinstance(res, dict):
-			self.assertEqual(res["p_pure"], 71)
-			self.assertEqual(res["buffer_padding"], 10)
-			self.assertEqual(res["duration_minutes"], 81)
-		else:
-			# Fallback if scalar returned
-			self.assertEqual(res, 81)
+		self.assertIsInstance(res, dict)
+		self.assertEqual(res["p_pure"], 71)
+		self.assertEqual(res["buffer_padding"], 10)
+		self.assertEqual(res["duration_minutes"], 81)
 
 	def test_tier1_f5_multi_item_estimate_with_buffer(self):
 		"""F5: get_total_estimate sums items with F-W and adds buffer padding."""
 		self._require_service()
 		ensure_ism_settings(buffer_padding_minutes=15)
 		res = get_total_estimate([self.item_brake1, self.item_brake2])
-		if isinstance(res, dict):
-			self.assertEqual(res["buffer_padding"], 15)
-			self.assertEqual(res["total_duration_minutes"], res["p_pure"] + 15)
-		else:
-			self.assertGreater(res, 120)
+		self.assertIsInstance(res, dict)
+		self.assertEqual(res["buffer_padding"], 15)
+		self.assertEqual(res["total_duration_minutes"], res["p_pure"] + 15)
 
 	def test_tier1_f5_zero_buffer_setting(self):
 		"""F5: buffer_padding_minutes=0 adds no padding."""
@@ -344,10 +336,11 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier2_f5_missing_item_fallback_frt(self):
 		"""F5 Boundary: Missing Item in get_estimate uses fallback FRT."""
 		self._require_service()
+		ensure_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80, estimation_sigma=0.30)
 		res = get_estimate("NON_EXISTENT_PART_XYZ", fallback_frt=45.0, sigma=0.30)
 		# 45 min at 0.30 sigma P80 -> ceil(exp(ln(45) + 0.30*0.8416)) = 58 + 10 buffer = 68
-		duration = res["duration_minutes"] if isinstance(res, dict) else res
-		self.assertTrue(duration > 0)
+		self.assertIsInstance(res, dict)
+		self.assertEqual(res["duration_minutes"], 68)
 
 	def test_tier2_f5_skip_missing_items(self):
 		"""F5 Boundary: skip_missing=True ignores missing items without error."""
@@ -367,10 +360,10 @@ class TestEstimationMath(ISMTestCase):
 		self._require_service()
 		ensure_ism_settings(buffer_padding_minutes=15, estimation_percentile=0.85)
 		res = get_total_estimate([self.item_brake1, self.item_elec, self.item_tire])
-		if isinstance(res, dict):
-			self.assertEqual(res["buffer_padding"], 15)
-			self.assertEqual(res["operations_count"], 3)
-			self.assertGreater(res["total_duration_minutes"], 200)
+		self.assertIsInstance(res, dict)
+		self.assertEqual(res["buffer_padding"], 15)
+		self.assertEqual(res["operations_count"], 3)
+		self.assertGreater(res["total_duration_minutes"], 200)
 
 	def test_tier3_dynamic_settings_recalculation(self):
 		"""Tier 3: Mutating ISM Settings percentile & buffer immediately alters calculation."""
@@ -405,15 +398,15 @@ class TestEstimationMath(ISMTestCase):
 		items = [self.item_brake1, self.item_brake2, self.item_elec, self.item_tire]
 		res = get_total_estimate(items)
 
-		if isinstance(res, dict):
-			total = res["total_duration_minutes"]
-			pure = res["p_pure"]
-			buffer = res["buffer_padding"]
-			self.assertEqual(buffer, 15)
-			self.assertEqual(total, pure + buffer)
-			# Naive sum would exceed 380 min; diversified pure estimate should be significantly lower
-			self.assertLess(pure, 380)
-			self.assertGreater(pure, 300)
+		self.assertIsInstance(res, dict)
+		total = res["total_duration_minutes"]
+		pure = res["p_pure"]
+		buffer = res["buffer_padding"]
+		self.assertEqual(buffer, 15)
+		self.assertEqual(total, pure + buffer)
+		# Naive sum would exceed 380 min; diversified pure estimate should be significantly lower
+		self.assertLess(pure, 380)
+		self.assertGreater(pure, 300)
 
 	# --- estimate_repair_order Tests ---
 
