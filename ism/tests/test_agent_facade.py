@@ -9,6 +9,7 @@ import frappe
 from frappe.utils import add_days, today
 
 from ism.api.agent import (
+	_resolve_bay_for_booking,
 	add_deferred_services,
 	add_supplement,
 	amend_quote,
@@ -34,6 +35,7 @@ from ism.api.agent import (
 	get_vehicle_intelligence,
 	import_supplier_catalog,
 	import_tesla_procedure,
+	intake_and_find_slots,
 	link_vehicle_customer,
 	list_inspection_templates,
 	list_shop_action_items,
@@ -48,6 +50,7 @@ from ism.api.agent import (
 	update_appointment_status,
 	update_job_status,
 )
+from ism.api.scheduling import resolve_service_bay_identifier
 from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
 from ism.tests.base import ISMTestCase
 from ism.tests.test_fixtures import CUSTOMER, PREFIX, VEHICLE_VIN, ensure_ism_settings, setup_all, teardown_transactional
@@ -75,6 +78,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{PREFIX}Agent Cust 1",
 			vehicle_identifier="5YJ3E1EBXNF999001",
+			odometer_in=41200,
 			services=[
 				{"service_title": "Front Brake Pad Replacement", "labor_hours": 1.5, "labor_rate": 140.0},
 				{"service_title": "Cabin Air Filter Service", "labor_hours": 0.5, "labor_rate": 140.0},
@@ -113,6 +117,7 @@ class TestAgentFacade(ISMTestCase):
 		res_summary = create_quote(
 			customer_name=f"{PREFIX}Agent Cust 1b",
 			vehicle_identifier="5YJ3E1EBXNF999009",
+			odometer_in=41300,
 			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
 			include_summary=True,
 		)
@@ -125,6 +130,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{PREFIX}Agent Cust 2",
 			vehicle_identifier="5YJ3E1EBXNF999002",
+			odometer_in=41400,
 			services=[],
 			notes="General check-in inspection",
 		)
@@ -141,6 +147,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{PREFIX}Agent Cust 3",
 			vehicle_identifier="5YJ3E1EBXNF999003",
+			odometer_in=41500,
 			services=[
 				{"service_title": "Initial Service A", "labor_hours": 1.0, "labor_rate": 100.0},
 				{"service_title": "Initial Service B", "labor_hours": 2.0, "labor_rate": 100.0},
@@ -170,6 +177,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{PREFIX}Agent Cust 4",
 			vehicle_identifier="5YJ3E1EBXNF999004",
+			odometer_in=41600,
 			services=[{"service_title": "Service A", "labor_hours": 1.0}],
 		)
 		ro_name = res["data"]["name"]
@@ -194,6 +202,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=41700,
 			services=[{"service_title": "Service Book", "labor_hours": 1.0}],
 		)
 		ro_name = res["data"]["name"]
@@ -220,6 +229,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=41800,
 			services=[{"service_title": "Service Auth", "labor_hours": 1.0}],
 		)
 		ro_name = res["data"]["name"]
@@ -283,6 +293,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=10000,
 			services=[{"service_title": "Lock Test", "labor_hours": 1.0}],
 		)
 		ro_name = res["data"]["name"]
@@ -321,6 +332,7 @@ class TestAgentFacade(ISMTestCase):
 			vehicle_identifier="ABCD-789",
 			customer_phone="416-555-0199",
 			customer_email="platecust@example.com",
+			odometer_in=41900,
 			services=[{"service_title": "Wheel Torque Check", "labor_hours": 1.0}],
 		)
 		self.assertTrue(res["success"])
@@ -341,6 +353,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42000,
 			services=[{"service_title": "Stock & Tech Check", "labor_hours": 1.0}],
 		)
 		ro_name = res["data"]["name"]
@@ -382,6 +395,7 @@ class TestAgentFacade(ISMTestCase):
 			vehicle_identifier="WORK-123",
 			customer_phone="416-555-0142",
 			customer_email="workflow@example.com",
+			odometer_in=42100,
 			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0}],
 		)
 		self.assertTrue(quote_res["success"])
@@ -519,7 +533,12 @@ class TestAgentFacade(ISMTestCase):
 
 		update_job_status(repair_order=ro_name, action="complete", odometer_out=12050, notes="Done")
 		with self.assertRaises(frappe.ValidationError):
-			checkout_repair_order(repair_order=ro_name, confirm=False)
+			checkout_repair_order(
+				repair_order=ro_name,
+				payment_method="Debit / Interac",
+				odometer_out=12050,
+				confirm=False,
+			)
 
 		chk = checkout_repair_order(repair_order=ro_name, payment_method="Debit / Interac", odometer_out=12050, confirm=True)
 		self.assertTrue(chk["success"])
@@ -553,6 +572,7 @@ class TestAgentFacade(ISMTestCase):
 		q_res = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42200,
 			notes="Front suspension rattle",
 			services=[{"service_title": "Front Left Control Arm Replacement", "labor_hours": 1.5, "labor_rate": 140.0}],
 		)
@@ -646,6 +666,7 @@ class TestAgentFacade(ISMTestCase):
 		q = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42300,
 			services=[
 				pkg.package_name,
 				{"service_package": pkg.name, "service_title": "Custom Override Link", "labor_hours": 1.4},
@@ -718,6 +739,7 @@ class TestAgentFacade(ISMTestCase):
 		q = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42400,
 			services=[{"service_title": "Suspension Noise Check", "labor_hours": 1.0}],
 		)
 		ro_name = q["data"]["name"]
@@ -791,7 +813,7 @@ class TestAgentFacade(ISMTestCase):
 		}).insert(ignore_permissions=True)
 		self.track("Schedule Entry", pre_se.name)
 
-		created_ro = create_ro_from_appointment(schedule_entry=pre_se.name)
+		created_ro = create_ro_from_appointment(schedule_entry=pre_se.name, odometer_in=42450)
 		self.assertTrue(created_ro["success"])
 		new_ro_name = created_ro["data"]["repair_order"]
 		self.track("Repair Order", new_ro_name)
@@ -879,6 +901,7 @@ class TestAgentFacade(ISMTestCase):
 			q = create_quote(
 				customer_name=CUSTOMER,
 				vehicle_identifier=VEHICLE_VIN,
+				odometer_in=42500,
 				services=[{"service_title": "Custom Rate Verification", "labor_hours": 1.0}],
 			)
 			self.track("Repair Order", q["data"]["name"])
@@ -960,6 +983,7 @@ class TestAgentFacade(ISMTestCase):
 		q = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42600,
 			services=[{"service_title": "Initial Inspection", "labor_hours": 0.5}],
 		)
 		ro_name = q["data"]["name"]
@@ -1090,6 +1114,7 @@ class TestAgentFacade(ISMTestCase):
 		q = create_quote(
 			customer_name=cust.name,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42700,
 			services=[{"service_title": "Walkaround & Brake Check", "labor_hours": 1.0}],
 		)
 		ro_name = q["data"]["name"]
@@ -1194,6 +1219,7 @@ class TestAgentFacade(ISMTestCase):
 		q = create_quote(
 			customer_name=cust.name,
 			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42800,
 			services=[{"service_title": "Security Guard Brake Check", "labor_hours": 1.0}],
 		)
 		ro_name = q["data"]["name"]
@@ -1296,3 +1322,311 @@ class TestAgentFacade(ISMTestCase):
 		for fn in type_confusion_calls:
 			with self.assertRaises(frappe.ValidationError):
 				fn()
+
+	def test_resource_resolution_relative_time_and_conflict_feedback(self):
+		"""Verify display-name bay/tech resolution, strict ISO dates/times, and structured conflict feedback."""
+		bay_1 = f"{PREFIX}Bay 1"
+		bay_2 = f"{PREFIX}Bay 2"
+		tomorrow_date = add_days(today(), 1)
+
+		tech_id = frappe.db.get_value("Employee", {"status": "Active", "designation": "Technician"}, "name")
+		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name") if tech_id else None
+
+		with self.assertRaises(frappe.ValidationError):
+			find_available_slots(start_date="tomorrow", days_ahead=1, duration_minutes=60)
+		with self.assertRaises(frappe.ValidationError):
+			book_appointment(
+				scheduled_date=tomorrow_date,
+				start_time="9am",
+				service_bay=bay_1,
+				provisional_customer_name=f"{PREFIX}InvalidTime",
+			)
+
+		slots_res = find_available_slots(
+			start_date=tomorrow_date,
+			days_ahead=1,
+			duration_minutes=60,
+			service_bay=bay_1,
+			technician=tech_name,
+			min_start_time="09:00:00",
+		)
+		self.assertTrue(slots_res["success"])
+		self.assertEqual(slots_res["data"]["service_bay"], bay_1)
+		if tech_id:
+			self.assertEqual(slots_res["data"]["technician"], tech_id)
+			self.assertTrue(slots_res["data"]["slots"])
+			first_slot = slots_res["data"]["slots"][0]
+			self.assertEqual(first_slot["matched_technician"], tech_id)
+			self.assertIn(tech_id, first_slot["available_technician_ids"])
+
+		ro_res = create_quote(
+			customer_name=CUSTOMER,
+			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=42900,
+			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0}],
+		)
+		ro_name = ro_res["data"]["name"]
+		self.track("Repair Order", ro_name)
+
+		book1 = book_appointment(
+			repair_order=ro_name,
+			scheduled_date=tomorrow_date,
+			start_time="09:00:00",
+			service_bay=bay_1,
+			technician=tech_name,
+		)
+		self.assertTrue(book1["success"])
+		se1_name = book1["data"]["name"]
+		self.track("Schedule Entry", se1_name)
+
+		# Conflicting booking on same bay & time returns structured conflict feedback instead of raising
+		book_conflict = book_appointment(
+			scheduled_date=tomorrow_date,
+			start_time="09:00:00",
+			service_bay=bay_1,
+			provisional_customer_name=f"{PREFIX}WalkIn",
+		)
+		self.assertFalse(book_conflict["success"])
+		self.assertEqual(book_conflict["data"]["status"], "conflict")
+		self.assertEqual(book_conflict["data"]["conflict_type"], "bay_conflict")
+		self.assertEqual(book_conflict["data"]["resources"]["service_bay"], bay_1)
+		self.assertIn("conflicting_entry", book_conflict["urls"])
+		self.assertTrue(book_conflict["data"]["alternative_slots"])
+
+		# Book a second entry on bay_2 at 14:30:00, then reschedule into bay_1 at 09:00:00 to trigger conflict
+		book2 = book_appointment(
+			scheduled_date=tomorrow_date,
+			start_time="14:30:00",
+			service_bay=bay_2,
+			provisional_customer_name=f"{PREFIX}WalkIn2",
+		)
+		self.assertTrue(book2["success"])
+		se2_name = book2["data"]["name"]
+		self.track("Schedule Entry", se2_name)
+
+		resched_conflict = reschedule_appointment(
+			schedule_entry=se2_name,
+			scheduled_date=tomorrow_date,
+			start_time="09:00:00",
+			service_bay=bay_1,
+		)
+		self.assertFalse(resched_conflict["success"])
+		self.assertEqual(resched_conflict["data"]["status"], "conflict")
+		self.assertEqual(resched_conflict["data"]["conflict_type"], "bay_conflict")
+		self.assertTrue(resched_conflict["data"]["alternative_slots"])
+
+	def test_intake_and_find_slots_composite(self):
+		"""Verify intake_and_find_slots creates a Draft Estimate RO and returns candidate slots in one call."""
+		res = intake_and_find_slots(
+			customer_name=f"{PREFIX}Composite Cust",
+			vehicle_identifier="5YJ3E1EBXNF999099",
+			odometer_in=43000,
+			services=[{"service_title": "Cabin Air Filter Replacement", "labor_hours": 1.0}],
+			notes="Musty AC smell",
+			start_date=add_days(today(), 1),
+			days_ahead=2,
+			max_slots=5,
+			include_summary=True,
+		)
+		self.assertTrue(res["success"])
+		ro_name = res["data"]["name"]
+		self.track("Repair Order", ro_name)
+		self.assertEqual(res["data"]["repair_order"]["status"], "Draft Estimate")
+		self.assertGreaterEqual(res["data"]["duration_minutes"], 60)
+		self.assertIsInstance(res["data"]["slots"], list)
+		self.assertIn("calendar", res["urls"])
+		self.assertIn("summary_card", res)
+
+	def test_service_row_aliases_and_defaults(self):
+		"""Verify _build_service_row normalizes intuitive title/hours aliases in create_quote and amend_quote."""
+		res = create_quote(
+			customer_name=f"{PREFIX}Alias Cust",
+			vehicle_identifier="5YJ3E1EBXNF999077",
+			odometer_in=43100,
+			services=[
+				{"service_name": "Cabin Air Filter Replacement", "hours": 0.5},
+				{"service": "Wheel Torque Check", "frt": 0.75},
+				{"operation": "HV Check", "custom_frt": 1.25},
+				{},
+			],
+		)
+		self.assertTrue(res["success"])
+		ro_name = res["data"]["name"]
+		self.track("Repair Order", ro_name)
+
+		ro = frappe.get_doc("Repair Order", ro_name)
+		self.assertEqual(len(ro.services), 4)
+		self.assertEqual(ro.services[0].service_title, "Cabin Air Filter Replacement")
+		self.assertAlmostEqual(ro.services[0].labor_hours, 0.5, places=2)
+		self.assertEqual(ro.services[1].service_title, "Wheel Torque Check")
+		self.assertAlmostEqual(ro.services[1].labor_hours, 0.75, places=2)
+		self.assertEqual(ro.services[2].service_title, "HV Check")
+		self.assertAlmostEqual(ro.services[2].labor_hours, 1.25, places=2)
+		self.assertEqual(ro.services[3].service_title, "Service Operation")
+		self.assertAlmostEqual(ro.services[3].labor_hours, 1.0, places=2)
+
+		amend_res = amend_quote(
+			repair_order=ro_name,
+			remove_service_indices=[3],
+			add_services=[{"service_name": "Wiper Blade Replacement", "hours": 0.25}],
+		)
+		self.assertTrue(amend_res["success"])
+		ro.reload()
+		self.assertEqual(len(ro.services), 4)
+		self.assertEqual(ro.services[3].service_title, "Wiper Blade Replacement")
+		self.assertAlmostEqual(ro.services[3].labor_hours, 0.25, places=2)
+
+	def test_intake_and_find_slots_preserves_filters_and_tech_match(self):
+		"""Verify intake_and_find_slots preserves service_bay/technician and exposes matched_technician on slots."""
+		bay_1 = f"{PREFIX}Bay 1"
+		tech_id = frappe.db.get_value("Employee", {"status": "Active", "designation": "Technician"}, "name")
+		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name") if tech_id else None
+		self.assertTrue(tech_id and tech_name)
+
+		res = intake_and_find_slots(
+			customer_name=f"{PREFIX}Composite Filter Cust",
+			vehicle_identifier="5YJ3E1EBXNF999078",
+			odometer_in=43200,
+			services=[{"service_name": "Brake Fluid Flush", "hours": 1.0}],
+			start_date=add_days(today(), 1),
+			days_ahead=1,
+			service_bay=bay_1,
+			technician=tech_name,
+			max_slots=3,
+		)
+		self.assertTrue(res["success"])
+		self.track("Repair Order", res["data"]["name"])
+		self.assertEqual(res["data"]["service_bay"], bay_1)
+		self.assertEqual(res["data"]["technician"], tech_id)
+		self.assertTrue(res["data"]["slots"])
+		for slot in res["data"]["slots"]:
+			self.assertEqual(slot["matched_technician"], tech_id)
+			self.assertIn(tech_id, slot["available_technician_ids"])
+
+	def test_ambiguous_service_bay_error_includes_equipment_tags(self):
+		"""Verify resolve_service_bay_identifier lists matching active bays with their equipment tags."""
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			resolve_service_bay_identifier(f"{PREFIX}Bay")
+		msg = str(ctx.exception)
+		self.assertIn("Ambiguous Service Bay", msg)
+		self.assertIn(f"{PREFIX}Bay 1 [Lift]", msg)
+		self.assertIn(f"{PREFIX}Bay 2 [Alignment Rack, Lift]", msg)
+		self.assertNotIn(f"{PREFIX}Bay 3", msg)
+
+	def test_book_appointment_ambiguous_bay_annotates_availability(self):
+		"""Verify book_appointment annotates Ambiguous Service Bay options with [Available]/[Busy]."""
+		bay_1 = f"{PREFIX}Bay 1"
+		tomorrow_date = add_days(today(), 1)
+		booked = book_appointment(
+			scheduled_date=tomorrow_date,
+			start_time="10:00:00",
+			service_bay=bay_1,
+			entry_type="Diagnostic",
+			estimated_duration=60,
+			provisional_customer_name=f"{PREFIX}WalkIn Busy",
+		)
+		self.assertTrue(booked["success"])
+		self.track("Schedule Entry", booked["data"]["name"])
+
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			book_appointment(
+				scheduled_date=tomorrow_date,
+				start_time="10:00:00",
+				service_bay=f"{PREFIX}Bay",
+				entry_type="Diagnostic",
+				provisional_customer_name=f"{PREFIX}WalkIn Ambiguous",
+			)
+		msg = str(ctx.exception)
+		self.assertIn("Ambiguous Service Bay", msg)
+		self.assertIn(f"{PREFIX}Bay 1 [Lift] [Busy]", msg)
+		self.assertIn(f"{PREFIX}Bay 2 [Alignment Rack, Lift] [Available]", msg)
+
+		# Missing or unparseable date/time falls back cleanly to standard Ambiguous Service Bay error
+		with self.assertRaises(frappe.ValidationError) as empty_ctx:
+			book_appointment(
+				scheduled_date="",
+				start_time="",
+				service_bay=f"{PREFIX}Bay",
+				entry_type="Diagnostic",
+			)
+		empty_msg = str(empty_ctx.exception)
+		self.assertIn("Ambiguous Service Bay", empty_msg)
+		self.assertIn(f"{PREFIX}Bay 1 [Lift]", empty_msg)
+
+		with self.assertRaises(frappe.ValidationError) as fallback_ctx:
+			_resolve_bay_for_booking(
+				f"{PREFIX}Bay",
+				scheduled_date="not-a-date",
+				start_time="not-a-time",
+				estimated_duration=None,
+				repair_order=None,
+			)
+		fallback_msg = str(fallback_ctx.exception)
+		self.assertIn("Ambiguous Service Bay", fallback_msg)
+		self.assertIn(f"{PREFIX}Bay 1 [Lift]", fallback_msg)
+
+	def test_required_field_enforcement_across_workflows(self):
+		"""Verify odometer_in, scope, odometer_out, and payment_method cannot be silently defaulted."""
+		with self.assertRaises(frappe.MandatoryError):
+			create_quote(
+				customer_name=CUSTOMER,
+				vehicle_identifier=VEHICLE_VIN,
+				services=[{"service_title": "Suspension Diagnostic", "labor_hours": 1.0}],
+			)
+
+		with self.assertRaises(frappe.MandatoryError):
+			create_quote(
+				customer_name=CUSTOMER,
+				vehicle_identifier=VEHICLE_VIN,
+				odometer_in=45000,
+			)
+
+		with self.assertRaises(frappe.ValidationError):
+			create_quote(
+				customer_name=CUSTOMER,
+				vehicle_identifier=VEHICLE_VIN,
+				odometer_in=-5,
+				notes="Negative odometer should fail",
+			)
+
+		q = create_quote(
+			customer_name=CUSTOMER,
+			vehicle_identifier=VEHICLE_VIN,
+			odometer_in=45000,
+			services=[{"service_title": "Lateral Link Diagnostic", "labor_hours": 1.0}],
+		)
+		ro_name = q["data"]["name"]
+		self.track("Repair Order", ro_name)
+		self.assertEqual(frappe.db.get_value("Repair Order", ro_name, "odometer_in"), 45000)
+
+		ro = frappe.get_doc("Repair Order", ro_name)
+		ro.approval_status = "Approved"
+		ro.save(ignore_permissions=True)
+
+		with self.assertRaises(frappe.MandatoryError):
+			update_job_status(repair_order=ro_name, action="complete")
+
+		with self.assertRaises(frappe.ValidationError):
+			update_job_status(repair_order=ro_name, action="complete", odometer_out=44999)
+
+		update_job_status(repair_order=ro_name, action="complete", odometer_out=45012)
+
+		with self.assertRaises(frappe.MandatoryError):
+			checkout_repair_order(repair_order=ro_name, odometer_out=45012, confirm=True)
+
+		pre_se = frappe.get_doc({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"customer": CUSTOMER,
+			"repair_vehicle": VEHICLE_VIN,
+			"scheduled_date": add_days(today(), 3),
+			"scheduled_time": "10:00:00",
+			"estimated_duration": 60,
+			"service_bay": f"{PREFIX}Bay 1",
+			"notes": "Missing odometer intake check",
+			"status": "Scheduled",
+		}).insert(ignore_permissions=True)
+		self.track("Schedule Entry", pre_se.name)
+
+		with self.assertRaises(frappe.MandatoryError):
+			create_ro_from_appointment(schedule_entry=pre_se.name)

@@ -1,10 +1,12 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import re
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable, Dict, Optional, Union
 
 import frappe
+from frappe import _
 from frappe.utils import add_days, cint, getdate
 
 DEFAULT_SHOP_SETTINGS: Dict[str, Any] = {
@@ -19,6 +21,86 @@ DEFAULT_SHOP_SETTINGS: Dict[str, Any] = {
 	"holiday_list": None,
 	"default_diagnostic_duration": 60,
 }
+
+
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_TIME_PATTERN = re.compile(
+	r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$",
+)
+
+
+def normalize_date(val: Union[str, date, datetime, None]) -> Optional[str]:
+	"""Validate and normalize an ISO YYYY-MM-DD date (or date/datetime object) into YYYY-MM-DD."""
+	if val is None:
+		return None
+	if isinstance(val, (date, datetime)):
+		return str(getdate(val))
+	if not isinstance(val, str):
+		frappe.throw(_("Invalid date value: '{0}'.").format(val), frappe.ValidationError)
+
+	text = val.strip()
+	if not text:
+		return None
+
+	if not _ISO_DATE_PATTERN.match(text):
+		frappe.throw(
+			_("Invalid date format: '{0}'. Expected ISO YYYY-MM-DD.").format(val),
+			frappe.ValidationError,
+		)
+
+	try:
+		return date.fromisoformat(text).isoformat()
+	except ValueError:
+		frappe.throw(
+			_("Invalid date format: '{0}'. Expected ISO YYYY-MM-DD.").format(val),
+			frappe.ValidationError,
+		)
+
+
+def normalize_time(val: Union[str, time, timedelta, int, float, None]) -> Optional[str]:
+	"""Validate and normalize a 24-hour time string (HH:MM or HH:MM:SS) into HH:MM:SS."""
+	if val is None:
+		return None
+	if isinstance(val, timedelta):
+		total_seconds = max(0, int(val.total_seconds()))
+		hours = (total_seconds // 3600) % 24
+		minutes = (total_seconds % 3600) // 60
+		seconds = total_seconds % 60
+		return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+	if isinstance(val, time):
+		return f"{val.hour:02d}:{val.minute:02d}:{val.second:02d}"
+	if isinstance(val, (int, float)):
+		total_seconds = max(0, int(val))
+		hours = (total_seconds // 3600) % 24
+		minutes = (total_seconds % 3600) // 60
+		seconds = total_seconds % 60
+		return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+	if not isinstance(val, str):
+		frappe.throw(_("Invalid time value: '{0}'.").format(val), frappe.ValidationError)
+
+	text = val.strip()
+	if not text:
+		return None
+
+	match = _TIME_PATTERN.match(text)
+	if not match:
+		frappe.throw(
+			_("Invalid time format: '{0}'. Expected 24-hour HH:MM or HH:MM:SS.").format(val),
+			frappe.ValidationError,
+		)
+
+	hour = int(match.group(1))
+	minute = int(match.group(2))
+	second = int(match.group(3) or 0)
+
+	if hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 59:
+		frappe.throw(
+			_("Invalid 24-hour time: '{0}'. Expected HH:MM or HH:MM:SS.").format(val),
+			frappe.ValidationError,
+		)
+
+	return f"{hour:02d}:{minute:02d}:{second:02d}"
 
 
 def to_timedelta(val: Union[str, time, timedelta, int, float, None]) -> timedelta:
@@ -54,12 +136,62 @@ def format_timedelta(td: timedelta) -> str:
 	return f"{hours:02d}:{minutes:02d}"
 
 
+SHOP_SETTINGS_CACHE_KEY = "ism:shop_settings"
+HOLIDAY_LIST_CACHE_PREFIX = "ism:holiday_list:"
+
+
+def _get_cache():
+	if getattr(getattr(frappe, "flags", None), "in_test", False):
+		return None
+	cache_fn = getattr(frappe, "cache", None)
+	if not callable(cache_fn):
+		return None
+	try:
+		return cache_fn()
+	except Exception:
+		return None
+
+
+def invalidate_shop_settings_cache(doc=None, method=None) -> None:
+	"""Clear cached ISM Settings when ISM Settings is updated."""
+	cache = _get_cache()
+	if cache is not None:
+		try:
+			cache.delete_value(SHOP_SETTINGS_CACHE_KEY)
+		except Exception:
+			pass
+
+
+def invalidate_holiday_cache(doc=None, method=None) -> None:
+	"""Clear cached Holiday List dates when a Holiday List is updated or deleted."""
+	cache = _get_cache()
+	if cache is None:
+		return
+	try:
+		name = getattr(doc, "name", None) if doc is not None else None
+		if name:
+			cache.delete_value(f"{HOLIDAY_LIST_CACHE_PREFIX}{name}")
+		elif hasattr(cache, "delete_keys"):
+			cache.delete_keys(HOLIDAY_LIST_CACHE_PREFIX)
+	except Exception:
+		pass
+
+
 def _has_time_value(val: Any) -> bool:
 	return val is not None and str(val).strip() != ""
 
 
 def get_shop_settings() -> Dict[str, Any]:
 	"""Read cached shop scheduling defaults and normalized timedeltas from ISM Settings."""
+	cache = _get_cache()
+	if cache is not None:
+		try:
+			cached = cache.get_value(SHOP_SETTINGS_CACHE_KEY)
+			if isinstance(cached, dict):
+				return dict(cached)
+		except Exception:
+			pass
+
 	settings = dict(DEFAULT_SHOP_SETTINGS)
 
 	if not frappe.db.exists("DocType", "ISM Settings"):
@@ -90,6 +222,12 @@ def get_shop_settings() -> Dict[str, Any]:
 		settings["holiday_list"] = doc.holiday_list
 	if getattr(doc, "default_diagnostic_duration", None):
 		settings["default_diagnostic_duration"] = int(doc.default_diagnostic_duration)
+
+	if cache is not None:
+		try:
+			cache.set_value(SHOP_SETTINGS_CACHE_KEY, dict(settings), expires_in_sec=300)
+		except Exception:
+			pass
 
 	return settings
 
@@ -123,9 +261,33 @@ def effective_end_time(
 
 
 def _default_is_holiday(target_date: date, holiday_list: Optional[str]) -> bool:
-	if not holiday_list or not frappe.db.exists("DocType", "Holiday"):
+	if not holiday_list:
 		return False
-	return bool(frappe.db.exists("Holiday", {"parent": holiday_list, "holiday_date": str(target_date)}))
+	cache = _get_cache()
+	cache_key = f"{HOLIDAY_LIST_CACHE_PREFIX}{holiday_list}"
+	if cache is not None:
+		try:
+			cached_dates = cache.get_value(cache_key)
+			if isinstance(cached_dates, (list, set, tuple)):
+				return str(target_date) in cached_dates
+		except Exception:
+			pass
+
+	if not frappe.db.exists("DocType", "Holiday"):
+		return False
+
+	rows = frappe.get_all(
+		"Holiday",
+		filters={"parent": holiday_list},
+		fields=["holiday_date"],
+	)
+	holiday_dates = sorted({str(r["holiday_date"]) for r in rows if r.get("holiday_date")})
+	if cache is not None:
+		try:
+			cache.set_value(cache_key, holiday_dates, expires_in_sec=3600)
+		except Exception:
+			pass
+	return str(target_date) in holiday_dates
 
 
 def calculate_working_span(

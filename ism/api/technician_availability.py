@@ -120,6 +120,51 @@ def check_employee_leave(
 	return {"on_leave": False, "half_day": False}
 
 
+def _get_leaves_by_employee(
+	employees: List[str],
+	min_date: str,
+	max_date: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+	"""Batch fetch approved Leave Applications overlapping [min_date, max_date] for given employees."""
+	if not employees or not frappe.db.exists("DocType", "Leave Application"):
+		return {}
+
+	leaves = frappe.get_all(
+		"Leave Application",
+		filters=[
+			["employee", "in", employees],
+			["status", "=", "Approved"],
+			["docstatus", "=", 1],
+			["from_date", "<=", max_date],
+			["to_date", ">=", min_date],
+		],
+		fields=["employee", "from_date", "to_date", "half_day", "half_day_date"],
+	)
+	leaves_by_emp: Dict[str, List[Dict[str, Any]]] = {}
+	for leave in leaves:
+		leaves_by_emp.setdefault(leave["employee"], []).append(leave)
+	return leaves_by_emp
+
+
+def _is_employee_on_leave_for_date(
+	emp_leaves: List[Dict[str, Any]],
+	target_date: str,
+) -> Dict[str, Any]:
+	"""Check whether pre-fetched leave rows cover target_date."""
+	for leave in emp_leaves:
+		from_date = str(leave.get("from_date")) if leave.get("from_date") else ""
+		to_date = str(leave.get("to_date")) if leave.get("to_date") else ""
+		if from_date and to_date and not (from_date <= target_date <= to_date):
+			continue
+		is_half_day = bool(leave.get("half_day"))
+		half_day_date = str(leave.get("half_day_date")) if leave.get("half_day_date") else None
+		if not is_half_day:
+			return {"on_leave": True, "half_day": False}
+		if half_day_date == target_date:
+			return {"on_leave": True, "half_day": True}
+	return {"on_leave": False, "half_day": False}
+
+
 @frappe.whitelist()
 def get_technician_pool_availability(
 	date: Union[str, date, datetime],
@@ -167,6 +212,7 @@ def get_technician_pool_availability(
 	max_date = max(seg_dates)
 
 	tech_ids = [t["employee"] for t in technicians]
+	leaves_by_emp = _get_leaves_by_employee(tech_ids, min(seg_dates), max(seg_dates))
 	filters = [
 		["assigned_technician", "in", tech_ids],
 		["scheduled_date", "<=", max_date],
@@ -213,7 +259,7 @@ def get_technician_pool_availability(
 		on_leave_in_seg = 0
 		for tech in technicians:
 			emp_id = tech["employee"]
-			leave_res = check_employee_leave(emp_id, seg_date, seg_start, seg_dur)
+			leave_res = _is_employee_on_leave_for_date(leaves_by_emp.get(emp_id, []), str(seg_date))
 			if leave_res["on_leave"]:
 				on_leave_in_seg += 1
 			else:
@@ -305,9 +351,11 @@ def check_technician_availability(
 	from ism.api.scheduling import calculate_working_span
 
 	span = calculate_working_span(date, start_time, duration_minutes)
+	seg_dates = [s["date"] for s in span["segments"]] or [str(date)]
+	emp_leaves = _get_leaves_by_employee([employee], min(seg_dates), max(seg_dates)).get(employee, [])
 
 	for seg in span["segments"]:
-		leave_res = check_employee_leave(employee, seg["date"], seg["start_time"], seg["duration"])
+		leave_res = _is_employee_on_leave_for_date(emp_leaves, str(seg["date"]))
 		if leave_res["on_leave"]:
 			return {
 				"is_available": False,
@@ -317,7 +365,6 @@ def check_technician_availability(
 				"conflicts": [],
 			}
 
-	seg_dates = [s["date"] for s in span["segments"]] or [str(date)]
 	min_date = str(add_days(getdate(min(seg_dates)), -30))
 	max_date = max(seg_dates)
 

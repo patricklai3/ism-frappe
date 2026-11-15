@@ -144,6 +144,13 @@ doc_events = {
 	"Customer": {
 		"on_trash": "ism.ism.doctype.repair_vehicle.repair_vehicle.on_customer_trash",
 	},
+	"ISM Settings": {
+		"on_update": "ism.scheduling.time_utils.invalidate_shop_settings_cache",
+	},
+	"Holiday List": {
+		"on_update": "ism.scheduling.time_utils.invalidate_holiday_cache",
+		"on_trash": "ism.scheduling.time_utils.invalidate_holiday_cache",
+	},
 	"Purchase Receipt": {
 		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
 	},

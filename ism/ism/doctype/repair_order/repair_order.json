@@ -160,7 +160,7 @@
    "fieldname": "odometer_in",
    "fieldtype": "Int",
    "label": "Odometer In",
-   "mandatory_depends_on": "eval:doc.status != 'Checked In'"
+   "reqd": 1
   },
   {
    "allow_on_submit": 1,
@@ -312,7 +312,8 @@
    "fieldname": "approval_status",
    "fieldtype": "Select",
    "label": "Approval Status",
-   "options": "Estimating\nPending Approval\nApproved\nPartially Approved\nDeclined"
+   "options": "Estimating\nPending Approval\nApproved\nPartially Approved\nDeclined",
+   "search_index": 1
   },
   {
    "allow_on_submit": 1,

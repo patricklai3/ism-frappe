@@ -205,6 +205,7 @@ class TestMcpProtocol(McpTestCase):
 			args={
 				"customer": CUSTOMER,
 				"vehicle": VEHICLE_VIN,
+				"odometer_in": 45000,
 				"concern": "Loud clicking from front suspension over bumps",
 			},
 		)
@@ -230,6 +231,7 @@ class TestMcpProtocol(McpTestCase):
 			args={
 				"customer": CUSTOMER,
 				"vehicle": VEHICLE_VIN,
+				"odometer_in": 45000,
 				"concern": "Summary opt-in check",
 				"include_summary": True,
 			},
@@ -240,7 +242,7 @@ class TestMcpProtocol(McpTestCase):
 		"""Verify ism.api.agent.amend_quote via MCP call_method."""
 		res1 = self.result(
 			method="ism.api.agent.create_quote",
-			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "concern": "Diagnostic needed"},
+			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "odometer_in": 45000, "concern": "Diagnostic needed"},
 		)
 		ro_name = res1["result"]["data"]["name"]
 
@@ -289,7 +291,7 @@ class TestMcpProtocol(McpTestCase):
 		"""Verify ism.api.agent.send_quote_for_approval via MCP call_method."""
 		res1 = self.result(
 			method="ism.api.agent.create_quote",
-			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "concern": "Approval test"},
+			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "odometer_in": 45000, "concern": "Approval test"},
 		)
 		ro_name = res1["result"]["data"]["name"]
 
@@ -309,7 +311,7 @@ class TestMcpProtocol(McpTestCase):
 		"""Verify update_job_status blocks work when authorization is not granted."""
 		res1 = self.result(
 			method="ism.api.agent.create_quote",
-			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "concern": "Guard test"},
+			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "odometer_in": 45000, "concern": "Guard test"},
 		)
 		ro_name = res1["result"]["data"]["name"]
 
@@ -369,6 +371,7 @@ class TestMcpProtocol(McpTestCase):
 			args={
 				"customer": CUSTOMER,
 				"vehicle": VEHICLE_VIN,
+				"odometer_in": 45000,
 				"concern": "Created by dedicated shop agent user",
 			},
 		)
@@ -411,6 +414,7 @@ class TestMcpProtocol(McpTestCase):
 			args={
 				"customer_name": CUSTOMER,
 				"vehicle_identifier": VEHICLE_VIN,
+				"odometer_in": 45000,
 				"services": [{"service_title": "Front Left Strut Replacement", "labor_hours": 2.0, "labor_rate": 140.0}],
 			},
 		)["result"]

@@ -1193,7 +1193,7 @@ class TestRepairOrder(ISMTestCase):
 		ro.approval_status = "Approved"
 		ro.save()
 
-		rel_res = ro.process_payment_and_release(paid_amount=0)
+		rel_res = ro.process_payment_and_release(paid_amount=0, odometer_out=35020)
 		ro.reload()
 		self.assertEqual(ro.status, "Closed / Released")
 		self.assertEqual(ro.vehicle_location, "Released to Customer")

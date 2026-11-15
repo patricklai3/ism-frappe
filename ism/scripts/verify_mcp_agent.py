@@ -122,6 +122,7 @@ def run(site: str = "development.localhost"):
 					"args": {
 						"customer": CUSTOMER,
 						"vehicle": VEHICLE_VIN,
+						"odometer_in": 45000,
 						"concern": "Front suspension rattle verification",
 					},
 				},

@@ -58,12 +58,22 @@ frappe.ui.form.on('Schedule Entry', {
 				}, __('Navigate'));
 			} else {
 				frm.add_custom_button(__('Create Repair Order'), function () {
-					frappe.confirm(
-						__('Create a Repair Order from this Schedule Entry? Pre-entered notes will carry over into Customer Concern.'),
-						function () {
+					frappe.prompt(
+						[
+							{
+								fieldname: 'odometer_in',
+								fieldtype: 'Int',
+								label: __('Intake Odometer (km)'),
+								reqd: 1,
+							},
+						],
+						function (values) {
 							frappe.call({
 								method: 'ism.api.scheduling.create_repair_order_from_schedule_entry',
-								args: { schedule_entry: frm.doc.name },
+								args: {
+									schedule_entry: frm.doc.name,
+									odometer_in: values.odometer_in,
+								},
 								freeze: true,
 								freeze_message: __('Creating Repair Order...'),
 								callback: (r) => {
@@ -76,7 +86,8 @@ frappe.ui.form.on('Schedule Entry', {
 									}
 								},
 							});
-						}
+						},
+						__('Create Repair Order')
 					);
 				});
 			}

@@ -398,7 +398,7 @@ class TestApprovalAndInspection(ISMTestCase):
 		self.assertEqual(len(fetched["items"]), 3)
 		self.assertTrue(fetched["items"][0]["photo_required"])
 
-		_cust, _veh, ro = self._make_ro_with_services(status="Checked In", odometer_in=None)
+		_cust, _veh, ro = self._make_ro_with_services(status="Checked In", odometer_in=0)
 
 		applied = apply_inspection_template(ro.name, template_name=tpl.name)
 		self.assertEqual(applied["added_count"], 3)
@@ -465,7 +465,7 @@ class TestApprovalAndInspection(ISMTestCase):
 		self.assertEqual(replaced["summary"]["total"], 3)
 		self.assertEqual(replaced["summary"]["pending"], 3)
 
-		_cust2, _veh2, ro2 = self._make_ro_with_services(status="Checked In", odometer_in=None)
+		_cust2, _veh2, ro2 = self._make_ro_with_services(status="Checked In", odometer_in=15000)
 		auto_rec = record_check_in_inspection(
 			repair_order=ro2.name,
 			template_name=tpl.name,

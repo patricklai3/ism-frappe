@@ -279,10 +279,10 @@ class RepairOrder(Document):
 		if not approved_services:
 			return True, []
 
-		from ism.api.parts import get_item_available_stock
+		from ism.api.parts import get_items_available_stock_batch
 		wh = get_default_warehouse(self.company)
 		deficit_items = []
-		item_reqs = {}
+		raw_item_reqs = {}
 		for s in approved_services:
 			parts = s.parts
 			if isinstance(parts, str):
@@ -292,13 +292,26 @@ class RepairOrder(Document):
 					parts = []
 			for p in parts or []:
 				code = p.get("item_code")
-				if code and frappe.db.exists("Item", code):
-					is_stock = frappe.db.get_value("Item", code, "is_stock_item")
-					if cint(is_stock):
-						item_reqs[code] = item_reqs.get(code, 0.0) + flt(p.get("qty", 1.0))
+				if code:
+					raw_item_reqs[code] = raw_item_reqs.get(code, 0.0) + flt(p.get("qty", 1.0))
 
+		if not raw_item_reqs:
+			return True, []
+
+		stock_items = set(
+			frappe.get_all(
+				"Item",
+				filters={"name": ["in", list(raw_item_reqs.keys())], "is_stock_item": 1},
+				pluck="name",
+			)
+		)
+		item_reqs = {code: qty for code, qty in raw_item_reqs.items() if code in stock_items}
+		if not item_reqs:
+			return True, []
+
+		avail_map = get_items_available_stock_batch(list(item_reqs.keys()), wh, self.name)
 		for code, req_qty in item_reqs.items():
-			avail_info = get_item_available_stock(code, wh, self.name)
+			avail_info = avail_map.get(code, {})
 			avail_qty = flt(avail_info.get("available_qty", 0.0))
 			if avail_qty < req_qty:
 				deficit_items.append({
@@ -385,15 +398,14 @@ class RepairOrder(Document):
 			frappe.throw(_("Repair Vehicle {0} does not exist.").format(self.vehicle))
 
 	def _validate_odometer(self):
-		if self.status != "Checked In":
-			if self.odometer_in is None:
-				frappe.throw(_("Odometer In is mandatory for Repair Order."), frappe.MandatoryError)
+		if self.odometer_in is None or self.odometer_in == "":
+			frappe.throw(_("Odometer In is mandatory for Repair Order."), frappe.MandatoryError)
 
-		if self.odometer_in is not None and self.odometer_in < 0:
+		if cint(self.odometer_in) < 0:
 			frappe.throw(_("Odometer In cannot be negative."))
 
 		if cint(self.odometer_out) > 0:
-			if self.odometer_in is not None and cint(self.odometer_out) < cint(self.odometer_in):
+			if cint(self.odometer_out) < cint(self.odometer_in):
 				frappe.throw(_("Odometer Out ({0}) cannot be less than Odometer In ({1}).").format(
 					self.odometer_out, self.odometer_in
 				))
@@ -1512,8 +1524,20 @@ class RepairOrder(Document):
 			paid_amount = kwargs.get("paid_amount")
 		if odometer_out is None and "odometer_out" in kwargs:
 			odometer_out = kwargs.get("odometer_out")
-		if odometer_out is not None:
+		if odometer_out is not None and odometer_out != "":
 			self.odometer_out = cint(odometer_out)
+		if (
+			self.odometer_out is None
+			or self.odometer_out == ""
+			or (odometer_out is None and cint(self.odometer_out) == 0)
+		):
+			frappe.throw(_("Odometer Out is mandatory to check out and release Repair Order."), frappe.MandatoryError)
+		if cint(self.odometer_out) < cint(self.odometer_in or 0):
+			frappe.throw(
+				_("Odometer Out ({0}) cannot be less than Odometer In ({1}).").format(
+					self.odometer_out, self.odometer_in
+				)
+			)
 		self._validate_odometer()
 
 		approved_services = [s for s in self.services if s.status == "Approved"]

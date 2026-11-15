@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import frappe
 from frappe import _
@@ -47,11 +47,14 @@ from ism.api.parts import (
 )
 from ism.api.scheduling import (
 	allocate_schedule_entry,
+	check_bay_availability,
 	create_repair_order_from_schedule_entry,
 	get_unscheduled_services as _get_unscheduled_services_impl,
+	resolve_service_bay_identifier,
+	resolve_technician_identifier,
 )
-from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES, ShopCapacityWindow
-from ism.scheduling.time_utils import get_shop_settings
+from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES, ShopCapacityWindow, load_bay_tags_map
+from ism.scheduling.time_utils import get_shop_settings, normalize_date, normalize_time
 from ism.api.technician_availability import (
 	get_active_technicians,
 	get_daily_technician_overview,
@@ -88,6 +91,48 @@ def _optional_str(value: Any, label: str) -> Optional[str]:
 		frappe.throw(_("{0} must be a string.").format(label), frappe.ValidationError)
 	cleaned = value.strip()
 	return cleaned or None
+
+
+def _require_non_negative_int(value: Any, label: str) -> int:
+	"""Validate and return a mandatory non-negative integer field."""
+	if value is None or (isinstance(value, str) and not value.strip()):
+		frappe.throw(_("{0} is required.").format(label), frappe.MandatoryError)
+	if isinstance(value, bool):
+		frappe.throw(_("{0} must be a non-negative integer.").format(label), frappe.ValidationError)
+	if isinstance(value, int):
+		parsed = value
+	elif isinstance(value, float):
+		if not value.is_integer():
+			frappe.throw(_("{0} must be a non-negative integer.").format(label), frappe.ValidationError)
+		parsed = int(value)
+	elif isinstance(value, str):
+		try:
+			parsed = int(value.strip())
+		except ValueError:
+			frappe.throw(_("{0} must be a non-negative integer.").format(label), frappe.ValidationError)
+	else:
+		frappe.throw(_("{0} must be a non-negative integer.").format(label), frappe.ValidationError)
+	if parsed < 0:
+		frappe.throw(_("{0} cannot be negative.").format(label), frappe.ValidationError)
+	return parsed
+
+
+def _resolve_odometer_out(ro: Any, odometer_out: Any, action_label: str) -> int:
+	"""Validate odometer_out against explicit input or existing positive RO value."""
+	if odometer_out is not None and not (isinstance(odometer_out, str) and not odometer_out.strip()):
+		validated = _require_non_negative_int(odometer_out, "Odometer Out")
+	elif cint(getattr(ro, "odometer_out", None) or 0) > 0:
+		validated = _require_non_negative_int(ro.odometer_out, "Odometer Out")
+	else:
+		frappe.throw(_("Odometer Out is required to {0}.").format(action_label), frappe.MandatoryError)
+	if validated < cint(getattr(ro, "odometer_in", None) or 0):
+		frappe.throw(
+			_("Odometer Out ({0}) cannot be less than Odometer In ({1}).").format(
+				validated, cint(getattr(ro, "odometer_in", None) or 0)
+			),
+			frappe.ValidationError,
+		)
+	return validated
 
 
 def _get_default_company() -> str:
@@ -268,6 +313,35 @@ def _resolve_service_package_name(raw_name: Optional[str]) -> Optional[str]:
 	)
 
 
+_SERVICE_TITLE_ALIASES: Tuple[str, ...] = (
+	"service_title",
+	"title",
+	"name",
+	"service_name",
+	"service",
+	"operation",
+)
+_SERVICE_HOURS_ALIASES: Tuple[str, ...] = (
+	"labor_hours",
+	"custom_frt",
+	"hours",
+	"frt",
+)
+
+
+def _first_present(mapping: Dict[str, Any], keys: Tuple[str, ...], *, strip_str: bool = False) -> Any:
+	for key in keys:
+		val = mapping.get(key)
+		if isinstance(val, str):
+			if strip_str:
+				val = val.strip()
+			if not val.strip():
+				continue
+		if val is not None:
+			return val
+	return None
+
+
 def _build_service_row(
 	service_input: Any,
 	default_labor_rate: float,
@@ -294,11 +368,8 @@ def _build_service_row(
 	if not isinstance(service_input, dict):
 		return None
 
-	explicit_title = (
-		service_input.get("service_title")
-		or service_input.get("title")
-		or service_input.get("name")
-	)
+	explicit_title = _first_present(service_input, _SERVICE_TITLE_ALIASES, strip_str=True)
+	explicit_hours = _first_present(service_input, _SERVICE_HOURS_ALIASES, strip_str=True)
 	pkg_lookup = service_input.get("service_package") or explicit_title
 	pkg_name = _resolve_service_package_name(pkg_lookup)
 
@@ -320,7 +391,6 @@ def _build_service_row(
 		if has_explicit_flat:
 			s_data["is_flat_rate"] = cint(service_input["is_flat_rate"])
 
-		explicit_hours = service_input.get("labor_hours") if service_input.get("labor_hours") is not None else service_input.get("custom_frt")
 		has_explicit_hours = explicit_hours is not None
 		if has_explicit_hours:
 			s_data["labor_hours"] = flt(explicit_hours)
@@ -346,7 +416,7 @@ def _build_service_row(
 	s_data: Dict[str, Any] = {
 		"service_title": explicit_title or "Service Operation",
 		"service_package": None,
-		"labor_hours": flt(service_input.get("labor_hours") or service_input.get("custom_frt") or 1.0),
+		"labor_hours": flt(explicit_hours) if explicit_hours is not None else 1.0,
 		"labor_rate": flt(service_input.get("labor_rate") or default_labor_rate),
 		"is_flat_rate": cint(service_input.get("is_flat_rate", 0)),
 		"service_position": service_input.get("service_position", "None"),
@@ -405,6 +475,14 @@ def create_quote(
 	except Exception:
 		parsed_parts = []
 
+	validated_odometer_in = _require_non_negative_int(odometer_in, "Odometer In")
+	notes_clean = notes_in.strip() if isinstance(notes_in, str) else ""
+	if not parsed_services and not notes_clean:
+		frappe.throw(
+			_("At least one service or customer concern/notes is required."),
+			frappe.MandatoryError,
+		)
+
 	comp = company or _get_default_company()
 	cust = _resolve_customer(cust_in, phone=customer_phone, email=customer_email)
 	veh = _resolve_vehicle(veh_in, cust)
@@ -417,14 +495,7 @@ def create_quote(
 	ro.approval_status = "Estimating"
 	ro.customer_concern = notes_in or ""
 	ro.posting_date = today()
-
-	if odometer_in is not None:
-		ro.odometer_in = cint(odometer_in)
-	else:
-		prior_odo = frappe.db.get_value(
-			"Repair Order", {"vehicle": veh, "odometer_in": [">", 0]}, "odometer_in", order_by="creation desc"
-		)
-		ro.odometer_in = cint(prior_odo) if prior_odo else 10000
+	ro.odometer_in = validated_odometer_in
 
 	default_labor_rate = _get_default_labor_rate()
 	if not parsed_services:
@@ -521,6 +592,20 @@ def amend_quote(
 	)
 
 
+def _build_conflict_summary(heading: str, conflict: Dict[str, Any]) -> str:
+	lines = [
+		f"### {heading}",
+		f"- **Reason**: {conflict.get('message')}",
+		f"- **Requested**: `{conflict.get('requested_date')}` `{conflict.get('requested_time')}`",
+	]
+	alts = conflict.get("alternative_slots") or []
+	if alts:
+		lines.append("- **Nearest Open Alternatives**:")
+		for alt in alts[:5]:
+			lines.append(f"  - `{alt.get('date')}` `{alt.get('start_time')}` (Bay: `{alt.get('service_bay')}`)")
+	return "\n".join(lines)
+
+
 @frappe.whitelist()
 def find_available_slots(
 	repair_order: Optional[str] = None,
@@ -529,6 +614,8 @@ def find_available_slots(
 	target_date: Optional[str] = None,
 	days_ahead: int = 3,
 	equipment_tags: Optional[Union[List[str], str]] = None,
+	service_bay: Optional[str] = None,
+	technician: Optional[str] = None,
 	include_summary: Any = False,
 	include_resources: Any = False,
 	max_slots: int = 15,
@@ -539,6 +626,8 @@ def find_available_slots(
 	frappe.has_permission("Schedule Entry", "read", throw=True)
 	frappe.has_permission("Service Bay", "read", throw=True)
 	repair_order = _optional_str(repair_order, "Repair Order")
+	service_bay = resolve_service_bay_identifier(_optional_str(service_bay, "Service Bay"))
+	technician = resolve_technician_identifier(_optional_str(technician, "Technician"))
 	dur = 60
 	estimate_meta: Optional[Dict[str, Any]] = None
 	if duration_minutes:
@@ -554,7 +643,11 @@ def find_available_slots(
 		except Exception:
 			equipment_tags = [equipment_tags]
 
-	anchor = start_date or target_date or today()
+	norm_start = normalize_date(start_date) if start_date else None
+	norm_target = normalize_date(target_date) if target_date else None
+	norm_min_time = normalize_time(min_start_time) if min_start_time else None
+
+	anchor = norm_start or norm_target or today()
 	start_dt = getdate(anchor)
 	span = max(1, int(days_ahead or 1))
 	end_dt = add_days(start_dt, span - 1)
@@ -569,6 +662,7 @@ def find_available_slots(
 		start_date=start_dt,
 		end_date=end_dt,
 		required_tags=equipment_tags,
+		service_bay=service_bay,
 		skip_holidays=True,
 	)
 
@@ -576,12 +670,12 @@ def find_available_slots(
 	for cur_dt in window.iter_dates():
 		date_str = str(cur_dt)
 		day_min_time: Optional[str] = None
-		if min_start_time and cur_dt == start_dt:
-			day_min_time = min_start_time
+		if norm_min_time and cur_dt == start_dt:
+			day_min_time = norm_min_time
 		elif not allow_past and cur_dt == today_dt:
 			day_min_time = now_time_str
 
-		remaining = (cap_limit - len(results)) if cap_limit > 0 else None
+		remaining = (cap_limit - len(results)) if (cap_limit > 0 and not technician) else None
 		day_slots = window.slots_for_date(
 			cur_dt,
 			dur,
@@ -589,6 +683,9 @@ def find_available_slots(
 			min_start_time=day_min_time,
 		)
 		for slot in day_slots or []:
+			if technician and "available_technician_ids" in slot:
+				if technician not in (slot.get("available_technician_ids") or []):
+					continue
 			slot_row: Dict[str, Any] = {
 				"date": date_str,
 				"start_time": slot.get("start_time"),
@@ -599,8 +696,10 @@ def find_available_slots(
 			}
 			if "available_bay_ids" in slot:
 				slot_row["available_bay_ids"] = slot["available_bay_ids"]
-			if show_resources and "available_technician_ids" in slot:
+			if (show_resources or technician) and "available_technician_ids" in slot:
 				slot_row["available_technician_ids"] = slot["available_technician_ids"]
+			if technician and "available_technician_ids" in slot:
+				slot_row["matched_technician"] = technician
 			results.append(slot_row)
 			if cap_limit > 0 and len(results) >= cap_limit:
 				break
@@ -615,6 +714,10 @@ def find_available_slots(
 			"technicians": dict(window.tech_names),
 		},
 	}
+	if service_bay:
+		data["service_bay"] = service_bay
+	if technician:
+		data["technician"] = technician
 	if window.holidays:
 		data["skipped_holidays"] = sorted(window.holidays.keys())
 	if estimate_meta:
@@ -647,6 +750,82 @@ def _infer_schedule_entry_type(ro: Any, entry_type: Optional[str] = None) -> str
 	return "Diagnostic"
 
 
+def _build_ambiguous_bay_availability_message(
+	service_bay: str,
+	scheduled_date: str,
+	start_time: str,
+	estimated_duration: Optional[int],
+	repair_order: Optional[str],
+) -> Optional[str]:
+	"""Annotate ambiguous bay candidates with equipment tags and [Available]/[Busy] status."""
+	try:
+		if estimated_duration:
+			dur = max(15, int(estimated_duration))
+		elif repair_order and frappe.db.exists("Repair Order", repair_order):
+			ro = _get_ro_doc(repair_order, ptype="read")
+			dur = _estimate_duration_minutes(ro)
+		else:
+			settings = get_shop_settings()
+			dur = max(15, int(settings.get("default_diagnostic_duration") or 60))
+
+		lowered = service_bay.strip().lower()
+		bays = frappe.get_all(
+			"Service Bay",
+			fields=["name", "bay_name", "is_active"],
+			order_by="is_active desc, name asc",
+		)
+		partial_matches = [
+			b for b in bays
+			if lowered in (b.get("name") or "").lower() or lowered in (b.get("bay_name") or "").lower()
+		]
+		active_partial = [b for b in partial_matches if cint(b.get("is_active"))]
+		candidates = (active_partial or partial_matches)[:5]
+		if len(candidates) <= 1:
+			return None
+
+		active_names = [c["name"] for c in candidates if cint(c.get("is_active"))]
+		tags_by_bay = load_bay_tags_map(active_names)
+		formatted: List[str] = []
+		for c in candidates:
+			bay_id = c["name"]
+			tags = sorted(tags_by_bay.get(bay_id) or [])
+			label = f"{bay_id} [{', '.join(tags)}]" if tags else bay_id
+			if cint(c.get("is_active")):
+				is_free = check_bay_availability(bay_id, scheduled_date, start_time, dur)
+				label += " [Available]" if is_free else " [Busy]"
+			formatted.append(label)
+
+		return _("Ambiguous Service Bay '{0}'. Matching bays: {1}.").format(
+			service_bay.strip(), ", ".join(formatted)
+		)
+	except Exception:
+		return None
+
+
+def _resolve_bay_for_booking(
+	service_bay: str,
+	scheduled_date: str,
+	start_time: str,
+	estimated_duration: Optional[int],
+	repair_order: Optional[str],
+) -> Optional[str]:
+	try:
+		return resolve_service_bay_identifier(service_bay)
+	except frappe.ValidationError as err:
+		if "Ambiguous Service Bay" not in str(err) or not scheduled_date or not start_time:
+			raise
+		annotated_msg = _build_ambiguous_bay_availability_message(
+			service_bay,
+			scheduled_date=scheduled_date,
+			start_time=start_time,
+			estimated_duration=estimated_duration,
+			repair_order=repair_order,
+		)
+		if not annotated_msg:
+			raise
+		frappe.throw(annotated_msg, frappe.ValidationError)
+
+
 @frappe.whitelist()
 def book_appointment(
 	repair_order: Optional[str] = None,
@@ -667,8 +846,19 @@ def book_appointment(
 	service_bay = _optional_str(service_bay, "Service Bay")
 	technician = _optional_str(technician, "Technician")
 	entry_type = _optional_str(entry_type, "Entry Type")
+	scheduled_date = normalize_date(scheduled_date) or scheduled_date
+	start_time = normalize_time(start_time) or start_time
 	if service_bay:
 		frappe.has_permission("Service Bay", "read", throw=True)
+		service_bay = _resolve_bay_for_booking(
+			service_bay,
+			scheduled_date=scheduled_date,
+			start_time=start_time,
+			estimated_duration=estimated_duration,
+			repair_order=repair_order,
+		)
+	if technician:
+		technician = resolve_technician_identifier(technician)
 	ro = None
 	if repair_order:
 		ro = _get_ro_doc(repair_order, ptype="read")
@@ -706,6 +896,17 @@ def book_appointment(
 		provisional_customer_name=provisional_customer_name if not ro else None,
 		provisional_vehicle_info=provisional_vehicle_info if not ro else None,
 	)
+	if entry_dict.get("status") == "conflict" or entry_dict.get("conflict"):
+		return build_agent_envelope(
+			success=False,
+			urls=entry_dict.get("urls") or {"calendar": f"{get_url()}/app/schedule-entry/view/calendar"},
+			data=entry_dict,
+			message=entry_dict.get("message") or _("Scheduling conflict detected."),
+			error=entry_dict.get("message") or _("Scheduling conflict detected."),
+			include_summary=include_summary,
+			summary_builder=lambda: _build_conflict_summary("Appointment Conflict", entry_dict),
+		)
+
 	entry_dict["entry_type"] = resolved_entry_type
 	entry_dict["estimated_duration"] = dur
 
@@ -1144,7 +1345,8 @@ def get_shop_floor_status(date: Optional[str] = None, include_summary: Any = Fal
 	frappe.has_permission("Service Bay", "read", throw=True)
 	frappe.has_permission("Schedule Entry", "read", throw=True)
 	frappe.has_permission("Repair Order", "read", throw=True)
-	target_date = _optional_str(date, "Date") or today()
+	raw_date = _optional_str(date, "Date")
+	target_date = normalize_date(raw_date) if raw_date else today()
 
 	bays = frappe.get_list("Service Bay", filters={"is_active": 1}, fields=["name", "description"])
 	techs = get_active_technicians(target_date)
@@ -1226,10 +1428,10 @@ def update_job_status(
 			ro.manual_parts_hold = 1
 			ro.status = "Waiting on Parts"
 		elif action_key == "complete":
+			validated_odo_out = _resolve_odometer_out(ro, odometer_out, "complete a Repair Order")
 			ro.manual_parts_hold = 0
 			ro.status = "Work Completed"
-			if odometer_out:
-				ro.odometer_out = cint(odometer_out)
+			ro.odometer_out = validated_odo_out
 			ro.vehicle_location = "Completed / Parked in Lot"
 
 		ro.save()
@@ -1437,7 +1639,8 @@ def get_tech_overview(date: Optional[str] = None, include_summary: Any = False) 
 	"""Return daily technician workload, shift windows, and bottleneck analysis."""
 	frappe.has_permission("Schedule Entry", "read", throw=True)
 	frappe.has_permission("Service Bay", "read", throw=True)
-	target_date = _optional_str(date, "Date") or today()
+	raw_date = _optional_str(date, "Date")
+	target_date = normalize_date(raw_date) if raw_date else today()
 	overview = get_daily_technician_overview(target_date)
 	return build_agent_envelope(
 		success=True,
@@ -1549,7 +1752,7 @@ def receive_purchase_order(
 @frappe.whitelist()
 def checkout_repair_order(
 	repair_order: str,
-	payment_method: str = "Debit / Interac",
+	payment_method: Optional[str] = None,
 	paid_amount: Optional[float] = None,
 	odometer_out: Optional[int] = None,
 	confirm: Any = False,
@@ -1557,7 +1760,10 @@ def checkout_repair_order(
 ) -> Dict[str, Any]:
 	"""Invoice, record payment, complete linked schedule entries, and release a Repair Order."""
 	ro = _get_ro_doc(repair_order, ptype="write")
-	payment_method = _optional_str(payment_method, "Payment Method") or "Debit / Interac"
+	payment_method = _optional_str(payment_method, "Payment Method")
+	if not payment_method:
+		frappe.throw(_("Payment Method is required."), frappe.MandatoryError)
+	validated_odo_out = _resolve_odometer_out(ro, odometer_out, "release a Repair Order")
 	if not coerce_bool(confirm):
 		frappe.throw(
 			_("Pass confirm=True only after explicit operator confirmation before invoicing and releasing {0}.").format(
@@ -1569,7 +1775,7 @@ def checkout_repair_order(
 	ro.process_payment_and_release(
 		payment_method=payment_method,
 		paid_amount=paid_amount,
-		odometer_out=odometer_out,
+		odometer_out=validated_odo_out,
 	)
 	ro.reload()
 
@@ -2045,20 +2251,52 @@ def reschedule_appointment(
 			frappe.ValidationError,
 		)
 
-	if scheduled_date:
-		doc.scheduled_date = scheduled_date
-	if start_time:
-		doc.scheduled_time = start_time
-	if duration_minutes is not None:
-		doc.estimated_duration = max(15, int(duration_minutes))
-	if service_bay is not None:
-		doc.service_bay = clean_bay
-	if technician is not None:
-		doc.assigned_technician = clean_tech
-	if notes:
-		doc.notes = f"{doc.notes}\n{notes}".strip() if doc.notes else notes
+	target_date = normalize_date(scheduled_date) if scheduled_date else str(doc.scheduled_date)
+	target_time = normalize_time(start_time) if start_time else str(doc.scheduled_time)
+	target_dur = max(15, int(duration_minutes)) if duration_minutes is not None else int(doc.estimated_duration or 60)
 
-	doc.save()
+	if service_bay is not None:
+		if clean_bay:
+			frappe.has_permission("Service Bay", "read", throw=True)
+			target_bay = resolve_service_bay_identifier(clean_bay)
+		else:
+			target_bay = None
+	else:
+		target_bay = doc.service_bay
+
+	if technician is not None:
+		target_tech = resolve_technician_identifier(clean_tech) if clean_tech else None
+	else:
+		target_tech = doc.assigned_technician
+
+	merged_notes = (f"{doc.notes}\n{notes}".strip() if doc.notes else notes) if notes else None
+
+	alloc_res = allocate_schedule_entry(
+		repair_order=doc.repair_order,
+		entry_type=doc.entry_type or "Diagnostic",
+		scheduled_date=target_date,
+		scheduled_time=target_time,
+		estimated_duration=target_dur,
+		service_bay=target_bay,
+		assigned_technician=target_tech,
+		notes=merged_notes,
+		schedule_entry_name=doc.name,
+	)
+	if alloc_res.get("status") == "conflict" or alloc_res.get("conflict"):
+		return build_agent_envelope(
+			success=False,
+			urls=alloc_res.get("urls") or _schedule_entry_urls(doc.name, doc.repair_order),
+			data=alloc_res,
+			message=alloc_res.get("message") or _("Reschedule conflict detected."),
+			error=alloc_res.get("message") or _("Reschedule conflict detected."),
+			include_summary=include_summary,
+			summary_builder=lambda: _build_conflict_summary("Reschedule Conflict", alloc_res),
+		)
+
+	doc.reload()
+	if service_bay is not None and not target_bay and doc.service_bay:
+		doc.service_bay = None
+		doc.save()
 	entry_data = _serialize_schedule_entry(doc)
 	urls = _schedule_entry_urls(doc.name, doc.repair_order)
 	return build_agent_envelope(
@@ -2068,6 +2306,109 @@ def reschedule_appointment(
 		message=_("Rescheduled appointment {0}.").format(doc.name),
 		include_summary=include_summary,
 		summary_builder=lambda: build_appointment_summary("Appointment Rescheduled", entry_data, urls),
+	)
+
+
+@frappe.whitelist()
+def intake_and_find_slots(
+	customer_name: Optional[str] = None,
+	vehicle_identifier: Optional[str] = None,
+	customer: Optional[str] = None,
+	vehicle: Optional[str] = None,
+	services: Optional[Union[List[Any], str]] = None,
+	parts: Optional[Union[List[Any], str]] = None,
+	notes: Optional[str] = None,
+	concern: Optional[str] = None,
+	customer_phone: Optional[str] = None,
+	customer_email: Optional[str] = None,
+	company: Optional[str] = None,
+	odometer_in: Optional[int] = None,
+	start_date: Optional[str] = None,
+	target_date: Optional[str] = None,
+	days_ahead: int = 3,
+	duration_minutes: Optional[int] = None,
+	equipment_tags: Optional[Union[List[str], str]] = None,
+	service_bay: Optional[str] = None,
+	technician: Optional[str] = None,
+	max_slots: int = 10,
+	include_past: Any = False,
+	min_start_time: Optional[str] = None,
+	include_resources: Any = False,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Composite intake endpoint: create Draft Estimate quote and return candidate booking slots."""
+	frappe.has_permission("Repair Order", "create", throw=True)
+	frappe.has_permission("Schedule Entry", "read", throw=True)
+	frappe.has_permission("Service Bay", "read", throw=True)
+
+	quote_res = create_quote(
+		customer_name=customer_name,
+		vehicle_identifier=vehicle_identifier,
+		customer=customer,
+		vehicle=vehicle,
+		services=services,
+		parts=parts,
+		notes=notes,
+		concern=concern,
+		customer_phone=customer_phone,
+		customer_email=customer_email,
+		company=company,
+		odometer_in=odometer_in,
+		include_summary=False,
+	)
+	ro_data = quote_res["data"]
+	ro_name = ro_data["name"]
+	dur = duration_minutes or ro_data.get("total_duration_minutes") or 60
+
+	slots_res = find_available_slots(
+		repair_order=ro_name,
+		duration_minutes=dur,
+		start_date=start_date,
+		target_date=target_date,
+		days_ahead=days_ahead,
+		equipment_tags=equipment_tags,
+		service_bay=service_bay,
+		technician=technician,
+		include_resources=include_resources,
+		max_slots=max_slots,
+		include_past=include_past,
+		min_start_time=min_start_time,
+		include_summary=False,
+	)
+	slots_data = slots_res["data"]
+	combined_data: Dict[str, Any] = {
+		"name": ro_name,
+		"repair_order": ro_data,
+		"duration_minutes": slots_data["duration_minutes"],
+		"slots": slots_data["slots"],
+		"resources": slots_data["resources"],
+	}
+	if "service_bay" in slots_data:
+		combined_data["service_bay"] = slots_data["service_bay"]
+	if "technician" in slots_data:
+		combined_data["technician"] = slots_data["technician"]
+	if "skipped_holidays" in slots_data:
+		combined_data["skipped_holidays"] = slots_data["skipped_holidays"]
+	if "duration_breakdown" in slots_data:
+		combined_data["duration_breakdown"] = slots_data["duration_breakdown"]
+
+	urls = dict(quote_res.get("urls") or {})
+	urls["calendar"] = f"{get_url()}/app/schedule-entry/view/calendar"
+
+	return build_agent_envelope(
+		success=True,
+		urls=urls,
+		data=combined_data,
+		message=_("Created quote {0} and found {1} available slot(s).").format(
+			ro_name, len(slots_data["slots"])
+		),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Intake Quote `{ro_name}` & Candidate Slots\n"
+			f"- **Estimated Duration**: {slots_data['duration_minutes']} min\n"
+			f"- **Available Slots Found**: {len(slots_data['slots'])}\n\n"
+			f"{build_slots_summary(slots_data['slots'], slots_data['duration_minutes'])}"
+		),
 	)
 
 
@@ -2115,6 +2456,7 @@ def update_appointment_status(
 @frappe.whitelist()
 def create_ro_from_appointment(
 	schedule_entry: str,
+	odometer_in: Optional[int] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Convert a pre-intake or diagnostic Schedule Entry into a Checked In Repair Order."""
@@ -2124,8 +2466,9 @@ def create_ro_from_appointment(
 	if not frappe.db.exists("Schedule Entry", schedule_entry):
 		frappe.throw(_("Schedule Entry {0} does not exist.").format(schedule_entry), frappe.DoesNotExistError)
 	frappe.has_permission("Schedule Entry", "write", doc=schedule_entry, throw=True)
+	validated_odometer_in = _require_non_negative_int(odometer_in, "Odometer In")
 
-	res = create_repair_order_from_schedule_entry(schedule_entry)
+	res = create_repair_order_from_schedule_entry(schedule_entry, odometer_in=validated_odometer_in)
 	ro_name = res["repair_order"]
 	urls = build_ro_urls(ro_name)
 	urls["calendar"] = f"{get_url()}/app/schedule-entry/view/calendar"

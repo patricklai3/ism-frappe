@@ -592,12 +592,21 @@ class TestSchedulingCapacity(ISMTestCase):
 		"""F13: When occupied technicians reach on_duty count, booking exceeding capacity is blocked."""
 		self._require_tech_api()
 		self._require_doctype("Schedule Entry")
-		target_date = today()
+		target_date = add_days(today(), 5)
 		ensure_ism_settings(enable_technician_capacity=1)
-		# Book active tech 1
-		create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="09:00:00", estimated_duration=60, service_bay=self.bay1, assigned_technician=self.tech1_id)
-		# Book active tech 2
-		create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="09:00:00", estimated_duration=60, service_bay=self.bay2, assigned_technician=self.tech2_id)
+		on_duty = [t for t in get_active_technicians(target_date) if not t.get("on_leave")]
+		self.assertTrue(on_duty)
+		for idx, tech in enumerate(on_duty):
+			bay = self.bay1 if idx == 0 else (self.bay2 if idx == 1 else None)
+			se = create_test_schedule_entry(
+				repair_order=self.test_ro1.name,
+				scheduled_date=target_date,
+				scheduled_time="09:00:00",
+				estimated_duration=60,
+				service_bay=bay,
+				assigned_technician=tech["employee"],
+			)
+			self.track(se)
 		# Pool capacity is now 0 available
 		pool = get_technician_pool_availability(target_date, "09:00:00", 60)
 		self.assertFalse(pool["is_available"])
@@ -732,6 +741,58 @@ class TestSchedulingCapacity(ISMTestCase):
 		slots = get_available_slots(today(), 60)
 		self.assertEqual(len(slots), 0)
 
+	def test_relative_date_time_normalization_and_bay_conflict_feedback(self):
+		"""Verify strict ISO date/time normalization, NL rejection, and structured bay conflict feedback."""
+		from datetime import date as dt_date
+		from ism.scheduling.time_utils import normalize_date, normalize_time
+
+		self.assertEqual(normalize_date("2026-11-16"), "2026-11-16")
+		self.assertEqual(normalize_date(dt_date(2026, 11, 16)), "2026-11-16")
+		self.assertIsNone(normalize_date(None))
+		self.assertIsNone(normalize_date(""))
+		for bad_date in ("today", "tomorrow", "friday", "next monday", "in 3 days", "11/16/2026", "2026-02-30"):
+			with self.assertRaises(frappe.ValidationError):
+				normalize_date(bad_date)
+
+		self.assertEqual(normalize_time("09:00"), "09:00:00")
+		self.assertEqual(normalize_time("9:00:00"), "09:00:00")
+		self.assertEqual(normalize_time("14:30"), "14:30:00")
+		self.assertEqual(normalize_time("00:00:00"), "00:00:00")
+		self.assertIsNone(normalize_time(None))
+		self.assertIsNone(normalize_time(""))
+		for bad_time in ("9am", "2:30pm", "noon", "midnight", "morning", "afternoon", "25:99"):
+			with self.assertRaises(frappe.ValidationError):
+				normalize_time(bad_time)
+
+		self._require_sched_api()
+		self._require_doctype("Schedule Entry")
+		target_date = add_days(today(), 2)
+		se = create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="09:00:00",
+			estimated_duration=60,
+			service_bay=self.bay1,
+			assigned_technician=self.tech1_id,
+		)
+		self.track(se)
+
+		conflict_res = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="09:00:00",
+			estimated_duration=60,
+			service_bay=self.bay1,
+			assigned_technician=self.tech2_id,
+		)
+		self.assertEqual(conflict_res.get("status"), "conflict")
+		self.assertTrue(conflict_res.get("conflict"))
+		self.assertEqual(conflict_res.get("conflict_type"), "bay_conflict")
+		self.assertEqual(conflict_res.get("resources", {}).get("service_bay"), self.bay1)
+		self.assertTrue(conflict_res.get("conflicting_entries"))
+		self.assertIn("conflicting_entry", conflict_res.get("urls", {}))
+		self.assertTrue(conflict_res.get("alternative_slots"))
+
 	# =========================================================================
 	# TIER 3: CROSS-FEATURE COMBINATIONS
 	# =========================================================================
@@ -847,8 +908,12 @@ class TestSchedulingCapacity(ISMTestCase):
 		se.insert()
 		self.track(se)
 
-		res = create_repair_order_from_schedule_entry(se.name)
+		with self.assertRaises(frappe.MandatoryError):
+			create_repair_order_from_schedule_entry(se.name)
+
+		res = create_repair_order_from_schedule_entry(se.name, odometer_in=48250)
 		self.assertIsNotNone(res.get("repair_order"))
+		self.assertEqual(res.get("odometer_in"), 48250)
 		ro_name = res["repair_order"]
 
 		ro = frappe.get_doc("Repair Order", ro_name)
@@ -949,16 +1014,21 @@ class TestSchedulingCapacity(ISMTestCase):
 		)
 		self.track(se)
 
-		with self.assertRaises(frappe.ValidationError):
-			allocate_schedule_entry(
-				repair_order=self.test_ro1.name,
-				scheduled_date=target_date,
-				scheduled_time="08:30:00",
-				estimated_duration=60,
-				service_bay=self.bay2,
-				assigned_technician=self.tech1_id,
-				allow_technician_overlap=0,
-			)
+		conflict_res = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:30:00",
+			estimated_duration=60,
+			service_bay=self.bay2,
+			assigned_technician=self.tech1_id,
+			allow_technician_overlap=0,
+		)
+		self.assertEqual(conflict_res.get("status"), "conflict")
+		self.assertTrue(conflict_res.get("conflict"))
+		self.assertEqual(conflict_res.get("conflict_type"), "technician_conflict")
+		self.assertTrue(conflict_res.get("conflicting_entries"))
+		self.assertIn("calendar", conflict_res.get("urls", {}))
+		self.assertIn("alternative_slots", conflict_res)
 
 		res = allocate_schedule_entry(
 			repair_order=self.test_ro1.name,
