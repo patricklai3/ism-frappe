@@ -1490,77 +1490,46 @@ class TestPartsManagement(ISMTestCase):
 		self.assertEqual(wh2_batch[c1]["committed_qty"], 2.0)
 		self.assertEqual(wh2_batch[c1]["available_qty"], 8.0)
 
-	def test_service_package_on_trash_cleanup(self):
-		"""Verify ServicePackage.on_trash cleans unreferenced Items via Repair Order Service JSON parts."""
-		company = self._get_company()
-		customer = self.create_test_customer()
-		vehicle = self.create_test_vehicle(customer=customer.name)
+	def test_service_package_does_not_create_or_delete_items(self):
+		"""Verify ServicePackage create, update, and delete never create, overwrite, or delete Item records."""
+		pkg_name = f"{TEST_PREFIX}NoItemSvc_{frappe.generate_hash(length=4)}"
+		quick_create_service_package(package_name=pkg_name)
+		pkg = frappe.get_doc("Service Package", pkg_name)
+		self.track(pkg)
+		self.assertFalse(frappe.db.exists("Item", pkg_name))
 
-		# 1. Referenced ONLY via JSON parts on Repair Order Service -> Item must NOT be deleted on trash
-		pkg_ref_name = f"{TEST_PREFIX}TrashRef_{frappe.generate_hash(length=4)}"
-		quick_create_service_package(package_name=pkg_ref_name)
-		self.assertTrue(frappe.db.exists("Item", pkg_ref_name))
+		pkg.service_rate = 250.0
+		pkg.save(ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("Item", pkg_name))
 
-		ro = frappe.get_doc({
-			"doctype": "Repair Order",
-			"company": company,
-			"customer": customer.name,
-			"vehicle": vehicle.name,
-			"odometer_in": 18000,
-			"services": [
-				{
-					"service_title": "Manual JSON Part Reference",
-					"status": "Estimating",
-					"labor_hours": 1.0,
-					"labor_rate": 100.0,
-					"labor_amount": 100.0,
-					"parts": json.dumps([{"item_code": pkg_ref_name, "qty": 1.0, "rate": 120.0}]),
-					"parts_total": 120.0,
-					"total_amount": 220.0,
-				}
-			],
-		}).insert(ignore_permissions=True)
-		self.track(ro)
-
-		frappe.delete_doc("Service Package", pkg_ref_name, ignore_permissions=True)
-		self.assertTrue(frappe.db.exists("Item", pkg_ref_name))
-		self.track(frappe.get_doc("Item", pkg_ref_name))
-
-		# 2. Prefix substring in another RO JSON part must NOT block cleanup of an unreferenced Service Package Item
-		pkg_free_name = f"{TEST_PREFIX}TrashFree_{frappe.generate_hash(length=4)}"
-		quick_create_service_package(package_name=pkg_free_name)
-		self.assertTrue(frappe.db.exists("Item", pkg_free_name))
-
-		other_item = quick_create_part(
-			part_number=f"{TEST_PREFIX}PREFIX_OTHER",
-			part_name="Prefix False Positive Item",
+		# A pre-existing Item sharing the same name must neither be overwritten nor deleted on trash.
+		existing_item_name = f"{TEST_PREFIX}KeepItem_{frappe.generate_hash(length=4)}"
+		item_group = "Services" if frappe.db.exists("Item Group", "Services") else (
+			frappe.db.get_value("Item Group", {"is_group": 0}, "name") or "All Item Groups"
 		)
-		other_doc = frappe.get_doc("Item", other_item["item_code"])
-		self.track(other_doc)
-
-		ro_prefix = frappe.get_doc({
-			"doctype": "Repair Order",
-			"company": company,
-			"customer": customer.name,
-			"vehicle": vehicle.name,
-			"odometer_in": 19000,
-			"services": [
-				{
-					"service_title": "Substring Non-Match",
-					"status": "Estimating",
-					"labor_hours": 1.0,
-					"labor_rate": 100.0,
-					"labor_amount": 100.0,
-					"parts": json.dumps([{"item_code": f"{pkg_free_name}_OTHER", "qty": 1.0, "rate": 10.0}]),
-					"parts_total": 10.0,
-					"total_amount": 110.0,
-				}
-			],
+		stock_uom = frappe.db.get_value("UOM", {"name": ["in", ["Nos", "Unit", "Hour"]]}, "name") or "Nos"
+		existing_item = frappe.get_doc({
+			"doctype": "Item",
+			"item_code": existing_item_name,
+			"item_name": "Original Preexisting Item",
+			"item_group": item_group,
+			"is_stock_item": 0,
+			"stock_uom": stock_uom,
+			"standard_rate": 77.0,
+			"description": "Original description",
 		}).insert(ignore_permissions=True)
-		self.track(ro_prefix)
+		self.track(existing_item)
 
-		frappe.delete_doc("Service Package", pkg_free_name, ignore_permissions=True)
-		self.assertFalse(frappe.db.exists("Item", pkg_free_name))
+		quick_create_service_package(package_name=existing_item_name)
+		self.assertTrue(frappe.db.exists("Service Package", existing_item_name))
+
+		existing_item.reload()
+		self.assertEqual(existing_item.item_name, "Original Preexisting Item")
+		self.assertEqual(float(existing_item.standard_rate), 77.0)
+
+		frappe.delete_doc("Service Package", existing_item_name, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("Service Package", existing_item_name))
+		self.assertTrue(frappe.db.exists("Item", existing_item_name))
 
 	def test_parts_endpoints_enforce_permissions_and_input_types(self):
 		"""Verify whitelisted parts APIs reject unprivileged users and malformed filter dicts."""

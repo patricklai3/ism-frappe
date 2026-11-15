@@ -1,7 +1,6 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-import json
 import re
 
 import frappe
@@ -69,9 +68,6 @@ class ServicePackage(Document):
 				if not has_lhrh_designation(part_ident):
 					row.side = "Both"
 
-
-		self.ensure_service_item()
-
 	def format_package_name(self):
 		"""Ensure correction code is not included in package_name / service title."""
 		if self.package_name:
@@ -79,85 +75,3 @@ class ServicePackage(Document):
 			if self.correction_code:
 				code = str(self.correction_code).strip()
 				self.package_name = re.sub(rf"^{re.escape(code)}\s*[-–—:]?\s*", "", self.package_name).strip()
-
-	def ensure_service_item(self):
-		"""Ensure a lightweight non-stock Item exists in ERPNext for billing this service."""
-		if not self.package_name:
-			return
-
-		item_name = self.package_name.strip()
-		rate = flt(self.service_rate)
-		desc = item_name
-
-		if not frappe.db.exists("Item", item_name):
-			item_group = "Services" if frappe.db.exists("Item Group", "Services") else frappe.db.get_value(
-				"Item Group", {"is_group": 0}, "name"
-			) or "All Item Groups"
-
-			stock_uom = "Hour" if frappe.db.exists("UOM", "Hour") else (
-				"Unit" if frappe.db.exists("UOM", "Unit") else "Nos"
-			)
-
-			item = frappe.get_doc({
-				"doctype": "Item",
-				"item_code": item_name,
-				"item_name": item_name,
-				"item_group": item_group,
-				"is_stock_item": 0,
-				"is_sales_item": 1,
-				"is_purchase_item": 0,
-				"include_item_in_manufacturing": 0,
-				"description": desc,
-				"stock_uom": stock_uom,
-				"standard_rate": rate,
-			})
-			item.insert(ignore_permissions=True)
-		else:
-			frappe.db.set_value(
-				"Item",
-				item_name,
-				{
-					"item_name": item_name,
-					"description": desc,
-					"standard_rate": rate,
-				},
-				update_modified=False,
-			)
-
-	def on_trash(self):
-		"""Clean up auto-created Item if no transactions reference it."""
-		item_code = (self.package_name or self.name or "").strip()
-		if not (item_code and frappe.db.exists("Item", item_code)):
-			return
-		if self._is_item_referenced(item_code):
-			return
-		try:
-			frappe.delete_doc("Item", item_code, ignore_permissions=True)
-		except Exception:
-			pass
-
-	def _is_item_referenced(self, item_code):
-		if frappe.db.count("Repair Order Service", {"service_package": self.name}):
-			return True
-		if frappe.db.count("Sales Invoice Item", {"item_code": item_code}):
-			return True
-		# Narrow candidates via LIKE, then verify exact item_code inside JSON rows to avoid prefix false positives.
-		ro_services = frappe.get_all(
-			"Repair Order Service",
-			filters={"parts": ["like", f"%{item_code}%"]},
-			fields=["parts"],
-		)
-		for row in ro_services:
-			raw_parts = row.get("parts")
-			if not raw_parts:
-				continue
-			try:
-				parsed = json.loads(raw_parts) if isinstance(raw_parts, str) else raw_parts
-			except Exception:
-				continue
-			if isinstance(parsed, list) and any(
-				isinstance(part, dict) and (part.get("item_code") or "").strip() == item_code
-				for part in parsed
-			):
-				return True
-		return False
