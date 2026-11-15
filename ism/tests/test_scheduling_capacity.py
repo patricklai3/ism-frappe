@@ -99,12 +99,22 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.tech3_id = self.__class__.tech3_id
 		self.emp_map = self.__class__.emp_map
 
-		# Create test Repair Order for scheduling integration
-		self.test_ro1 = self.create_test_repair_order(
-			customer=CUSTOMER,
-			vehicle=VEHICLE_VIN,
-			odometer_in=45000,
-		)
+		# Lazily allocate test Repair Order only for tests that actually reference self.test_ro1
+		self._test_ro1 = None
+
+	@property
+	def test_ro1(self):
+		if self._test_ro1 is None:
+			self._test_ro1 = self.create_test_repair_order(
+				customer=CUSTOMER,
+				vehicle=VEHICLE_VIN,
+				odometer_in=45000,
+			)
+		return self._test_ro1
+
+	@test_ro1.setter
+	def test_ro1(self, value):
+		self._test_ro1 = value
 
 	def tearDown(self):
 		super().tearDown()

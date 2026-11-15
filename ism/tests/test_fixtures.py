@@ -302,6 +302,27 @@ def ensure_items():
 					frappe.db.set_value("Item", item_code, "custom_frt", data["custom_frt"], update_modified=False)
 
 
+def _setting_value_differs(curr, expected):
+	"""Compare an ISM Settings field value against an expected target value."""
+	if expected is None or expected == "":
+		return bool(curr)
+	if isinstance(expected, float):
+		try:
+			return abs(float(curr) - expected) > 1e-4
+		except (TypeError, ValueError):
+			return True
+	if isinstance(expected, int) and not isinstance(expected, bool):
+		try:
+			return int(curr) != expected
+		except (TypeError, ValueError):
+			return True
+	if hasattr(curr, "total_seconds"):
+		from ism.scheduling.time_utils import normalize_time
+
+		return normalize_time(curr) != normalize_time(expected)
+	return str(curr or "") != str(expected)
+
+
 def ensure_ism_settings(**kwargs):
 	"""Set up standard scheduling and estimation parameters in ISM Settings."""
 	if not frappe.db.exists("DocType", "ISM Settings"):
@@ -322,10 +343,21 @@ def ensure_ism_settings(**kwargs):
 		"default_diagnostic_duration": 60,
 	}
 	fields.update(kwargs)
+	changed = False
 	for k, v in fields.items():
-		if hasattr(settings, k):
+		if not hasattr(settings, k):
+			continue
+		expected = v
+		if k == "estimation_percentile" and v is not None and 0 < float(v) <= 1.0:
+			expected = float(v) * 100.0
+		if _setting_value_differs(getattr(settings, k), expected):
 			setattr(settings, k, v)
-	settings.save(ignore_permissions=True)
+			changed = True
+	if changed:
+		settings.save(ignore_permissions=True)
+	from ism.scheduling.time_utils import invalidate_shop_settings_cache
+
+	invalidate_shop_settings_cache()
 	return settings
 
 
@@ -401,7 +433,6 @@ def teardown_transactional():
 		if frappe.db.exists("DocType", "Repair Order"):
 			ro_set = set(
 				frappe.get_all("Repair Order", filters=[["customer", "=", CUSTOMER]], pluck="name")
-				+ frappe.get_all("Repair Order", filters=[["customer", "like", f"{TEST_PREFIX}Cust%"]], pluck="name")
 				+ frappe.get_all("Repair Order", filters=[["customer", "like", f"{TEST_PREFIX}%"]], pluck="name")
 			)
 			ro_names = [r for r in ro_set if r not in PRESERVED_REPAIR_ORDERS]
@@ -413,7 +444,6 @@ def teardown_transactional():
 				+ frappe.get_all("Schedule Entry", filters=[["service_bay", "like", f"{TEST_PREFIX}%"]], pluck="name")
 				+ frappe.get_all("Schedule Entry", filters=[["service_bay", "like", "TEMP%"]], pluck="name")
 				+ frappe.get_all("Schedule Entry", filters=[["customer", "=", CUSTOMER]], pluck="name")
-				+ frappe.get_all("Schedule Entry", filters=[["customer", "like", f"{TEST_PREFIX}Cust%"]], pluck="name")
 				+ frappe.get_all("Schedule Entry", filters=[["customer", "like", f"{TEST_PREFIX}%"]], pluck="name")
 			)
 			if ro_names:

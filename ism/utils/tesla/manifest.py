@@ -266,7 +266,12 @@ def get_mobile_capability_from_manifest(url, doc_guid=None, correction_code=None
 	try:
 		topics = _read_cached_topics(base_manifest_url)
 		if topics is None:
-			if not allow_network or _is_negatively_cached(base_manifest_url):
+			in_unmocked_test = (
+				frappe is not None
+				and bool(getattr(getattr(frappe, "flags", None), "in_test", False))
+				and urllib.request.urlopen is _DEFAULT_URLOPEN
+			)
+			if not allow_network or in_unmocked_test or _is_negatively_cached(base_manifest_url):
 				return None
 			topics = _fetch_manifest_topics(base_manifest_url)
 			if topics is None:

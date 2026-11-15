@@ -10,9 +10,19 @@ from ism.tests.base import ISMTestCase, TEST_PREFIX
 
 
 class TestScheduleEntry(ISMTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.cleanup_schedule_entries()
+
+	@classmethod
+	def tearDownClass(cls):
+		cls.cleanup_schedule_entries()
+		frappe.db.rollback()
+		super().tearDownClass()
+
 	def setUp(self):
 		super().setUp()
-		self.cleanup_schedule_entries()
 		self.customer = self.create_test_customer()
 		unique_vin = f"5YJ3E1EBXNF{frappe.generate_hash(length=6).upper()}"
 		self.vehicle = self.create_test_vehicle(vin=unique_vin, customer=self.customer.name)
@@ -30,44 +40,13 @@ class TestScheduleEntry(ISMTestCase):
 					continue
 				raise
 
-	def tearDown(self):
-		self.cleanup_schedule_entries()
-		frappe.db.rollback()
-		super().tearDown()
-
-	def cleanup_schedule_entries(self):
-		"""Clean up test schedule entries created during tests to ensure complete test isolation."""
+	@classmethod
+	def cleanup_schedule_entries(cls):
+		"""Clean up residual test schedule entries created across runs."""
 		if not frappe.db.exists("DocType", "Schedule Entry"):
 			return
 
-		# 1. Clean entries linked to self.ro if present
-		ro_name = getattr(getattr(self, "ro", None), "name", None)
-		if ro_name:
-			for se_name in frappe.get_all("Schedule Entry", filters={"repair_order": ro_name}, pluck="name"):
-				try:
-					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
-				except Exception:
-					pass
-
-		# 2. Clean entries linked to self.customer if present
-		cust_name = getattr(getattr(self, "customer", None), "name", None)
-		if cust_name:
-			for se_name in frappe.get_all("Schedule Entry", filters={"customer": cust_name}, pluck="name"):
-				try:
-					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
-				except Exception:
-					pass
-
-		# 3. Clean entries linked to self.vehicle if present
-		veh_name = getattr(getattr(self, "vehicle", None), "name", None)
-		if veh_name:
-			for se_name in frappe.get_all("Schedule Entry", filters={"repair_vehicle": veh_name}, pluck="name"):
-				try:
-					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
-				except Exception:
-					pass
-
-		# 4. Clean test entries with known test provisional names or titles
+		# Clean test entries with known test provisional names or titles
 		test_entries = frappe.get_all(
 			"Schedule Entry",
 			filters=[

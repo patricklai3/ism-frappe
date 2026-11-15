@@ -1,15 +1,21 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+from unittest.mock import patch
+
 import frappe
+from frappe.api import discovery
+from frappe.cache_manager import clear_user_cache
 from frappe.core.doctype.user.user import generate_keys
 from frappe.mcp.test_utils import McpTestCase
+from frappe.permissions import setup_custom_perms
 from frappe.utils import today
+
 from ism.tests.test_fixtures import (
-	setup_all,
-	teardown_transactional,
 	CUSTOMER,
 	VEHICLE_VIN,
+	setup_all,
+	teardown_transactional,
 )
 
 
@@ -30,14 +36,16 @@ _MCP_REQUIRED_PERMS = (
 class TestMcpProtocol(McpTestCase):
 	"""Integration tests validating Frappe v16 native MCP (/api/v2/mcp) support for ISM Agent Facade."""
 
-	def _grant_role_permissions(self, role: str) -> None:
-		"""Grant role permissions via Frappe permission API without shadowing standard DocPerms."""
-		from frappe.permissions import add_permission, update_permission_property
+	_mcp_user = None
+	_mcp_authorization = None
+	_class_perm_restore_actions = []
+	_class_tracked_custom_perm_doctypes = set()
 
-		if not hasattr(self, "_perm_restore_actions"):
-			self._perm_restore_actions = []
-			self._tracked_custom_perm_doctypes = set()
-
+	@classmethod
+	def _grant_role_permissions_into(
+		cls, role: str, restore_actions: list, tracked_doctypes: set
+	) -> None:
+		"""Grant role permissions in Custom DocPerm without shadowing standard DocPerms."""
 		for dt, read, write, create in _MCP_REQUIRED_PERMS:
 			# Clear stale partial Custom DocPerms missing System Manager from legacy runs.
 			if (
@@ -55,74 +63,111 @@ class TestMcpProtocol(McpTestCase):
 				["read", "write", "create"],
 				as_dict=True,
 			)
-			if not had_custom and std_perm and (
-				int(std_perm.read or 0) >= read
-				and int(std_perm.write or 0) >= write
-				and int(std_perm.create or 0) >= create
+			if (
+				not had_custom
+				and std_perm
+				and (
+					int(std_perm.read or 0) >= read
+					and int(std_perm.write or 0) >= write
+					and int(std_perm.create or 0) >= create
+				)
 			):
 				continue
 
-			if not had_custom and dt not in self._tracked_custom_perm_doctypes:
-				self._tracked_custom_perm_doctypes.add(dt)
-				self._perm_restore_actions.append(("delete_all", dt, None, None))
+			if not had_custom and dt not in tracked_doctypes:
+				tracked_doctypes.add(dt)
+				restore_actions.append(("delete_all", dt, None, None))
+				setup_custom_perms(dt)
 			else:
 				prev = frappe.db.get_value(
 					"Custom DocPerm",
-					{"parent": dt, "role": role, "permlevel": 0},
+					{"parent": dt, "role": role, "permlevel": 0, "if_owner": 0},
 					["read", "write", "create"],
 					as_dict=True,
 				)
 				if prev:
-					self._perm_restore_actions.append(
-						("restore", dt, role, (int(prev.read or 0), int(prev.write or 0), int(prev.create or 0)))
+					restore_actions.append(
+						(
+							"restore",
+							dt,
+							role,
+							(int(prev.read or 0), int(prev.write or 0), int(prev.create or 0)),
+						)
 					)
 				else:
-					self._perm_restore_actions.append(("delete_role", dt, role, None))
+					restore_actions.append(("delete_role", dt, role, None))
 
-			if not frappe.db.exists("Custom DocPerm", {"parent": dt, "role": role, "permlevel": 0}):
-				add_permission(dt, role, permlevel=0)
-			update_permission_property(dt, role, 0, "read", read)
-			update_permission_property(dt, role, 0, "write", write)
-			update_permission_property(dt, role, 0, "create", create)
+			existing = frappe.db.get_value(
+				"Custom DocPerm",
+				{"parent": dt, "role": role, "permlevel": 0, "if_owner": 0},
+				"name",
+			)
+			if existing:
+				frappe.db.set_value(
+					"Custom DocPerm",
+					existing,
+					{"read": read, "write": write, "create": create},
+					update_modified=False,
+				)
+			else:
+				frappe.get_doc(
+					{
+						"doctype": "Custom DocPerm",
+						"parent": dt,
+						"parenttype": "DocType",
+						"parentfield": "permissions",
+						"role": role,
+						"permlevel": 0,
+						"if_owner": 0,
+						"read": read,
+						"write": write,
+						"create": create,
+					}
+				).insert(ignore_permissions=True)
 			frappe.clear_cache(doctype=dt)
 
-	def _restore_role_permissions(self) -> None:
-		"""Restore Custom DocPerm rows modified during the test."""
-		actions = getattr(self, "_perm_restore_actions", None) or []
-		if not actions:
+		clear_user_cache()
+
+	@classmethod
+	def _restore_role_permissions_from(cls, restore_actions: list, tracked_doctypes: set) -> None:
+		"""Restore Custom DocPerm rows modified during setup or tests."""
+		if not restore_actions:
 			return
-		from frappe.permissions import update_permission_property
 
 		frappe.set_user("Administrator")
 		frappe.db.rollback()
 		touched_doctypes = set()
-		for kind, dt, role, prev in reversed(actions):
+		for kind, dt, role, prev in reversed(restore_actions):
 			touched_doctypes.add(dt)
 			if kind == "delete_all":
 				frappe.db.delete("Custom DocPerm", {"parent": dt})
 			elif kind == "delete_role":
 				frappe.db.delete("Custom DocPerm", {"parent": dt, "role": role, "permlevel": 0})
 			elif kind == "restore" and prev:
-				update_permission_property(dt, role, 0, "read", prev[0])
-				update_permission_property(dt, role, 0, "write", prev[1])
-				update_permission_property(dt, role, 0, "create", prev[2])
+				existing = frappe.db.get_value(
+					"Custom DocPerm",
+					{"parent": dt, "role": role, "permlevel": 0, "if_owner": 0},
+					"name",
+				)
+				if existing:
+					frappe.db.set_value(
+						"Custom DocPerm",
+						existing,
+						{"read": prev[0], "write": prev[1], "create": prev[2]},
+						update_modified=False,
+					)
 		for dt in touched_doctypes:
 			frappe.clear_cache(doctype=dt)
+		clear_user_cache()
 		frappe.db.commit()  # nosemgrep
-		self._perm_restore_actions.clear()
-		self._tracked_custom_perm_doctypes.clear()
+		restore_actions.clear()
+		tracked_doctypes.clear()
 
-	def setUp(self):
-		super().setUp()
-		frappe.set_user("Administrator")
-		setup_all()
-
-		# Grant permissions to default test user role (MCP Desk Tester) without shadowing standard DocPerms
-		self._grant_role_permissions("MCP Desk Tester")
-		frappe.db.commit()  # nosemgrep
-
-	def delete_user(self, user):
-		"""Resilient delete_user override with retry to prevent MariaDB tabDocShare deadlocks."""
+	@classmethod
+	def _delete_user_with_retry(cls, user: str | None) -> None:
+		"""Resilient user deletion with retry to prevent MariaDB tabDocShare deadlocks."""
+		if not user:
+			return
 		frappe.set_user("Administrator")
 		for attempt in range(3):
 			try:
@@ -135,15 +180,98 @@ class TestMcpProtocol(McpTestCase):
 				if attempt == 2:
 					raise
 
-	def tearDown(self):
+	@classmethod
+	def setUpClass(cls) -> None:
+		super().setUpClass()
+		frappe.set_user("Administrator")
+		setup_all()
+		cls._class_perm_restore_actions = []
+		cls._class_tracked_custom_perm_doctypes = set()
+
+		if not frappe.db.exists("Role", "MCP Desk Tester"):
+			frappe.get_doc(doctype="Role", role_name="MCP Desk Tester", desk_access=1).insert(
+				ignore_permissions=True
+			)
+
+		cls._grant_role_permissions_into(
+			"MCP Desk Tester",
+			cls._class_perm_restore_actions,
+			cls._class_tracked_custom_perm_doctypes,
+		)
+
+		mcp_user = f"mcp.{frappe.generate_hash(length=10)}@example.com"
+		frappe.get_doc(
+			doctype="User",
+			email=mcp_user,
+			first_name="MCP Transport",
+			send_welcome_email=0,
+			roles=[{"role": "MCP Desk Tester"}],
+		).insert(ignore_permissions=True)
+		keys = generate_keys(mcp_user)
+		cls._mcp_user = mcp_user
+		cls._mcp_authorization = f"token {keys['api_key']}:{keys['api_secret']}"
+		frappe.db.commit()  # nosemgrep
+
+	@classmethod
+	def tearDownClass(cls) -> None:
 		try:
 			frappe.set_user("Administrator")
 			teardown_transactional()
 		finally:
 			try:
-				self._restore_role_permissions()
+				cls._restore_role_permissions_from(
+					cls._class_perm_restore_actions,
+					cls._class_tracked_custom_perm_doctypes,
+				)
 			finally:
-				super().tearDown()
+				try:
+					cls._delete_user_with_retry(cls._mcp_user)
+					cls._mcp_user = None
+					cls._mcp_authorization = None
+					frappe.db.commit()  # nosemgrep
+				finally:
+					super().tearDownClass()
+
+	def _grant_role_permissions(self, role: str) -> None:
+		"""Grant role permissions via Frappe permission API without shadowing standard DocPerms."""
+		if not hasattr(self, "_perm_restore_actions"):
+			self._perm_restore_actions = []
+			self._tracked_custom_perm_doctypes = set()
+		self._grant_role_permissions_into(
+			role,
+			self._perm_restore_actions,
+			self._tracked_custom_perm_doctypes,
+		)
+
+	def _restore_role_permissions(self) -> None:
+		"""Restore Custom DocPerm rows modified during the test."""
+		actions = getattr(self, "_perm_restore_actions", None) or []
+		if actions:
+			self._restore_role_permissions_from(
+				actions,
+				getattr(self, "_tracked_custom_perm_doctypes", set()),
+			)
+
+	def create_user(self, first_name):
+		if first_name == "MCP Transport" and getattr(self.__class__, "_mcp_user", None):
+			return self.__class__._mcp_user, self.__class__._mcp_authorization
+		return super().create_user(first_name)
+
+	def setUp(self):
+		self._perm_restore_actions = []
+		self._tracked_custom_perm_doctypes = set()
+		super().setUp()
+		frappe.set_user("Administrator")
+
+	def delete_user(self, user):
+		"""Resilient delete_user override with retry to prevent MariaDB tabDocShare deadlocks."""
+		self._delete_user_with_retry(user)
+
+	def tearDown(self):
+		try:
+			self._restore_role_permissions()
+		finally:
+			super().tearDown()
 
 	def invoke(self, *, tool="call_method", auth_header=None, **arguments):
 		"""Helper to dispatch JSON-RPC 2.0 tools/call to /api/v2/mcp."""
@@ -183,9 +311,13 @@ class TestMcpProtocol(McpTestCase):
 
 	def test_mcp_search_agent_methods(self):
 		"""Verify that ism.api.agent methods can be searched via search_methods."""
-		if not frappe.cache.get_value("frappe:api_discovery:python_methods", expires=True):
-			from frappe.api import discovery
-			discovery.build_cache()
+		if not frappe.cache.get_value(discovery.PYTHON_SEARCH_CACHE_KEY):
+			with (
+				patch.object(discovery.frappe, "get_installed_apps", return_value=["ism"]),
+				patch.object(discovery, "_discover_doctype_methods", return_value=[]),
+			):
+				discovery.build_cache()
+			self.addCleanup(discovery.clear_cache)
 
 		response = self.invoke(tool="search_methods", query="ism.api.agent")
 		self.assertEqual(response.status_code, 200)

@@ -5,7 +5,7 @@ import json
 import frappe
 
 from ism.tests.base import ISMTestCase
-from ism.tests.test_fixtures import setup_all, teardown_transactional, ensure_ism_settings, PREFIX, CUSTOMER, VEHICLE_VIN
+from ism.tests.test_fixtures import CUSTOMER, PREFIX, VEHICLE_VIN, ensure_ism_settings, setup_all
 
 try:
 	from ism.scheduling.estimation_light import (
@@ -49,7 +49,6 @@ class TestEstimationMath(ISMTestCase):
 
 	@classmethod
 	def tearDownClass(cls):
-		teardown_transactional()
 		super().tearDownClass()
 
 	def setUp(self):
