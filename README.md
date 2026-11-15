@@ -30,7 +30,7 @@ Pre-commit is configured to use the following tools for checking and formatting 
 
 ### Agent OS Integration
 
-Shop skills, safety rules, CLI, Python client, and Open WebUI tools live in the sister repository [../ism-agent-os](../ism-agent-os) over direct Frappe REST (`/api/method/*` and `/api/resource/*`).
+Shop skills, safety rules, CLI, and Python client live in the sister repository [../ism-agent-os](../ism-agent-os) over direct Frappe REST (`/api/method/*` and `/api/resource/*`).
 
 Configure Frappe API credentials in `../ism-agent-os/.env` (from `../ism-agent-os/.env.example`) and verify connectivity:
 
