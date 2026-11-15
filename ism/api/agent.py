@@ -39,6 +39,8 @@ from ism.api.inspection import (
 )
 from ism.api.parts import (
 	bulk_import_parts,
+	create_purchase_invoice as _create_purchase_invoice_impl,
+	create_purchase_payment as _create_purchase_payment_impl,
 	ensure_supplier_and_link_to_item,
 	get_component_alternates as _get_component_alternates_impl,
 	get_repair_order_parts_stock,
@@ -1545,46 +1547,169 @@ def check_parts_stock(
 	)
 
 
+def _build_procurement_urls(
+	ro_name: Optional[str] = None,
+	purchase_orders: Optional[List[str]] = None,
+	rfqs: Optional[List[str]] = None,
+	payment_entries: Optional[List[str]] = None,
+	purchase_invoices: Optional[List[str]] = None,
+	purchase_receipt: Optional[str] = None,
+	primary: Optional[tuple[str, str]] = None,
+) -> Dict[str, str]:
+	"""Build canonical Desk URLs for procurement, invoicing, payment, and receipt documents."""
+	base_url = get_url()
+	urls: Dict[str, str] = build_ro_urls(ro_name) if ro_name else {}
+	if primary and "desk" not in urls:
+		urls["desk"] = f"{base_url}/app/{primary[0]}/{primary[1]}"
+
+	po_list = purchase_orders or []
+	if len(po_list) == 1:
+		urls["purchase_order"] = f"{base_url}/app/purchase-order/{po_list[0]}"
+		urls.setdefault("desk", urls["purchase_order"])
+	if po_list:
+		urls["purchase_orders"] = [f"{base_url}/app/purchase-order/{name}" for name in po_list]
+
+	rfq_list = rfqs or []
+	if len(rfq_list) == 1:
+		urls["request_for_quotation"] = f"{base_url}/app/request-for-quotation/{rfq_list[0]}"
+		urls.setdefault("desk", urls["request_for_quotation"])
+	if rfq_list:
+		urls["rfqs"] = [f"{base_url}/app/request-for-quotation/{name}" for name in rfq_list]
+
+	pe_list = payment_entries or []
+	if len(pe_list) == 1:
+		urls["payment_entry"] = f"{base_url}/app/payment-entry/{pe_list[0]}"
+		urls.setdefault("desk", urls["payment_entry"])
+	if pe_list:
+		urls["payment_entries"] = [f"{base_url}/app/payment-entry/{name}" for name in pe_list]
+
+	pi_list = purchase_invoices or []
+	if len(pi_list) == 1:
+		urls["purchase_invoice"] = f"{base_url}/app/purchase-invoice/{pi_list[0]}"
+		urls.setdefault("desk", urls["purchase_invoice"])
+	if pi_list:
+		urls["purchase_invoices"] = [f"{base_url}/app/purchase-invoice/{name}" for name in pi_list]
+
+	if purchase_receipt:
+		urls["purchase_receipt"] = f"{base_url}/app/purchase-receipt/{purchase_receipt}"
+		urls.setdefault("desk", urls["purchase_receipt"])
+	return urls
+
+
 @frappe.whitelist()
 def submit_procurement_orders(
-	repair_order: str,
-	parts_data: Union[List[Dict[str, Any]], str],
-	submit: Any = False,
+	repair_order: Optional[str] = None,
+	parts_data: Union[List[Dict[str, Any]], str, None] = None,
+	submit: Any = True,
+	company: Optional[str] = None,
+	payment_method: Optional[str] = None,
+	paid_amount: Optional[float] = None,
+	reference_no: Optional[str] = None,
+	reference_date: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Create Purchase Orders (Draft by default) and RFQs for missing Repair Order parts."""
-	ro = _get_ro_doc(repair_order, ptype="read")
-	repair_order = ro.name
+	"""Create and submit (by default) Purchase Orders and RFQs, standalone or for a Repair Order, with optional PO payment."""
+	clean_ro = _optional_str(repair_order, "Repair Order")
+	if clean_ro:
+		ro = _get_ro_doc(clean_ro, ptype="read")
+		clean_ro = ro.name
+
+	clean_company = _optional_str(company, "Company")
+	pay_method = _optional_str(payment_method, "Payment Method")
+	ref_no = _optional_str(reference_no, "Reference No")
+	ref_date = _optional_str(reference_date, "Reference Date")
 	should_submit = coerce_bool(submit)
+
+	if (paid_amount is not None and str(paid_amount).strip() != "") or ref_no or ref_date:
+		if not pay_method:
+			frappe.throw(
+				_("Payment Method is required when recording payment details with procurement."),
+				frappe.MandatoryError,
+			)
+	if pay_method and not should_submit:
+		frappe.throw(
+			_("Cannot record a Payment Entry against a Draft Purchase Order. Submit the Purchase Order instead."),
+			frappe.ValidationError,
+		)
+
 	frappe.has_permission("Purchase Order", "create", throw=True)
 	if should_submit:
 		frappe.has_permission("Purchase Order", "submit", throw=True)
+	if pay_method:
+		frappe.has_permission("Payment Entry", "create", throw=True)
+		frappe.has_permission("Payment Entry", "submit", throw=True)
+
 	parsed_parts = parse_json_arg(parts_data, [])
-	res = _submit_procurement_orders_impl(
-		repair_order=repair_order,
-		parts_data=parsed_parts,
-		submit=should_submit,
+	impl_kwargs: Dict[str, Any] = {
+		"repair_order": clean_ro,
+		"parts_data": parsed_parts,
+		"submit": should_submit,
+	}
+	if clean_company:
+		impl_kwargs["company"] = clean_company
+
+	res = _submit_procurement_orders_impl(**impl_kwargs)
+	created_pos = res.get("purchase_orders", [])
+	created_rfqs = res.get("rfqs", [])
+
+	created_payments: List[str] = []
+	payment_details: List[Dict[str, Any]] = []
+	if pay_method:
+		if not created_pos:
+			frappe.throw(
+				_("No Purchase Orders were created to apply Payment Method '{0}' against.").format(pay_method),
+				frappe.ValidationError,
+			)
+		if len(created_pos) > 1 and paid_amount is not None and str(paid_amount).strip() != "":
+			frappe.throw(
+				_("Cannot apply a single paid_amount across multiple supplier Purchase Orders; run create_purchase_payment per PO."),
+				frappe.ValidationError,
+			)
+		for po_name in created_pos:
+			pay_res = _create_purchase_payment_impl(
+				purchase_order=po_name,
+				payment_method=pay_method,
+				paid_amount=paid_amount,
+				reference_no=ref_no,
+				reference_date=ref_date,
+			)
+			created_payments.append(pay_res["payment_entry"])
+			payment_details.append(pay_res)
+
+	urls = _build_procurement_urls(
+		ro_name=clean_ro,
+		purchase_orders=created_pos,
+		rfqs=created_rfqs,
+		payment_entries=created_payments,
 	)
+
+	target_label = f"#{clean_ro}" if clean_ro else "Inventory"
+	msg = _("Created {0} PO(s) and {1} RFQ(s).").format(len(created_pos), len(created_rfqs))
+	if created_payments:
+		msg = _("Created {0} PO(s), {1} RFQ(s), and {2} Payment Entry(s).").format(
+			len(created_pos), len(created_rfqs), len(created_payments)
+		)
 
 	return build_agent_envelope(
 		success=True,
-		urls=build_ro_urls(repair_order),
+		urls=urls,
 		data={
-			"repair_order": repair_order,
+			"repair_order": clean_ro,
+			"company": res.get("company") or clean_company,
 			"submitted": should_submit,
-			"purchase_orders": res.get("purchase_orders", []),
-			"rfqs": res.get("rfqs", []),
+			"purchase_orders": created_pos,
+			"rfqs": created_rfqs,
+			"payment_entries": created_payments,
+			"payments": payment_details,
 		},
-		message=_("Created {0} PO(s) and {1} RFQ(s).").format(
-			len(res.get("purchase_orders", [])),
-			len(res.get("rfqs", [])),
-		),
+		message=msg,
 		include_summary=include_summary,
 		summary_builder=lambda: (
-			f"### Procurement Orders for #{repair_order}\n"
+			f"### Procurement Orders ({target_label})\n"
 			f"- **Submitted**: `{should_submit}`\n"
-			f"- **Purchase Orders**: `{', '.join(res.get('purchase_orders', [])) or 'None'}`\n"
-			f"- **RFQs**: `{', '.join(res.get('rfqs', [])) or 'None'}`"
+			f"- **Purchase Orders**: `{', '.join(created_pos) or 'None'}`\n"
+			f"- **RFQs**: `{', '.join(created_rfqs) or 'None'}`\n"
+			f"- **Payment Entries**: `{', '.join(created_payments) or 'None'}`"
 		),
 	)
 
@@ -1681,57 +1806,135 @@ def get_unscheduled_services(repair_order: str, include_summary: Any = False) ->
 
 @frappe.whitelist()
 def receive_purchase_order(
-	purchase_order: str,
-	submit_po: Any = False,
+	purchase_order: Optional[str] = None,
+	submit_po: Any = True,
+	purchase_invoice: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Submit (when confirmed) and map/submit a Purchase Receipt for a Purchase Order in one call."""
-	purchase_order = _require_str(purchase_order, "Purchase Order")
-	frappe.has_permission("Purchase Order", "read", throw=True)
-	if not frappe.db.exists("Purchase Order", purchase_order):
-		frappe.throw(_("Purchase Order {0} does not exist.").format(purchase_order), frappe.DoesNotExistError)
+	"""Submit PO (if still Draft) and post a Purchase Receipt for a Purchase Order or un-received Purchase Invoice."""
+	purchase_order = _optional_str(purchase_order, "Purchase Order")
+	purchase_invoice = _optional_str(purchase_invoice, "Purchase Invoice")
+	if not purchase_order and not purchase_invoice:
+		frappe.throw(
+			_("Either Purchase Order or Purchase Invoice is required to receive goods."),
+			frappe.MandatoryError,
+		)
 
-	po = frappe.get_doc("Purchase Order", purchase_order)
-	po.check_permission("read")
-	if po.docstatus == 0:
-		if not coerce_bool(submit_po):
+	po = None
+	if purchase_order:
+		frappe.has_permission("Purchase Order", "read", throw=True)
+		if not frappe.db.exists("Purchase Order", purchase_order):
+			frappe.throw(_("Purchase Order {0} does not exist.").format(purchase_order), frappe.DoesNotExistError)
+		po = frappe.get_doc("Purchase Order", purchase_order)
+		po.check_permission("read")
+		if po.docstatus == 0:
+			if not coerce_bool(submit_po):
+				frappe.throw(
+					_("Purchase Order {0} is in Draft. Pass submit_po=True after explicit operator confirmation.").format(
+						purchase_order
+					),
+					frappe.ValidationError,
+				)
+			po.check_permission("submit")
+			po.submit()
+
+	pi = None
+	if purchase_invoice:
+		frappe.has_permission("Purchase Invoice", "read", throw=True)
+		if not frappe.db.exists("Purchase Invoice", purchase_invoice):
+			frappe.throw(_("Purchase Invoice {0} does not exist.").format(purchase_invoice), frappe.DoesNotExistError)
+		pi = frappe.get_doc("Purchase Invoice", purchase_invoice)
+		pi.check_permission("read")
+		if pi.docstatus != 1:
+			frappe.throw(_("Purchase Invoice {0} must be submitted before receiving stock.").format(pi.name), frappe.ValidationError)
+		if cint(getattr(pi, "update_stock", 0)) == 1:
 			frappe.throw(
-				_("Purchase Order {0} is in Draft. Pass submit_po=True after explicit operator confirmation.").format(
-					purchase_order
+				_("Purchase Invoice {0} already updated stock on submission; do not create a duplicate Purchase Receipt.").format(
+					pi.name
 				),
 				frappe.ValidationError,
 			)
-		po.check_permission("submit")
-		po.submit()
+		linked_pos = [row.purchase_order for row in (pi.get("items") or []) if getattr(row, "purchase_order", None)]
+		if po and linked_pos and po.name not in linked_pos:
+			frappe.throw(
+				_("Purchase Invoice {0} is not linked to Purchase Order {1}.").format(pi.name, po.name),
+				frappe.ValidationError,
+			)
+		if not po and linked_pos:
+			po = frappe.get_doc("Purchase Order", linked_pos[0])
+			po.check_permission("read")
+	elif po:
+		if flt(getattr(po, "per_received", 0.0), 2) >= 100.0:
+			frappe.throw(
+				_("Purchase Order {0} has already been 100% received.").format(po.name),
+				frappe.ValidationError,
+			)
+		# Scenario A: If a submitted non-stock Purchase Invoice already billed this PO,
+		# map the Purchase Receipt from that Purchase Invoice so both PO and PI per_received reach 100%.
+		linked_pi_names = frappe.get_all(
+			"Purchase Invoice Item",
+			filters={"purchase_order": po.name, "docstatus": 1},
+			distinct=True,
+			pluck="parent",
+		)
+		for candidate_pi_name in linked_pi_names:
+			candidate_pi = frappe.get_doc("Purchase Invoice", candidate_pi_name)
+			if cint(getattr(candidate_pi, "update_stock", 0)) == 0 and flt(getattr(candidate_pi, "per_received", 0.0), 2) < 100.0:
+				pi = candidate_pi
+				break
 
 	frappe.has_permission("Purchase Receipt", "create", throw=True)
 	frappe.has_permission("Purchase Receipt", "submit", throw=True)
-	from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
+	if pi:
+		from erpnext.accounts.doctype.purchase_invoice.purchase_invoice import make_purchase_receipt as make_pr_from_pi
 
-	pr_doc = make_purchase_receipt(source_name=po.name)
+		pr_doc = make_pr_from_pi(source_name=pi.name)
+	else:
+		from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt as make_pr_from_po
+
+		pr_doc = make_pr_from_po(source_name=po.name)
+
+	if not pr_doc.get("items"):
+		target_ref = (pi.name if pi else po.name)
+		frappe.throw(
+			_("No pending unreceived items remain on {0}.").format(target_ref),
+			frappe.ValidationError,
+		)
+
 	pr_doc.check_permission("create")
 	pr_doc.insert()
 	pr_doc.check_permission("submit")
 	pr_doc.submit()
-	po.reload()
+	if po:
+		po.reload()
+	if pi:
+		pi.reload()
 
-	ro_name = getattr(po, "repair_order", None)
+	ro_name = getattr(po, "repair_order", None) if po else None
 	ro_status = None
 	if ro_name and frappe.db.exists("Repair Order", ro_name) and frappe.has_permission("Repair Order", "read", doc=ro_name):
 		ro_status = frappe.db.get_value("Repair Order", ro_name, "status")
-	base_url = get_url()
-	urls = build_ro_urls(ro_name) if ro_name else {}
-	urls["purchase_order"] = f"{base_url}/app/purchase-order/{po.name}"
-	urls["purchase_receipt"] = f"{base_url}/app/purchase-receipt/{pr_doc.name}"
+
+	urls = _build_procurement_urls(
+		ro_name=ro_name,
+		purchase_orders=[po.name] if po else None,
+		purchase_invoices=[pi.name] if pi else None,
+		purchase_receipt=pr_doc.name,
+		primary=("purchase-receipt", pr_doc.name),
+	)
+
+	per_received = flt(getattr(po, "per_received", getattr(pi, "per_received", 100.0)))
+	source_label = po.name if po else pi.name
 
 	return build_agent_envelope(
 		success=True,
 		urls=urls,
 		data={
-			"purchase_order": po.name,
+			"purchase_order": po.name if po else None,
+			"purchase_invoice": pi.name if pi else None,
 			"purchase_receipt": pr_doc.name,
 			"docstatus": pr_doc.docstatus,
-			"per_received": flt(getattr(po, "per_received", 100.0)),
+			"per_received": per_received,
 			"repair_order": ro_name,
 			"repair_order_status": ro_status,
 			"items": [
@@ -1739,12 +1942,114 @@ def receive_purchase_order(
 				for i in (pr_doc.items or [])
 			],
 		},
-		message=_("Received Purchase Order {0} via Purchase Receipt {1}.").format(po.name, pr_doc.name),
+		message=_("Received {0} via Purchase Receipt {1}.").format(source_label, pr_doc.name),
 		include_summary=include_summary,
 		summary_builder=lambda: (
 			f"### Purchase Receipt Created: `{pr_doc.name}`\n"
-			f"- **PO**: `{po.name}` ({flt(getattr(po, 'per_received', 100.0))}% received)\n"
+			f"- **Source**: `{source_label}` ({per_received}% received)\n"
 			f"- **Repair Order**: `{ro_name or 'None'}` (`{ro_status or 'N/A'}`)"
+		),
+	)
+
+
+@frappe.whitelist()
+def create_purchase_payment(
+	purchase_order: Optional[str] = None,
+	purchase_invoice: Optional[str] = None,
+	payment_method: Optional[str] = None,
+	paid_amount: Optional[float] = None,
+	reference_no: Optional[str] = None,
+	reference_date: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Create and submit a supplier Payment Entry against a Purchase Order (advance) or Purchase Invoice."""
+	res = _create_purchase_payment_impl(
+		purchase_order=purchase_order,
+		purchase_invoice=purchase_invoice,
+		payment_method=payment_method,
+		paid_amount=paid_amount,
+		reference_no=reference_no,
+		reference_date=reference_date,
+	)
+	ro_name = res.get("repair_order")
+	po_name = res["reference_name"] if res["reference_doctype"] == "Purchase Order" else None
+	pi_name = res["reference_name"] if res["reference_doctype"] == "Purchase Invoice" else None
+	urls = _build_procurement_urls(
+		ro_name=ro_name,
+		purchase_orders=[po_name] if po_name else None,
+		purchase_invoices=[pi_name] if pi_name else None,
+		payment_entries=[res["payment_entry"]],
+		primary=("payment-entry", res["payment_entry"]),
+	)
+	return build_agent_envelope(
+		success=True,
+		urls=urls,
+		data=res,
+		message=_("Submitted Payment Entry {0} ({1} {2}) against {3} {4}.").format(
+			res["payment_entry"],
+			res["mode_of_payment"],
+			res["paid_amount"],
+			res["reference_doctype"],
+			res["reference_name"],
+		),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Supplier Payment Submitted: `{res['payment_entry']}`\n"
+			f"- **Target**: `{res['reference_doctype']}` `{res['reference_name']}`\n"
+			f"- **Supplier**: `{res['supplier']}`\n"
+			f"- **Method**: `{res['mode_of_payment']}` | **Paid Amount**: `{res['paid_amount']:.2f}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def create_purchase_invoice(
+	purchase_order: Optional[str] = None,
+	supplier: Optional[str] = None,
+	parts_data: Union[List[Dict[str, Any]], str, None] = None,
+	update_stock: Any = False,
+	company: Optional[str] = None,
+	bill_no: Optional[str] = None,
+	bill_date: Optional[str] = None,
+	attach_advances: Any = True,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Create and submit a Purchase Invoice (from PO or standalone), with optional update_stock and PO advance attachment."""
+	parsed_parts = parse_json_arg(parts_data, None) if parts_data is not None else None
+	res = _create_purchase_invoice_impl(
+		purchase_order=purchase_order,
+		supplier=supplier,
+		parts_data=parsed_parts,
+		update_stock=update_stock,
+		company=company,
+		bill_no=bill_no,
+		bill_date=bill_date,
+		attach_advances=attach_advances,
+	)
+	po_name = res.get("purchase_order")
+	ro_name = res.get("repair_order")
+	urls = _build_procurement_urls(
+		ro_name=ro_name,
+		purchase_orders=[po_name] if po_name else None,
+		purchase_invoices=[res["purchase_invoice"]],
+		primary=("purchase-invoice", res["purchase_invoice"]),
+	)
+	return build_agent_envelope(
+		success=True,
+		urls=urls,
+		data=res,
+		message=_("Submitted Purchase Invoice {0} (update_stock={1}, advance_attached={2}, outstanding={3}).").format(
+			res["purchase_invoice"],
+			res["update_stock"],
+			res["total_advance"],
+			res["outstanding_amount"],
+		),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Purchase Invoice Submitted: `{res['purchase_invoice']}`\n"
+			f"- **Supplier**: `{res['supplier']}` | **PO**: `{po_name or 'Standalone'}`\n"
+			f"- **Update Stock**: `{bool(res['update_stock'])}` | **Grand Total**: `{res['grand_total']:.2f}`\n"
+			f"- **Advances Attached**: `{res['total_advance']:.2f}` | **Outstanding**: `{res['outstanding_amount']:.2f}`"
 		),
 	)
 

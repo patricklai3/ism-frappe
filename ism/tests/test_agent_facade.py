@@ -17,6 +17,8 @@ from ism.api.agent import (
 	book_appointment,
 	check_parts_stock,
 	checkout_repair_order,
+	create_purchase_invoice,
+	create_purchase_payment,
 	create_quote,
 	create_ro_from_appointment,
 	create_shop_action_item,
@@ -349,7 +351,7 @@ class TestAgentFacade(ISMTestCase):
 		self.assertEqual(cust.email_id, "platecust@example.com")
 
 	def test_extended_facade_endpoints(self):
-		"""Verify check_parts_stock, submit_procurement_orders (draft), tech overview, and unscheduled services."""
+		"""Verify check_parts_stock, submit_procurement_orders (submit default + draft override), tech overview, and unscheduled services."""
 		res = create_quote(
 			customer_name=CUSTOMER,
 			vehicle_identifier=VEHICLE_VIN,
@@ -383,9 +385,18 @@ class TestAgentFacade(ISMTestCase):
 				parts_data=[{"item_code": "OEM-123", "qty": 1, "supplier": "Tesla"}],
 			)
 			self.assertTrue(proc_res["success"])
-			self.assertFalse(proc_res["data"]["submitted"])
+			self.assertTrue(proc_res["data"]["submitted"])
 			self.assertEqual(proc_res["data"]["purchase_orders"], ["PO-TEST-1"])
-			self.assertFalse(mock_po.call_args.kwargs["submit"])
+			self.assertTrue(mock_po.call_args.kwargs["submit"])
+
+		with patch("ism.api.agent._submit_procurement_orders_impl", return_value={"purchase_orders": ["PO-DRAFT-1"], "rfqs": []}) as mock_po_draft:
+			draft_res = submit_procurement_orders(
+				repair_order=ro_name,
+				parts_data=[{"item_code": "OEM-123", "qty": 1, "supplier": "Tesla"}],
+				submit=False,
+			)
+			self.assertFalse(draft_res["data"]["submitted"])
+			self.assertFalse(mock_po_draft.call_args.kwargs["submit"])
 
 	def test_updated_capabilities_workflow(self):
 		"""End-to-end smoke test covering Chunk 1 compact envelopes, wrappers, and hold isolation."""
@@ -435,7 +446,7 @@ class TestAgentFacade(ISMTestCase):
 		self.assertIn("/quote-approval?token=", auth_res["urls"]["approval"])
 		self.assertTrue(auth_res["data"]["token"])
 
-		# 4. Approve RO, place on manual parts hold, and verify draft-first procurement
+		# 4. Approve RO, place on manual parts hold, and verify default-submit procurement
 		ro.reload()
 		ro.approval_status = "Approved"
 		ro.save(ignore_permissions=True)
@@ -451,8 +462,8 @@ class TestAgentFacade(ISMTestCase):
 				repair_order=ro_name,
 				parts_data=[{"item_code": "OEM-CALIPER", "qty": 1, "supplier": "Tesla"}],
 			)
-			self.assertFalse(proc_res["data"]["submitted"])
-			self.assertFalse(mock_po.call_args.kwargs["submit"])
+			self.assertTrue(proc_res["data"]["submitted"])
+			self.assertTrue(mock_po.call_args.kwargs["submit"])
 
 		# 5. Opt-in summary card on shop floor status
 		floor_res = get_shop_floor_status(date=today(), include_summary=True)
@@ -1630,3 +1641,153 @@ class TestAgentFacade(ISMTestCase):
 
 		with self.assertRaises(frappe.MandatoryError):
 			create_ro_from_appointment(schedule_entry=pre_se.name)
+
+	def test_standalone_procurement_advance_payment_and_invoice_scenarios(self):
+		"""Verify standalone POs, auto-submit, PO advance payments, Scenario A (PI update_stock=0 -> PR), and Scenario B (PI update_stock=1)."""
+		from frappe.utils import flt
+		from ism.api.parts import quick_create_part
+
+		sup = f"{PREFIX}InvSup_{frappe.generate_hash(length=5)}"
+		p_a = quick_create_part(
+			part_number=f"{PREFIX}INV_A",
+			part_name="Lower Control Arm Frontward LH",
+			unit_rate=220.0,
+			valuation_rate=150.0,
+		)
+		p_b = quick_create_part(
+			part_number=f"{PREFIX}INV_B",
+			part_name="Lower Control Arm Frontward RH",
+			unit_rate=240.0,
+			valuation_rate=160.0,
+		)
+		self.track("Item", p_a["item_code"])
+		self.track("Item", p_b["item_code"])
+
+		# 1. Standalone PO with prepaid payment in a single dispatch (no Repair Order required)
+		prepaid_res = submit_procurement_orders(
+			parts_data=[{"item_code": p_a["item_code"], "qty": 1, "rate": 150.0, "supplier": sup}],
+			payment_method="Debit / Interac",
+		)
+		self.assertTrue(prepaid_res["success"])
+		self.assertIsNone(prepaid_res["data"]["repair_order"])
+		self.assertTrue(prepaid_res["data"]["submitted"])
+		po_a_name = prepaid_res["data"]["purchase_orders"][0]
+		pe_a_name = prepaid_res["data"]["payment_entries"][0]
+		self.track("Purchase Order", po_a_name)
+		self.track("Payment Entry", pe_a_name)
+		self.track("Supplier", sup)
+		self.assertIn("/app/purchase-order/", prepaid_res["urls"]["purchase_order"])
+		self.assertIn("/app/payment-entry/", prepaid_res["urls"]["payment_entry"])
+
+		po_a = frappe.get_doc("Purchase Order", po_a_name)
+		self.assertEqual(po_a.docstatus, 1)
+		self.assertIsNone(getattr(po_a, "repair_order", None))
+		self.assertAlmostEqual(flt(po_a.grand_total), 169.50, places=2)
+		self.assertAlmostEqual(flt(po_a.advance_paid), 169.50, places=2)
+
+		pe_a = frappe.get_doc("Payment Entry", pe_a_name)
+		self.assertEqual(pe_a.docstatus, 1)
+		self.assertEqual(pe_a.payment_type, "Pay")
+		self.assertEqual(pe_a.party_type, "Supplier")
+
+		# 2. Scenario A: Invoice arrives before part (update_stock=0) -> advance attached -> PR later updates stock
+		pi_a_res = create_purchase_invoice(
+			purchase_order=po_a_name,
+			update_stock=False,
+			bill_no="SUP-INV-A1",
+		)
+		self.assertTrue(pi_a_res["success"])
+		pi_a_name = pi_a_res["data"]["purchase_invoice"]
+		self.track("Purchase Invoice", pi_a_name)
+		self.assertEqual(pi_a_res["data"]["docstatus"], 1)
+		self.assertEqual(pi_a_res["data"]["update_stock"], 0)
+		self.assertAlmostEqual(flt(pi_a_res["data"]["total_advance"]), 169.50, places=2)
+		self.assertAlmostEqual(flt(pi_a_res["data"]["outstanding_amount"]), 0.0, places=2)
+		self.assertEqual(len(pi_a_res["data"]["advances"]), 1)
+		self.assertEqual(pi_a_res["data"]["advances"][0]["reference_name"], pe_a_name)
+
+		wh = po_a.items[0].warehouse
+		stock_before_pr = flt(
+			frappe.db.get_value("Bin", {"item_code": p_a["item_code"], "warehouse": wh}, "actual_qty") or 0.0
+		)
+
+		pr_a_res = receive_purchase_order(purchase_order=po_a_name)
+		self.assertTrue(pr_a_res["success"])
+		pr_a_name = pr_a_res["data"]["purchase_receipt"]
+		self.track("Purchase Receipt", pr_a_name)
+		self.assertEqual(pr_a_res["data"]["purchase_invoice"], pi_a_name)
+		self.assertEqual(pr_a_res["data"]["per_received"], 100.0)
+
+		stock_after_pr = flt(
+			frappe.db.get_value("Bin", {"item_code": p_a["item_code"], "warehouse": wh}, "actual_qty") or 0.0
+		)
+		self.assertAlmostEqual(stock_after_pr - stock_before_pr, 1.0, places=2)
+
+		pi_a_doc = frappe.get_doc("Purchase Invoice", pi_a_name)
+		pr_a_doc = frappe.get_doc("Purchase Receipt", pr_a_name)
+		self.assertAlmostEqual(flt(pi_a_doc.per_received), 100.0, places=2)
+		self.assertAlmostEqual(flt(pr_a_doc.per_billed), 100.0, places=2)
+
+		# 3. Scenario B: Standalone PO -> separate Bank advance Payment Entry (fallback reference_no) -> PI with update_stock=1
+		po_b_res = submit_procurement_orders(
+			parts_data=[{"item_code": p_b["item_code"], "qty": 2, "rate": 100.0, "supplier": sup}],
+		)
+		po_b_name = po_b_res["data"]["purchase_orders"][0]
+		self.track("Purchase Order", po_b_name)
+
+		pe_b_res = create_purchase_payment(
+			purchase_order=po_b_name,
+			payment_method="Credit Card",
+			paid_amount=100.0,
+		)
+		pe_b_name = pe_b_res["data"]["payment_entry"]
+		self.track("Payment Entry", pe_b_name)
+		self.assertEqual(pe_b_res["data"]["docstatus"], 1)
+		self.assertAlmostEqual(flt(pe_b_res["data"]["paid_amount"]), 100.0, places=2)
+
+		stock_before_pi1 = flt(
+			frappe.db.get_value("Bin", {"item_code": p_b["item_code"], "warehouse": wh}, "actual_qty") or 0.0
+		)
+		pi_b_res = create_purchase_invoice(
+			purchase_order=po_b_name,
+			update_stock=True,
+			bill_no="SUP-INV-B1",
+		)
+		pi_b_name = pi_b_res["data"]["purchase_invoice"]
+		self.track("Purchase Invoice", pi_b_name)
+		self.assertEqual(pi_b_res["data"]["docstatus"], 1)
+		self.assertEqual(pi_b_res["data"]["update_stock"], 1)
+		self.assertAlmostEqual(flt(pi_b_res["data"]["grand_total"]), 226.0, places=2)
+		self.assertAlmostEqual(flt(pi_b_res["data"]["total_advance"]), 100.0, places=2)
+		self.assertAlmostEqual(flt(pi_b_res["data"]["outstanding_amount"]), 126.0, places=2)
+		self.assertAlmostEqual(flt(pi_b_res["data"]["per_received"]), 100.0, places=2)
+		self.assertAlmostEqual(flt(pi_b_res["data"]["per_billed"]), 100.0, places=2)
+
+		stock_after_pi1 = flt(
+			frappe.db.get_value("Bin", {"item_code": p_b["item_code"], "warehouse": wh}, "actual_qty") or 0.0
+		)
+		self.assertAlmostEqual(stock_after_pi1 - stock_before_pi1, 2.0, places=2)
+
+		with self.assertRaises(frappe.ValidationError):
+			receive_purchase_order(purchase_order=po_b_name)
+
+		# Pay remaining balance directly against the Purchase Invoice
+		pe_b2_res = create_purchase_payment(purchase_invoice=pi_b_name, payment_method="Cash")
+		self.track("Payment Entry", pe_b2_res["data"]["payment_entry"])
+		self.assertAlmostEqual(flt(pe_b2_res["data"]["paid_amount"]), 126.0, places=2)
+		pi_b_doc = frappe.get_doc("Purchase Invoice", pi_b_name)
+		self.assertAlmostEqual(flt(pi_b_doc.outstanding_amount), 0.0, places=2)
+
+		# 4. Standalone Purchase Invoice without PO (update_stock=0 -> receive via Purchase Invoice)
+		pi_c_res = create_purchase_invoice(
+			supplier=sup,
+			parts_data=[{"item_code": p_a["item_code"], "qty": 1, "rate": 140.0}],
+			update_stock=False,
+			bill_no="SUP-INV-C1",
+		)
+		pi_c_name = pi_c_res["data"]["purchase_invoice"]
+		self.track("Purchase Invoice", pi_c_name)
+		pr_c_res = receive_purchase_order(purchase_invoice=pi_c_name)
+		self.track("Purchase Receipt", pr_c_res["data"]["purchase_receipt"])
+		self.assertEqual(pr_c_res["data"]["purchase_invoice"], pi_c_name)
+		self.assertEqual(pr_c_res["data"]["per_received"], 100.0)

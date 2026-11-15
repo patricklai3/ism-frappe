@@ -22,6 +22,8 @@ from ism.api.parts import (
 	ensure_supplier_and_link_to_item,
 	get_repair_order_procurement_data,
 	submit_procurement_orders,
+	create_purchase_payment,
+	create_purchase_invoice,
 	get_item_procurement_info,
 	get_repair_order_committed_qty,
 	get_repair_order_committed_qty_batch,
@@ -1570,6 +1572,8 @@ class TestPartsManagement(ISMTestCase):
 				lambda: get_item_procurement_info("GUEST-ITEM"),
 				lambda: get_repair_order_procurement_data("GUEST-RO"),
 				lambda: submit_procurement_orders("GUEST-RO", [{"item_code": "GUEST-ITEM", "supplier": "S"}]),
+				lambda: create_purchase_payment(purchase_order="GUEST-PO", payment_method="Cash"),
+				lambda: create_purchase_invoice(supplier="GUEST-SUP", parts_data=[{"item_code": "GUEST-ITEM", "qty": 1}]),
 				lambda: get_default_warehouse(),
 			)
 			for call in calls:

@@ -7,7 +7,7 @@ import json
 import re
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, today
+from frappe.utils import cint, flt, getdate, today
 
 LHRH_PATTERN = re.compile(
 	r"\b(LH|RH)\b|\bLeft\s+Hand\b(?!\s*Drive)|\bRight\s+Hand\b(?!\s*Drive)",
@@ -871,20 +871,22 @@ def get_repair_order_procurement_data(docname):
 
 
 @frappe.whitelist()
-def submit_procurement_orders(repair_order, parts_data, submit=True):
-	"""Create (and optionally submit) Purchase Orders (grouped by supplier) and RFQs for a Repair Order."""
-	frappe.has_permission("Repair Order", "write", throw=True)
+def submit_procurement_orders(repair_order=None, parts_data=None, submit=True, company=None):
+	"""Create (and optionally submit) Purchase Orders (grouped by supplier) and RFQs, optionally linked to a Repair Order."""
 	if isinstance(submit, str):
 		should_submit = submit.strip().lower() in ("1", "true", "yes")
 	else:
 		should_submit = bool(submit)
 
 	repair_order = _optional_str(repair_order, "Repair Order")
-	if not repair_order or not frappe.db.exists("Repair Order", repair_order):
-		frappe.throw(_("Repair Order {0} not found").format(repair_order))
+	ro = None
+	if repair_order:
+		frappe.has_permission("Repair Order", "write", throw=True)
+		if not frappe.db.exists("Repair Order", repair_order):
+			frappe.throw(_("Repair Order {0} not found").format(repair_order))
+		ro = frappe.get_doc("Repair Order", repair_order)
+		ro.check_permission("write")
 
-	ro = frappe.get_doc("Repair Order", repair_order)
-	ro.check_permission("write")
 	if isinstance(parts_data, str):
 		try:
 			parts_data = json.loads(parts_data)
@@ -894,7 +896,7 @@ def submit_procurement_orders(repair_order, parts_data, submit=True):
 	if not isinstance(parts_data, list) or not parts_data:
 		frappe.throw(_("No parts selected for procurement."))
 
-	company = ro.company or frappe.defaults.get_user_default("Company")
+	company = _resolve_active_company(ro.company if ro else company)
 	target_wh = _resolve_default_warehouse(company)
 
 	po_parts_by_supplier = {}
@@ -925,6 +927,9 @@ def submit_procurement_orders(repair_order, parts_data, submit=True):
 		if sup:
 			supplier_links.append((sup, code, sup_part_no))
 
+	if not po_parts_by_supplier and not rfq_parts:
+		frappe.throw(_("No valid catalog items found in parts_data for procurement."))
+
 	# Enforce Purchase Order / RFQ permissions before creating or linking suppliers.
 	if po_parts_by_supplier:
 		frappe.has_permission("Purchase Order", "create", throw=True)
@@ -941,17 +946,20 @@ def submit_procurement_orders(repair_order, parts_data, submit=True):
 	from ism.setup import get_or_create_default_purchase_tax_template
 
 	po_tax_template = get_or_create_default_purchase_tax_template(company)
+	ro_name = ro.name if ro else None
 
 	created_pos = [
-		_create_purchase_order(ro.name, company, sup, items, target_wh, po_tax_template, should_submit)
+		_create_purchase_order(ro_name, company, sup, items, target_wh, po_tax_template, should_submit)
 		for sup, items in po_parts_by_supplier.items()
 	]
 	created_rfqs = []
 	if rfq_parts:
-		created_rfqs.append(_create_rfq(ro.name, company, rfq_suppliers, rfq_parts, target_wh, should_submit))
+		created_rfqs.append(_create_rfq(ro_name, company, rfq_suppliers, rfq_parts, target_wh, should_submit))
 
 	return {
 		"status": "success",
+		"repair_order": ro_name,
+		"company": company,
 		"submitted": should_submit,
 		"purchase_orders": created_pos,
 		"rfqs": created_rfqs,
@@ -1634,6 +1642,448 @@ def _first_present_flt(record, keys, default=0.0):
 	return default
 
 
+def _resolve_active_company(company=None):
+	"""Return explicit company or active shop default Company."""
+	return (
+		_optional_str(company, "Company")
+		or frappe.defaults.get_user_default("Company")
+		or frappe.db.get_single_value("Global Defaults", "default_company")
+		or frappe.db.get_value("Company", {"is_group": 0}, "name")
+	)
+
+
+def _coerce_bool_param(value, default=False):
+	if value is None:
+		return default
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, (int, float)):
+		return bool(value)
+	if isinstance(value, str):
+		lowered = value.strip().lower()
+		if lowered in ("1", "true", "yes", "y"):
+			return True
+		if lowered in ("0", "false", "no", "n", ""):
+			return False
+	return bool(value)
+
+
+def _build_purchase_item_row(item_input, target_wh, include_schedule_date=False):
+	item_doc = frappe.get_cached_doc("Item", item_input["item_code"])
+	rate = flt(
+		item_input.get("rate")
+		or getattr(item_doc, "last_purchase_rate", 0.0)
+		or getattr(item_doc, "valuation_rate", 0.0)
+		or getattr(item_doc, "standard_rate", 0.0)
+	)
+	qty = flt(item_input.get("qty", 1.0))
+	if qty <= 0:
+		frappe.throw(_("Quantity must be greater than zero for item {0}.").format(item_input["item_code"]), frappe.ValidationError)
+	row = {
+		"item_code": item_input["item_code"],
+		"item_name": item_input.get("item_name") or item_doc.item_name,
+		"qty": qty,
+		"rate": rate,
+		"uom": item_input.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
+		"stock_uom": getattr(item_doc, "stock_uom", "Nos"),
+		"conversion_factor": 1.0,
+		"warehouse": _optional_str(item_input.get("warehouse"), "Warehouse") or target_wh,
+	}
+	if include_schedule_date:
+		row["schedule_date"] = today()
+	return row
+
+
+def _apply_purchase_tax_template(doc, tax_template):
+	if not tax_template:
+		return
+	doc.taxes_and_charges = tax_template
+	from erpnext.controllers.accounts_controller import get_taxes_and_charges
+
+	taxes = get_taxes_and_charges("Purchase Taxes and Charges Template", tax_template)
+	doc.set("taxes", [])
+	for tax_row in taxes:
+		doc.append("taxes", tax_row)
+
+
+def _resolve_mode_of_payment(payment_method):
+	requested = _optional_str(payment_method, "Payment Method")
+	if not requested:
+		frappe.throw(_("Payment Method is required."), frappe.MandatoryError)
+
+	if frappe.db.exists("Mode of Payment", requested):
+		return requested
+
+	all_modes = frappe.get_all("Mode of Payment", filters={"enabled": 1}, pluck="name")
+	for candidate in all_modes:
+		if candidate.strip().lower() == requested.lower():
+			return candidate
+
+	frappe.throw(
+		_("Mode of Payment '{0}' was not found. Available modes: {1}.").format(
+			requested, ", ".join(sorted(all_modes)) or "None"
+		),
+		frappe.ValidationError,
+	)
+
+
+def _resolve_supplier_payment_account(company, mop_name):
+	account = frappe.db.get_value(
+		"Mode of Payment Account",
+		{"parent": mop_name, "company": company},
+		"default_account",
+	)
+	if account:
+		return account
+
+	mop_type = frappe.db.get_value("Mode of Payment", mop_name, "type")
+	if mop_type == "Bank":
+		account = (
+			frappe.db.get_value("Company", company, "default_bank_account")
+			or frappe.db.get_value(
+				"Account", {"company": company, "account_type": "Bank", "is_group": 0}, "name"
+			)
+			or frappe.db.get_value("Company", company, "default_cash_account")
+			or frappe.db.get_value(
+				"Account", {"company": company, "account_type": "Cash", "is_group": 0}, "name"
+			)
+		)
+	else:
+		account = (
+			frappe.db.get_value("Company", company, "default_cash_account")
+			or frappe.db.get_value(
+				"Account", {"company": company, "account_type": "Cash", "is_group": 0}, "name"
+			)
+			or frappe.db.get_value("Company", company, "default_bank_account")
+			or frappe.db.get_value(
+				"Account", {"company": company, "account_type": "Bank", "is_group": 0}, "name"
+			)
+		)
+
+	if not account:
+		frappe.throw(
+			_("No Bank or Cash account is configured for Company {0}.").format(company),
+			frappe.ValidationError,
+		)
+	return account
+
+
+@frappe.whitelist()
+def create_purchase_payment(
+	purchase_order=None,
+	purchase_invoice=None,
+	payment_method=None,
+	paid_amount=None,
+	reference_no=None,
+	reference_date=None,
+):
+	"""Create and immediately submit a supplier Payment Entry against a Purchase Order or Purchase Invoice."""
+	purchase_order = _optional_str(purchase_order, "Purchase Order")
+	purchase_invoice = _optional_str(purchase_invoice, "Purchase Invoice")
+	if not purchase_order and not purchase_invoice:
+		frappe.throw(
+			_("Either Purchase Order or Purchase Invoice is required for a supplier payment."),
+			frappe.MandatoryError,
+		)
+	if purchase_order and purchase_invoice:
+		frappe.throw(
+			_("Specify either Purchase Order or Purchase Invoice, not both."),
+			frappe.ValidationError,
+		)
+
+	target_dt = "Purchase Order" if purchase_order else "Purchase Invoice"
+	target_name = purchase_order or purchase_invoice
+	frappe.has_permission("Payment Entry", "create", throw=True)
+	frappe.has_permission("Payment Entry", "submit", throw=True)
+	frappe.has_permission(target_dt, "read", throw=True)
+
+	mop = _resolve_mode_of_payment(payment_method)
+	ref_no = _optional_str(reference_no, "Reference No")
+	ref_date_str = _optional_str(reference_date, "Reference Date")
+
+	if not frappe.db.exists(target_dt, target_name):
+		frappe.throw(_("{0} {1} not found.").format(target_dt, target_name), frappe.DoesNotExistError)
+
+	target_doc = frappe.get_doc(target_dt, target_name)
+	target_doc.check_permission("read")
+	if target_doc.docstatus != 1:
+		frappe.throw(
+			_("{0} {1} must be submitted before recording a payment.").format(target_dt, target_name),
+			frappe.ValidationError,
+		)
+
+	if target_dt == "Purchase Order":
+		po_total = flt(getattr(target_doc, "rounded_total", 0.0) or target_doc.grand_total)
+		remaining = flt(po_total - flt(getattr(target_doc, "advance_paid", 0.0)), 2)
+		if flt(getattr(target_doc, "per_billed", 0.0), 2) >= 100.0:
+			frappe.throw(
+				_("Purchase Order {0} is already fully billed; pay against its Purchase Invoice instead.").format(
+					target_name
+				),
+				frappe.ValidationError,
+			)
+	else:
+		remaining = flt(target_doc.outstanding_amount, 2)
+
+	if remaining <= 0:
+		frappe.throw(
+			_("{0} {1} has no remaining payable balance.").format(target_dt, target_name),
+			frappe.ValidationError,
+		)
+
+	if paid_amount is not None and str(paid_amount).strip() != "":
+		pay_amt = flt(paid_amount)
+		if pay_amt <= 0:
+			frappe.throw(_("Paid amount must be greater than zero."), frappe.ValidationError)
+	else:
+		pay_amt = remaining
+
+	paid_from = _resolve_supplier_payment_account(target_doc.company, mop)
+	paid_from_type = frappe.db.get_value("Account", paid_from, "account_type")
+	resolved_ref_date = getdate(ref_date_str) if ref_date_str else getdate(today())
+
+	from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+	pe = get_payment_entry(
+		target_dt,
+		target_name,
+		party_amount=pay_amt,
+		bank_account=paid_from,
+		reference_date=resolved_ref_date,
+	)
+	pe.mode_of_payment = mop
+	pe.paid_from = paid_from
+	pe.paid_from_account_type = paid_from_type
+	pe.paid_amount = pay_amt
+	pe.received_amount = pay_amt
+	pe.reference_date = resolved_ref_date
+
+	if ref_no:
+		pe.reference_no = ref_no
+	elif paid_from_type == "Bank" and not getattr(pe, "reference_no", None):
+		pe.reference_no = target_name
+
+	for ref in pe.get("references") or []:
+		if ref.reference_doctype == target_dt and ref.reference_name == target_name:
+			ref.allocated_amount = min(flt(pay_amt), flt(ref.outstanding_amount or remaining))
+
+	pe.set_amounts()
+	pe.check_permission("create")
+	pe.insert()
+	pe.check_permission("submit")
+	pe.submit()
+	target_doc.reload()
+
+	return {
+		"status": "success",
+		"payment_entry": pe.name,
+		"docstatus": pe.docstatus,
+		"payment_type": pe.payment_type,
+		"party_type": pe.party_type,
+		"supplier": pe.party,
+		"company": pe.company,
+		"mode_of_payment": pe.mode_of_payment,
+		"paid_from": pe.paid_from,
+		"paid_amount": flt(pe.paid_amount),
+		"unallocated_amount": flt(getattr(pe, "unallocated_amount", 0.0)),
+		"reference_doctype": target_dt,
+		"reference_name": target_name,
+		"reference_no": getattr(pe, "reference_no", None),
+		"reference_date": str(getattr(pe, "reference_date", "")),
+		"repair_order": getattr(target_doc, "repair_order", None),
+	}
+
+
+@frappe.whitelist()
+def create_purchase_invoice(
+	purchase_order=None,
+	supplier=None,
+	parts_data=None,
+	update_stock=False,
+	company=None,
+	bill_no=None,
+	bill_date=None,
+	attach_advances=True,
+):
+	"""Create and immediately submit a Purchase Invoice (from PO or standalone), optionally updating stock and attaching PO advances."""
+	purchase_order = _optional_str(purchase_order, "Purchase Order")
+	supplier = _optional_str(supplier, "Supplier")
+	bill_no = _optional_str(bill_no, "Supplier Invoice No")
+	bill_date_str = _optional_str(bill_date, "Supplier Invoice Date")
+	should_update_stock = _coerce_bool_param(update_stock, default=False)
+	should_attach_advances = _coerce_bool_param(attach_advances, default=True)
+
+	if isinstance(parts_data, str):
+		try:
+			parts_data = json.loads(parts_data)
+		except Exception:
+			frappe.throw(_("Invalid parts data format."))
+
+	if not purchase_order and (not supplier or not parts_data):
+		frappe.throw(
+			_("Provide either Purchase Order or both Supplier and parts_data to create a Purchase Invoice."),
+			frappe.MandatoryError,
+		)
+
+	frappe.has_permission("Purchase Invoice", "create", throw=True)
+	frappe.has_permission("Purchase Invoice", "submit", throw=True)
+
+	po = None
+	if purchase_order:
+		frappe.has_permission("Purchase Order", "read", throw=True)
+		if not frappe.db.exists("Purchase Order", purchase_order):
+			frappe.throw(_("Purchase Order {0} not found.").format(purchase_order), frappe.DoesNotExistError)
+		po = frappe.get_doc("Purchase Order", purchase_order)
+		po.check_permission("read")
+		if po.docstatus != 1:
+			frappe.throw(
+				_("Purchase Order {0} must be submitted before creating a Purchase Invoice.").format(
+					purchase_order
+				),
+				frappe.ValidationError,
+			)
+		if flt(getattr(po, "per_billed", 0.0), 2) >= 100.0:
+			frappe.throw(
+				_("Purchase Order {0} is already 100% billed.").format(purchase_order),
+				frappe.ValidationError,
+			)
+		if should_update_stock and flt(getattr(po, "per_received", 0.0), 2) >= 100.0:
+			frappe.throw(
+				_("Purchase Order {0} is already 100% received; create Purchase Invoice with update_stock disabled.").format(
+					purchase_order
+				),
+				frappe.ValidationError,
+			)
+
+		from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_invoice
+
+		pi = make_purchase_invoice(po.name)
+		if parts_data is not None:
+			if not isinstance(parts_data, list) or not parts_data:
+				frappe.throw(_("Invalid parts data format."))
+			requested = {}
+			for row in parts_data:
+				if not isinstance(row, dict):
+					frappe.throw(_("Invalid parts data format."))
+				code = _optional_str(row.get("item_code"), "Item Code")
+				if not code:
+					frappe.throw(_("Each item in parts_data must include item_code."), frappe.ValidationError)
+				requested[code] = row
+			filtered_rows = []
+			for pi_row in pi.get("items") or []:
+				if pi_row.item_code in requested:
+					override = requested[pi_row.item_code]
+					if override.get("qty") is not None:
+						pi_row.qty = flt(override["qty"])
+					if override.get("rate") is not None:
+						pi_row.rate = flt(override["rate"])
+					filtered_rows.append(pi_row)
+			missing_codes = [c for c in requested if c not in {r.item_code for r in filtered_rows}]
+			if missing_codes:
+				frappe.throw(
+					_("Item(s) {0} do not exist on Purchase Order {1}.").format(
+						", ".join(missing_codes), po.name
+					),
+					frappe.ValidationError,
+				)
+			pi.set("items", filtered_rows)
+
+		resolved_company = po.company
+		if not pi.get("taxes"):
+			from ism.setup import get_or_create_default_purchase_tax_template
+
+			_apply_purchase_tax_template(pi, get_or_create_default_purchase_tax_template(resolved_company))
+	else:
+		if not isinstance(parts_data, list) or not parts_data:
+			frappe.throw(_("No parts selected for Purchase Invoice."))
+
+		resolved_company = _resolve_active_company(company)
+		target_wh = _resolve_default_warehouse(resolved_company)
+		validated_items = []
+		for item in parts_data:
+			if not isinstance(item, dict):
+				frappe.throw(_("Invalid parts data format."))
+			code = _optional_str(item.get("item_code"), "Item Code")
+			if not code or not frappe.db.exists("Item", code):
+				frappe.throw(_("Item {0} not found.").format(code or "(blank)"), frappe.DoesNotExistError)
+			sup_part_no = _optional_str(item.get("supplier_part_no"), "Supplier Part No")
+			ensure_supplier_and_link_to_item(supplier, code, sup_part_no)
+			validated_items.append(item)
+
+		pi = frappe.new_doc("Purchase Invoice")
+		pi.company = resolved_company
+		pi.supplier = supplier
+		pi.posting_date = today()
+		for item in validated_items:
+			pi.append("items", _build_purchase_item_row(item, target_wh, include_schedule_date=False))
+
+		from ism.setup import get_or_create_default_purchase_tax_template
+
+		_apply_purchase_tax_template(pi, get_or_create_default_purchase_tax_template(resolved_company))
+
+	pi.update_stock = 1 if should_update_stock else 0
+	if hasattr(pi, "disable_rounded_total"):
+		pi.disable_rounded_total = 1
+	if bill_no:
+		pi.bill_no = bill_no
+		pi.bill_date = getdate(bill_date_str) if bill_date_str else getdate(today())
+	elif bill_date_str:
+		pi.bill_date = getdate(bill_date_str)
+
+	pi.set_missing_values()
+	pi.calculate_taxes_and_totals()
+
+	if should_attach_advances:
+		if po:
+			pi.only_include_allocated_payments = 1
+		pi.set_advances()
+		pi.calculate_taxes_and_totals()
+
+	pi.check_permission("create")
+	pi.insert()
+	pi.check_permission("submit")
+	pi.submit()
+	pi.reload()
+	if po:
+		po.reload()
+
+	return {
+		"status": "success",
+		"purchase_invoice": pi.name,
+		"docstatus": pi.docstatus,
+		"update_stock": cint(pi.update_stock),
+		"supplier": pi.supplier,
+		"company": pi.company,
+		"purchase_order": po.name if po else None,
+		"repair_order": getattr(po, "repair_order", None) if po else None,
+		"bill_no": getattr(pi, "bill_no", None),
+		"bill_date": str(getattr(pi, "bill_date", "") or ""),
+		"grand_total": flt(pi.grand_total),
+		"total_advance": flt(getattr(pi, "total_advance", 0.0)),
+		"outstanding_amount": flt(pi.outstanding_amount),
+		"per_received": flt(getattr(po, "per_received", getattr(pi, "per_received", 0.0))),
+		"per_billed": flt(getattr(po, "per_billed", 100.0)) if po else 100.0,
+		"advances": [
+			{
+				"reference_type": adv.reference_type,
+				"reference_name": adv.reference_name,
+				"advance_amount": flt(adv.advance_amount),
+				"allocated_amount": flt(adv.allocated_amount),
+			}
+			for adv in (pi.get("advances") or [])
+		],
+		"items": [
+			{
+				"item_code": row.item_code,
+				"qty": flt(row.qty),
+				"rate": flt(row.rate),
+				"warehouse": row.warehouse,
+			}
+			for row in (pi.get("items") or [])
+		],
+	}
+
+
 def _create_purchase_order(ro_name, company, supplier, items, target_wh, po_tax_template, should_submit):
 	po = frappe.new_doc("Purchase Order")
 	po.company = company
@@ -1645,33 +2095,12 @@ def _create_purchase_order(ro_name, company, supplier, items, target_wh, po_tax_
 		po.repair_order = ro_name
 
 	for it in items:
-		item_doc = frappe.get_cached_doc("Item", it["item_code"])
-		rate = flt(
-			it.get("rate")
-			or getattr(item_doc, "last_purchase_rate", 0.0)
-			or getattr(item_doc, "valuation_rate", 0.0)
-			or getattr(item_doc, "standard_rate", 0.0)
-		)
-		po.append("items", {
-			"item_code": it["item_code"],
-			"item_name": it.get("item_name") or item_doc.item_name,
-			"qty": flt(it.get("qty", 1.0)),
-			"rate": rate,
-			"uom": it.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
-			"stock_uom": getattr(item_doc, "stock_uom", "Nos"),
-			"conversion_factor": 1.0,
-			"warehouse": target_wh,
-			"schedule_date": today(),
-		})
+		po.append("items", _build_purchase_item_row(it, target_wh, include_schedule_date=True))
 
-	if po_tax_template:
-		po.taxes_and_charges = po_tax_template
-		from erpnext.controllers.accounts_controller import get_taxes_and_charges
-		taxes = get_taxes_and_charges("Purchase Taxes and Charges Template", po_tax_template)
-		po.set("taxes", [])
-		for tax_row in taxes:
-			po.append("taxes", tax_row)
+	_apply_purchase_tax_template(po, po_tax_template)
 
+	if hasattr(po, "disable_rounded_total"):
+		po.disable_rounded_total = 1
 	po.set_missing_values()
 	po.calculate_taxes_and_totals()
 	po.insert()
