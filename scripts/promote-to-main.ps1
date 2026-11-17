@@ -1,7 +1,7 @@
 param (
     [switch]$AllowDirty = $false,
     [switch]$SkipSmokeTest = $false,
-    [string]$SmokeModule = "ism.tests.test_estimation_math",
+    [string]$SmokeModule = "ism.tests.test_simulation_foundation,ism.tests.test_estimation_math",
     [string]$Distro = ""
 )
 

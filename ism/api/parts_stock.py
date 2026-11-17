@@ -20,18 +20,26 @@ def _require_any_read_permission(doctypes, primary_doctype=None):
 
 
 def _find_company_warehouse(company):
-	"""Return default, Stores-matching, or any non-group Warehouse for a company."""
+	"""Return default, Shop Store/Stores-matching, or active non-group Warehouse for a company."""
 	if not company:
 		return None
 	if frappe.db.has_column("Company", "default_warehouse"):
 		co_wh = frappe.db.get_value("Company", company, "default_warehouse")
-		if co_wh and frappe.db.exists("Warehouse", {"name": co_wh, "company": company, "is_group": 0}):
+		if co_wh and frappe.db.exists(
+			"Warehouse", {"name": co_wh, "company": company, "is_group": 0, "disabled": 0}
+		):
 			return co_wh
-	stores_wh = frappe.db.get_value(
-		"Warehouse", {"company": company, "is_group": 0, "warehouse_name": ["like", "%Store%"]}, "name"
-	)
-	if stores_wh:
-		return stores_wh
+	for pattern in ("%Shop Store%", "%Store%"):
+		stores_wh = frappe.db.get_value(
+			"Warehouse",
+			{"company": company, "is_group": 0, "disabled": 0, "warehouse_name": ["like", pattern]},
+			"name",
+		)
+		if stores_wh:
+			return stores_wh
+	active_wh = frappe.db.get_value("Warehouse", {"company": company, "is_group": 0, "disabled": 0}, "name")
+	if active_wh:
+		return active_wh
 	return frappe.db.get_value("Warehouse", {"company": company, "is_group": 0}, "name")
 
 
@@ -45,14 +53,16 @@ def _resolve_default_warehouse(company=None):
 	"""Internal warehouse lookup after caller has enforced boundary permissions."""
 	if company:
 		stock_wh = _get_stock_settings_default_warehouse()
-		if stock_wh and frappe.db.exists("Warehouse", {"name": stock_wh, "company": company, "is_group": 0}):
+		if stock_wh and frappe.db.exists(
+			"Warehouse", {"name": stock_wh, "company": company, "is_group": 0, "disabled": 0}
+		):
 			return stock_wh
 		wh = _find_company_warehouse(company)
 		if wh:
 			return wh
 
 	stock_wh = _get_stock_settings_default_warehouse()
-	if stock_wh and frappe.db.exists("Warehouse", {"name": stock_wh, "is_group": 0}):
+	if stock_wh and frappe.db.exists("Warehouse", {"name": stock_wh, "is_group": 0, "disabled": 0}):
 		return stock_wh
 
 	default_company = frappe.db.get_single_value("Global Defaults", "default_company")
@@ -60,7 +70,11 @@ def _resolve_default_warehouse(company=None):
 	if wh:
 		return wh
 
-	return frappe.db.get_value("Warehouse", {"is_group": 0}, "name") or "Stores"
+	return (
+		frappe.db.get_value("Warehouse", {"is_group": 0, "disabled": 0}, "name")
+		or frappe.db.get_value("Warehouse", {"is_group": 0}, "name")
+		or "Stores"
+	)
 
 
 @frappe.whitelist()

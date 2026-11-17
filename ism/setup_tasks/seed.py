@@ -54,7 +54,7 @@ _SCHEDULE_ENTRY_TYPE_METADATA = {
 _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("authorization_token_expiry_hours", 48),
 	("cost_tolerance_percentage", 10.0),
-	("cost_tolerance_flat_amount", 50.0),
+	("cost_tolerance_flat_amount", 20.0),
 	(
 		"disclaimer_text",
 		(

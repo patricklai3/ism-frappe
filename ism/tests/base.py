@@ -1,32 +1,27 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import random
 import time
 import unittest
 import warnings
+from typing import Optional
 
 import frappe
 
+from ism.testing import SimBuilder, SimContext, SimManifest, generate_synthetic_vin, get_master_manifest
 from ism.tests.constants import (
-	PRESERVED_CUSTOMERS,
-	PRESERVED_PAYMENT_ENTRIES,
-	PRESERVED_REPAIR_ORDERS,
-	PRESERVED_SALES_INVOICES,
-	PRESERVED_VEHICLES,
+	CANONICAL_EQUIPMENT_TAGS,
+	CANONICAL_SERVICE_BAYS,
 	STANDARD_SCHEDULE_ENTRY_TYPES,
-	STATIC_FIXTURE_BAYS,
 	TEST_PREFIX,
 	TEST_VINS,
-	TEST_VIN_PREFIX,
 )
 
-# Backwards-compatible aliases preserved for doctype tests and scripts
-STATIC_FIXTURE_CUSTOMERS = PRESERVED_CUSTOMERS
-STATIC_FIXTURE_VEHICLES = PRESERVED_VEHICLES
-
 __all__ = [
-	"STATIC_FIXTURE_CUSTOMERS",
-	"STATIC_FIXTURE_VEHICLES",
+	"CANONICAL_EQUIPMENT_TAGS",
+	"CANONICAL_SERVICE_BAYS",
+	"STANDARD_SCHEDULE_ENTRY_TYPES",
 	"TEST_PREFIX",
 	"TEST_VINS",
 	"ISMTestCase",
@@ -43,9 +38,7 @@ _TEARDOWN_ORDER = {
 	"Purchase Order": 7,
 	"Request for Quotation": 8,
 	"Sales Order": 9,
-	"Quotation": 10,
 	"Shop Action Item": 11,
-	"Vehicle Check-in": 12,
 	"Repair Order": 13,
 	"Leave Application": 14,
 	"Repair Vehicle": 20,
@@ -95,23 +88,18 @@ def _cancel_and_delete(doctype, name):
 
 
 class ISMTestCase(unittest.TestCase):
-	"""Base test class for ISM that tracks and deletes all generated test records."""
+	"""Base test class relying on Golden Layer 1 masters, savepoint rollback, and tracked teardown."""
 
 	def setUp(self):
-		# Discard any lingering transaction snapshots from prior tests or background jobs
 		frappe.db.rollback()
 		super().setUp()
 		self._tracked_docs = []
 
 	def tearDown(self):
 		try:
-			# Phase 1: Discard uncommitted transactional changes and release table/row locks
 			frappe.db.rollback()
-
-			# Phase 2: Explicitly purge any tracked documents that were committed mid-test
 			self.cleanup_tracked_docs()
 		finally:
-			# Phase 3: Guarantee all read locks and transaction snapshots are completely closed
 			frappe.db.rollback()
 			super().tearDown()
 
@@ -125,11 +113,27 @@ class ISMTestCase(unittest.TestCase):
 			self._tracked_docs.append((doc.doctype, doc.name))
 		return doc
 
+	def get_manifest(self, seed: int = 42, anchor_date: Optional[str] = None) -> SimManifest:
+		"""Return Layer 1 SimManifest mapped to canonical Golden DB records."""
+		return get_master_manifest(seed=seed, anchor_date=anchor_date)
+
+	def sim_context(self, seed: int = 42, anchor_date: Optional[str] = None) -> SimContext:
+		"""Return a SimContext bound to this test's manifest and teardown tracker."""
+		manifest = self.get_manifest(seed=seed, anchor_date=anchor_date)
+		return SimContext(seed=seed, anchor_date=anchor_date, manifest=manifest, track_fn=self.track)
+
+	def sim_builder(
+		self,
+		handle: Optional[str] = None,
+		seed: int = 42,
+		anchor_date: Optional[str] = None,
+	) -> SimBuilder:
+		"""Start a fluent SimBuilder bound to this test's SimContext and tracker."""
+		return self.sim_context(seed=seed, anchor_date=anchor_date).ro(handle=handle)
+
 	def create_test_customer(self, customer_name=None, **kwargs):
 		def _create():
 			name = customer_name or f"{TEST_PREFIX}Cust_{frappe.generate_hash(length=8)}"
-			if name in PRESERVED_CUSTOMERS:
-				return frappe.get_doc("Customer", name)
 			if frappe.db.exists("Customer", name):
 				frappe.delete_doc("Customer", name, force=True, ignore_permissions=True)
 			doc = frappe.get_doc({
@@ -144,13 +148,9 @@ class ISMTestCase(unittest.TestCase):
 
 	def create_test_vehicle(self, vin=None, customer=None, **kwargs):
 		def _create():
-			if vin in PRESERVED_VEHICLES:
-				veh = frappe.get_doc("Repair Vehicle", vin)
-				if customer and veh.customer != customer:
-					veh.customer = customer
-					veh.save(ignore_permissions=True)
-				return veh
-			vin_val = vin or f"{TEST_VIN_PREFIX}{frappe.generate_hash(length=6).upper()}"
+			vin_val = vin or generate_synthetic_vin(random.Random())
+			while not vin and frappe.db.exists("Repair Vehicle", vin_val):
+				vin_val = generate_synthetic_vin(random.Random())
 			if frappe.db.exists("Repair Vehicle", vin_val):
 				frappe.delete_doc("Repair Vehicle", vin_val, force=True, ignore_permissions=True)
 			doc = frappe.get_doc({
@@ -159,24 +159,6 @@ class ISMTestCase(unittest.TestCase):
 				"customer": customer,
 				**kwargs,
 			}).insert(ignore_permissions=True)
-			return self.track(doc)
-
-		return retry_on_deadlock(_create)
-
-	def create_test_quotation(self, customer, vehicle=None, items=None, **kwargs):
-		item_code = self.get_or_create_test_item()
-		doc_dict = {
-			"doctype": "Quotation",
-			"quotation_to": "Customer",
-			"party_name": customer,
-			"items": items or [{"item_code": item_code, "qty": 1, "rate": 100.0}],
-			**kwargs,
-		}
-		if vehicle and frappe.db.has_column("Quotation", "custom_vehicle"):
-			doc_dict["custom_vehicle"] = vehicle
-
-		def _create():
-			doc = frappe.get_doc(doc_dict).insert(ignore_permissions=True)
 			return self.track(doc)
 
 		return retry_on_deadlock(_create)
@@ -254,7 +236,6 @@ class ISMTestCase(unittest.TestCase):
 			frappe.db.rollback()
 			return
 
-		# Sort strictly by FK topology (leaves before parents), preserving LIFO order within same rank
 		committed_docs.sort(key=lambda item: _TEARDOWN_ORDER.get(item[0], 15))
 
 		errors = []
@@ -262,15 +243,11 @@ class ISMTestCase(unittest.TestCase):
 			for doctype, name in committed_docs:
 				if not frappe.db.exists(doctype, name):
 					continue
-				if doctype == "Customer" and name in PRESERVED_CUSTOMERS:
+				if doctype == "Service Bay" and name in CANONICAL_SERVICE_BAYS:
 					continue
-				if doctype == "Repair Vehicle" and name in PRESERVED_VEHICLES:
+				if doctype == "Equipment Tag" and name in CANONICAL_EQUIPMENT_TAGS:
 					continue
-				if doctype == "Repair Order" and name in PRESERVED_REPAIR_ORDERS:
-					continue
-				if doctype == "Sales Invoice" and name in PRESERVED_SALES_INVOICES:
-					continue
-				if doctype == "Payment Entry" and name in PRESERVED_PAYMENT_ENTRIES:
+				if doctype == "Schedule Entry Type" and name in STANDARD_SCHEDULE_ENTRY_TYPES:
 					continue
 				try:
 					doc = frappe.get_doc(doctype, name)
@@ -300,6 +277,7 @@ class ISMTestCase(unittest.TestCase):
 			"Customer": self._teardown_customer,
 			"Supplier": self._teardown_supplier,
 			"Service Bay": self._teardown_service_bay,
+			"Equipment Tag": self._teardown_equipment_tag,
 			"Schedule Entry Type": self._teardown_schedule_entry_type,
 		}
 		handler = handlers.get(doc.doctype)
@@ -326,17 +304,20 @@ class ISMTestCase(unittest.TestCase):
 			pluck="parent",
 		)
 		for pe_name in set(pe_refs):
-			if pe_name not in PRESERVED_PAYMENT_ENTRIES:
-				_cancel_and_delete("Payment Entry", pe_name)
+			_cancel_and_delete("Payment Entry", pe_name)
 
 	def _teardown_repair_order(self, doc):
 		self._delete_referencing_schedule_entries("repair_order", doc.name)
-		if frappe.db.exists("DocType", "Shop Action Item") and frappe.db.has_column("Shop Action Item", "repair_order"):
-			for sai in frappe.get_all("Shop Action Item", filters={"repair_order": doc.name}, pluck="name"):
+		if frappe.db.exists("DocType", "Shop Action Item") and frappe.db.has_column("Shop Action Item", "reference_name"):
+			for sai in frappe.get_all(
+				"Shop Action Item",
+				filters={"reference_doctype": "Repair Order", "reference_name": doc.name},
+				pluck="name",
+			):
 				_cancel_and_delete("Shop Action Item", sai)
 
 		si_name = getattr(doc, "sales_invoice", None)
-		if si_name and si_name not in PRESERVED_SALES_INVOICES and frappe.db.exists("Sales Invoice", si_name):
+		if si_name and frappe.db.exists("Sales Invoice", si_name):
 			self._teardown_sales_invoice(frappe.get_doc("Sales Invoice", si_name))
 			doc.db_set("sales_invoice", None)
 			doc.reload()
@@ -386,19 +367,12 @@ class ISMTestCase(unittest.TestCase):
 		_cancel_and_delete("Payment Entry", doc.name)
 
 	def _teardown_repair_vehicle(self, doc):
-		if doc.name in PRESERVED_VEHICLES:
-			return
 		self._delete_referencing_schedule_entries("repair_vehicle", doc.name)
-		if frappe.db.exists("DocType", "Vehicle Check-in"):
-			for vci in frappe.get_all("Vehicle Check-in", filters={"vehicle": doc.name}, pluck="name"):
-				_cancel_and_delete("Vehicle Check-in", vci)
 		if frappe.db.exists("DocType", "Repair Vehicle Customer"):
 			frappe.db.delete("Repair Vehicle Customer", {"parent": doc.name})
 		_cancel_and_delete("Repair Vehicle", doc.name)
 
 	def _teardown_customer(self, doc):
-		if doc.name in PRESERVED_CUSTOMERS:
-			return
 		self._delete_referencing_schedule_entries("customer", doc.name)
 		if frappe.db.exists("DocType", "Repair Vehicle Customer"):
 			frappe.db.delete("Repair Vehicle Customer", {"customer": doc.name})
@@ -411,10 +385,15 @@ class ISMTestCase(unittest.TestCase):
 		_cancel_and_delete("Supplier", doc.name)
 
 	def _teardown_service_bay(self, doc):
-		if doc.name in STATIC_FIXTURE_BAYS:
+		if doc.name in CANONICAL_SERVICE_BAYS:
 			return
 		self._delete_referencing_schedule_entries("service_bay", doc.name)
 		_cancel_and_delete("Service Bay", doc.name)
+
+	def _teardown_equipment_tag(self, doc):
+		if doc.name in CANONICAL_EQUIPMENT_TAGS:
+			return
+		_cancel_and_delete("Equipment Tag", doc.name)
 
 	def _teardown_schedule_entry_type(self, doc):
 		if doc.name in STANDARD_SCHEDULE_ENTRY_TYPES:

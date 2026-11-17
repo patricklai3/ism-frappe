@@ -12,6 +12,7 @@ HEAD_SHA="unknown"
 REQ_SLOT=0
 SLOT_COUNT=5
 FRESH_DB=0
+CLEAN_REINSTALL=0
 KEEP_DB=0
 SKIP_MIGRATE=0
 FORCE_MIGRATE=0
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fresh-db)
       FRESH_DB=1
+      shift
+      ;;
+    --clean-reinstall)
+      CLEAN_REINSTALL=1
       shift
       ;;
     --keep-db)
@@ -368,7 +373,10 @@ DB_STATE="$(read_meta_value "$META_FILE" "db_state")"
 SLOT_SCHEMA_FP="$(read_meta_value "$META_FILE" "schema_fp")"
 
 RESET_REASON=""
-if [[ "$FRESH_DB" -eq 1 ]]; then
+if [[ "$CLEAN_REINSTALL" -eq 1 ]]; then
+  NEED_RESET=1
+  RESET_REASON="--clean-reinstall requested"
+elif [[ "$FRESH_DB" -eq 1 ]]; then
   NEED_RESET=1
   RESET_REASON="--fresh-db requested"
 elif [[ "$DB_STATE" == "restoring" || -z "$DB_STATE" ]]; then
@@ -379,7 +387,7 @@ elif [[ "$KEEP_DB" -eq 0 && "$DB_STATE" != "golden" && "$LAST_WT" != "$WORKTREE_
   RESET_REASON="worktree changed ('$LAST_WT' -> '$WORKTREE_ID')"
 fi
 
-if [[ "$NEED_RESET" -eq 1 ]]; then
+if [[ "$NEED_RESET" -eq 1 && "$CLEAN_REINSTALL" -eq 0 ]]; then
   T_RESTORE_START="$(now_ms)"
   echo "[slot-db] Restoring golden snapshot into $SLOT_DB and flushing Redis /$SLOT ($RESET_REASON)..."
   write_meta_file "$META_FILE" "$WORKTREE_ID" "$BRANCH" "$HEAD_SHA" "restoring" ""
@@ -423,6 +431,32 @@ T_SYNC_END="$(now_ms)"
 SYNC_MS=$(( T_SYNC_END - T_SYNC_START ))
 
 CURRENT_SCHEMA_FP="$(compute_schema_fp "$WSL_SLOT_DIR/apps/ism")"
+
+if [[ "$CLEAN_REINSTALL" -eq 1 ]]; then
+  T_RESTORE_START="$(now_ms)"
+  echo "[slot-db] Performing clean site reinstall & Layer 1 catalog seed on $SITE_NAME ($SLOT_DB)..."
+  write_meta_file "$META_FILE" "$WORKTREE_ID" "$BRANCH" "$HEAD_SHA" "restoring" ""
+
+  SLOT_APPS_CSV="$(python3 - "$WSL_SLOT_DIR/sites/$SITE_NAME/site_config.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+apps = json.load(open(p, "r", encoding="utf-8")).get("installed_apps", []) if os.path.isfile(p) else []
+apps = [a for a in apps if a and a != "frappe"]
+print(",".join(apps) if apps else "erpnext,hrms,ism")
+PY
+)"
+  (
+    exec 202>"$LOCK_DIR/mariadb-restore.lock"
+    flock 202
+    install_clean_ism_site "$WSL_SLOT_DIR" "$CONTAINER_SLOT_DIR" "$SITE_NAME" "$SLOT_DB" "ism_slot_${SLOT}_pw" "$SLOT" "$SLOT_APPS_CSV"
+  )
+
+  SLOT_SCHEMA_FP="$CURRENT_SCHEMA_FP"
+  DB_STATE="ready"
+  T_RESTORE_END="$(now_ms)"
+  RESTORE_MS=$(( T_RESTORE_END - T_RESTORE_START ))
+fi
+
 if [[ "$DB_STATE" == "golden" || "$DB_STATE" == "dirty" || "$LAST_WT" != "$WORKTREE_ID" ]]; then
   DB_STATE="ready"
 fi

@@ -1,20 +1,21 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+"""Optional manual admin CLI sweep for residual _TEST_ISM_ records.
+
+Usage:
+    bench --site <site> execute ism.tests.cleanup.cleanup_all_test_data
+
+Automated tests rely on Frappe savepoint rollback and ISMTestCase.track()
+isolation against a clean Golden DB and never invoke this module.
+"""
+
 import frappe
 
 from ism.tests.constants import (
-	PRESERVED_CUSTOMERS,
-	PRESERVED_PAYMENT_ENTRIES,
-	PRESERVED_REPAIR_ORDERS,
-	PRESERVED_SALES_INVOICES,
-	PRESERVED_VEHICLES,
-	SEED_PRESERVED_CUSTOMERS,
-	SEED_PRESERVED_VEHICLES,
+	CANONICAL_EQUIPMENT_TAGS,
+	CANONICAL_SERVICE_BAYS,
 	STANDARD_SCHEDULE_ENTRY_TYPES,
-	STATIC_FIXTURE_BAYS,
-	STATIC_FIXTURE_CUSTOMER,
-	STATIC_FIXTURE_EMPLOYEES,
 	TEST_CUSTOM_DOCPERM_ROLES,
 	TEST_PREFIX,
 	TEST_VINS,
@@ -27,15 +28,15 @@ def _has_test_prefix(value) -> bool:
 
 
 def _is_test_vin(vin) -> bool:
-	if not vin or vin in SEED_PRESERVED_VEHICLES:
+	if not vin:
 		return False
 	return vin in TEST_VINS or vin.startswith(TEST_VIN_PREFIX) or _has_test_prefix(vin)
 
 
 def _is_test_customer_party(party, test_customers) -> bool:
-	if not party or party in SEED_PRESERVED_CUSTOMERS:
+	if not party:
 		return False
-	return party in test_customers or _has_test_prefix(party) or party == STATIC_FIXTURE_CUSTOMER
+	return party in test_customers or _has_test_prefix(party)
 
 
 def _is_test_supplier_party(supplier, test_suppliers) -> bool:
@@ -68,15 +69,11 @@ def _cancel_referencing_payments(reference_doctype, reference_name, log, errors)
 		pluck="parent",
 	)
 	for pe_name in set(pe_refs):
-		if pe_name not in PRESERVED_PAYMENT_ENTRIES:
-			_delete_doc_safe("Payment Entry", pe_name, log, errors)
+		_delete_doc_safe("Payment Entry", pe_name, log, errors)
 
 
 def cleanup_all_test_data(verbose: bool = True):
-	"""
-	Opt-in manual sweep that purges residual _TEST_ISM_ master and transactional records
-	in reverse FK dependency order. Never called automatically by test suites.
-	"""
+	"""Opt-in manual admin sweep that purges residual _TEST_ISM_ records in reverse FK order."""
 	frappe.db.rollback()
 
 	def log(msg):
@@ -89,46 +86,23 @@ def cleanup_all_test_data(verbose: bool = True):
 	stub_customers_created = _ensure_stub_customers_for_orphaned_transactions(test_customers, log, errors)
 	test_ros = _find_test_repair_orders(test_customers)
 
-	# 1. Payment Entries (Customer & Supplier)
 	_cleanup_payment_entries(test_customers, test_suppliers, log, errors)
-
-	# 2. Procurement Receipts & Invoices
 	_cleanup_purchase_receipts(test_suppliers, test_ros, log, errors)
 	_cleanup_purchase_invoices(test_suppliers, test_ros, log, errors)
-
-	# 3. Sales Invoices
 	_cleanup_sales_invoices(test_customers, log, errors)
-
-	# 4. Stock Entries
 	_cleanup_stock_entries(test_ros, log, errors)
-
-	# 5. Purchase Orders & Requests for Quotation
 	_cleanup_purchase_orders(test_suppliers, test_ros, log, errors)
 	_cleanup_rfqs(test_suppliers, log, errors)
-
-	# 6. Sales Orders & Quotations
 	_cleanup_sales_orders(test_customers, log, errors)
 	_cleanup_quotations(test_customers, log, errors)
-
-	# 7. Schedule Entries & Shop Action Items (MUST precede Repair Orders, Vehicles, Bays)
 	_cleanup_schedule_entries(test_customers, test_ros, log, errors)
 	_cleanup_shop_action_items(test_customers, test_ros, log, errors)
-
-	# 8. Repair Orders
 	_cleanup_repair_orders(test_ros, log, errors)
-
-	# 9. Vehicle Check-ins & Leave Applications
 	_cleanup_vehicle_checkins(test_customers, log, errors)
 	_cleanup_leave_applications(log, errors)
-
-	# 10. Repair Vehicles
 	_cleanup_repair_vehicles(test_customers, log, errors)
-
-	# 11. Customers & Suppliers
 	_cleanup_customers(test_customers, stub_customers_created, log, errors)
 	_cleanup_suppliers(test_suppliers, log, errors)
-
-	# 12. Test-prefixed Master Data & Permissions
 	_cleanup_service_bays(log, errors)
 	_cleanup_equipment_tags(log, errors)
 	_cleanup_schedule_entry_types(log, errors)
@@ -136,8 +110,6 @@ def cleanup_all_test_data(verbose: bool = True):
 	_cleanup_service_packages(log, errors)
 	_cleanup_items(log, errors)
 	_cleanup_custom_docperms(log, errors)
-
-	# 13. Test-prefixed Files
 	_cleanup_files(log, errors)
 
 	frappe.db.commit()
@@ -150,11 +122,7 @@ def cleanup_all_test_data(verbose: bool = True):
 
 
 def _find_test_customers():
-	return {
-		c
-		for c in frappe.get_all("Customer", pluck="name")
-		if c not in PRESERVED_CUSTOMERS and _has_test_prefix(c)
-	}
+	return {c for c in frappe.get_all("Customer", pluck="name") if _has_test_prefix(c)}
 
 
 def _find_test_suppliers():
@@ -168,8 +136,6 @@ def _find_test_repair_orders(test_customers):
 		return set()
 	test_ros = set()
 	for ro in frappe.get_all("Repair Order", fields=["name", "customer", "vehicle"]):
-		if ro.name in PRESERVED_REPAIR_ORDERS or ro.customer in SEED_PRESERVED_CUSTOMERS:
-			continue
 		if _is_test_customer_party(ro.customer, test_customers) or _is_test_vin(ro.vehicle):
 			test_ros.add(ro.name)
 	return test_ros
@@ -183,7 +149,7 @@ def _ensure_stub_customers_for_orphaned_transactions(known_test_customers, log, 
 			continue
 		for row in frappe.get_all(dt, fields=[party_field]):
 			party = row.get(party_field)
-			if not party or party in PRESERVED_CUSTOMERS or not _has_test_prefix(party):
+			if not party or not _has_test_prefix(party):
 				continue
 			known_test_customers.add(party)
 			if not frappe.db.exists("Customer", party):
@@ -205,8 +171,6 @@ def _cleanup_payment_entries(test_customers, test_suppliers, log, errors):
 	if not frappe.db.exists("DocType", "Payment Entry"):
 		return
 	for pe in frappe.get_all("Payment Entry", fields=["name", "party_type", "party"]):
-		if pe.name in PRESERVED_PAYMENT_ENTRIES or pe.party in SEED_PRESERVED_CUSTOMERS:
-			continue
 		is_test = (
 			(pe.party_type == "Supplier" and _is_test_supplier_party(pe.party, test_suppliers))
 			or (pe.party_type != "Supplier" and _is_test_customer_party(pe.party, test_customers))
@@ -260,8 +224,6 @@ def _cleanup_sales_invoices(test_customers, log, errors):
 	if not frappe.db.exists("DocType", "Sales Invoice"):
 		return
 	for si in frappe.get_all("Sales Invoice", fields=["name", "customer"]):
-		if si.name in PRESERVED_SALES_INVOICES or si.customer in SEED_PRESERVED_CUSTOMERS:
-			continue
 		if _is_test_customer_party(si.customer, test_customers):
 			_cancel_referencing_payments("Sales Invoice", si.name, log, errors)
 			_delete_doc_safe("Sales Invoice", si.name, log, errors)
@@ -338,14 +300,8 @@ def _cleanup_sales_orders(test_customers, log, errors):
 def _cleanup_quotations(test_customers, log, errors):
 	if not frappe.db.exists("DocType", "Quotation"):
 		return
-	fields = ["name", "party_name"]
-	has_custom_vehicle = frappe.db.has_column("Quotation", "custom_vehicle")
-	if has_custom_vehicle:
-		fields.append("custom_vehicle")
-	for qtn in frappe.get_all("Quotation", fields=fields):
-		if _is_test_customer_party(qtn.party_name, test_customers) or (
-			has_custom_vehicle and _is_test_vin(qtn.get("custom_vehicle"))
-		):
+	for qtn in frappe.get_all("Quotation", fields=["name", "party_name"]):
+		if _is_test_customer_party(qtn.party_name, test_customers):
 			_delete_doc_safe("Quotation", qtn.name, log, errors)
 
 
@@ -367,19 +323,11 @@ def _cleanup_schedule_entries(test_customers, test_ros, log, errors):
 		"title",
 	]
 	for se in frappe.get_all("Schedule Entry", fields=fields):
-		if se.repair_order and se.repair_order in PRESERVED_REPAIR_ORDERS:
-			continue
-		if se.customer and se.customer in SEED_PRESERVED_CUSTOMERS:
-			continue
-		if se.repair_vehicle and se.repair_vehicle in SEED_PRESERVED_VEHICLES:
-			continue
-
 		is_test = (
 			(se.repair_order and se.repair_order in test_ros)
 			or _is_test_customer_party(se.customer, test_customers)
 			or _is_test_vin(se.repair_vehicle)
 			or _has_test_prefix(se.service_bay)
-			or (se.service_bay in STATIC_FIXTURE_BAYS)
 			or _has_test_prefix(se.entry_type)
 			or _has_test_prefix(se.assigned_technician)
 			or _has_test_prefix(se.provisional_customer_name)
@@ -408,7 +356,7 @@ def _cleanup_shop_action_items(test_customers, test_ros, log, errors):
 
 def _cleanup_repair_orders(test_ros, log, errors):
 	for ro_name in sorted(test_ros):
-		if ro_name in PRESERVED_REPAIR_ORDERS or not frappe.db.exists("Repair Order", ro_name):
+		if not frappe.db.exists("Repair Order", ro_name):
 			continue
 		try:
 			if frappe.db.exists("DocType", "Schedule Entry"):
@@ -416,13 +364,10 @@ def _cleanup_repair_orders(test_ros, log, errors):
 					_delete_doc_safe("Schedule Entry", se_name, log, errors)
 
 			doc = frappe.get_doc("Repair Order", ro_name)
-			if doc.sales_invoice and doc.sales_invoice not in PRESERVED_SALES_INVOICES:
+			if doc.sales_invoice:
 				if frappe.db.exists("Sales Invoice", doc.sales_invoice):
 					_cancel_referencing_payments("Sales Invoice", doc.sales_invoice, log, errors)
 					_delete_doc_safe("Sales Invoice", doc.sales_invoice, log, errors)
-				doc.db_set("sales_invoice", None)
-				doc.reload()
-			elif doc.sales_invoice and not frappe.db.exists("Sales Invoice", doc.sales_invoice):
 				doc.db_set("sales_invoice", None)
 				doc.reload()
 
@@ -439,8 +384,6 @@ def _cleanup_vehicle_checkins(test_customers, log, errors):
 	if not frappe.db.exists("DocType", "Vehicle Check-in"):
 		return
 	for vci in frappe.get_all("Vehicle Check-in", fields=["name", "customer", "vehicle"]):
-		if vci.customer in SEED_PRESERVED_CUSTOMERS:
-			continue
 		if _is_test_customer_party(vci.customer, test_customers) or _is_test_vin(vci.vehicle):
 			_delete_doc_safe("Vehicle Check-in", vci.name, log, errors)
 
@@ -455,7 +398,6 @@ def _cleanup_leave_applications(log, errors):
 		if (
 			_has_test_prefix(la.employee)
 			or _has_test_prefix(la.employee_name)
-			or la.employee_name in STATIC_FIXTURE_EMPLOYEES
 			or _has_test_prefix(la.get("description"))
 		):
 			_delete_doc_safe("Leave Application", la.name, log, errors)
@@ -465,8 +407,6 @@ def _cleanup_repair_vehicles(test_customers, log, errors):
 	if not frappe.db.exists("DocType", "Repair Vehicle"):
 		return
 	for v in frappe.get_all("Repair Vehicle", fields=["name", "customer", "license_plate", "vin"]):
-		if v.name in PRESERVED_VEHICLES or v.customer in PRESERVED_CUSTOMERS:
-			continue
 		is_test_vehicle = (
 			_is_test_vin(v.name)
 			or _is_test_vin(v.vin)
@@ -487,7 +427,7 @@ def _cleanup_repair_vehicles(test_customers, log, errors):
 def _cleanup_customers(test_customers, stub_customers_created, log, errors):
 	all_to_clean = test_customers | stub_customers_created
 	for cust in sorted(all_to_clean):
-		if cust in PRESERVED_CUSTOMERS or not _has_test_prefix(cust):
+		if not _has_test_prefix(cust):
 			continue
 		try:
 			if frappe.db.exists("DocType", "Schedule Entry"):
@@ -526,7 +466,7 @@ def _cleanup_service_bays(log, errors):
 		return
 	for bay in frappe.get_all("Service Bay", fields=["name", "bay_name"]):
 		name = bay.name or bay.bay_name or ""
-		if name in STATIC_FIXTURE_BAYS or not _has_test_prefix(name):
+		if name in CANONICAL_SERVICE_BAYS or not _has_test_prefix(name):
 			continue
 		if frappe.db.exists("DocType", "Schedule Entry"):
 			for se_name in frappe.get_all("Schedule Entry", filters={"service_bay": bay.name}, pluck="name"):
@@ -539,7 +479,7 @@ def _cleanup_equipment_tags(log, errors):
 	if not frappe.db.exists("DocType", "Equipment Tag"):
 		return
 	for tag in frappe.get_all("Equipment Tag", pluck="name"):
-		if not _has_test_prefix(tag):
+		if tag in CANONICAL_EQUIPMENT_TAGS or not _has_test_prefix(tag):
 			continue
 		if frappe.db.exists("DocType", "Service Bay Equipment"):
 			frappe.db.delete("Service Bay Equipment", {"equipment_tag": tag})

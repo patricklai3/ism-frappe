@@ -10,6 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, now_datetime, nowdate, today
 
+from ism.api.parts_stock import _find_company_warehouse, _get_stock_settings_default_warehouse
 from ism.ism.doctype.repair_order.fulfillment import complete_linked_schedule_entries
 from ism.ism.doctype.repair_order.pricing import get_or_create_default_tax_template
 
@@ -86,16 +87,13 @@ def _resolve_billing_context(ro, approved_services: List[Any]) -> Dict[str, Any]
 	default_income_account = comp_meta.get("default_income_account") or f"Sales - {abbr}"
 	default_cost_center = comp_meta.get("cost_center") or f"Main - {abbr}"
 
-	default_wh = (
-		frappe.db.get_value("Warehouse", {"company": ro.company, "warehouse_name": "Stores"}, "name")
-		or frappe.db.get_value("Warehouse", {"company": ro.company, "is_group": 0}, "name")
-	)
-	if not default_wh:
-		stock_default_wh = frappe.db.get_single_value("Stock Settings", "default_warehouse")
-		if stock_default_wh and frappe.db.get_value("Warehouse", stock_default_wh, "company") == ro.company:
-			default_wh = stock_default_wh
-	if not default_wh:
-		default_wh = f"Stores - {abbr}"
+	stock_default_wh = _get_stock_settings_default_warehouse()
+	if stock_default_wh and frappe.db.exists(
+		"Warehouse", {"name": stock_default_wh, "company": ro.company, "is_group": 0, "disabled": 0}
+	):
+		default_wh = stock_default_wh
+	else:
+		default_wh = _find_company_warehouse(ro.company) or f"Stores - {abbr}"
 
 	existing_uoms = set(frappe.get_all("UOM", filters={"name": ["in", ["Hour", "Unit", "Nos"]]}, pluck="name"))
 	part_codes: set[str] = set()
@@ -344,6 +342,9 @@ def _create_and_submit_payment_entry(
 	pe.received_amount = flt(amount, 2)
 	if reference_no:
 		pe.reference_no = reference_no
+		pe.reference_date = reference_date or nowdate()
+	elif frappe.db.get_value("Account", paid_to, "account_type") == "Bank":
+		pe.reference_no = sales_invoice or f"PAY-{customer}"
 		pe.reference_date = reference_date or nowdate()
 	elif reference_date:
 		pe.reference_date = reference_date
@@ -789,6 +790,11 @@ def process_ro_payment_and_release(
 	si.posting_date = today()
 	si.currency = ro.currency or "CAD"
 	si.update_stock = 1
+	if ctx["default_warehouse"] and frappe.db.exists(
+		"Warehouse",
+		{"name": ctx["default_warehouse"], "company": ro.company, "is_group": 0, "disabled": 0},
+	):
+		si.set_warehouse = ctx["default_warehouse"]
 	si.disable_rounded_total = 1
 	si.taxes_and_charges = tax_template
 	if hasattr(si, "repair_order") or frappe.db.has_column("Sales Invoice", "repair_order"):

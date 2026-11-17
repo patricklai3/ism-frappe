@@ -3,7 +3,7 @@
 
 import json
 import math
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import frappe
 from frappe import _
@@ -11,6 +11,8 @@ from frappe.utils import flt
 
 from ism.scheduling.estimation_light import (
 	DEFAULT_SIGMA,
+	_Z_SCORES,
+	approximate_z_score,
 	estimate_duration,
 	estimate_total_duration,
 	get_sigma_for_item,
@@ -203,6 +205,7 @@ def _resolve_estimation_options(settings, kwargs: Dict[str, Any]) -> Dict[str, A
 		_get_numeric_setting(settings, "default_diagnostic_duration", 60.0, min_val=0.0, min_exclusive=True)
 	)
 	skip_missing = _parse_bool_flag(kwargs.get("skip_missing", False), default=False)
+	empirical = _parse_bool_flag(kwargs.get("empirical", False), default=False)
 
 	return {
 		"percentile": percentile,
@@ -212,7 +215,73 @@ def _resolve_estimation_options(settings, kwargs: Dict[str, Any]) -> Dict[str, A
 		"fallback_frt": fallback_frt,
 		"default_diagnostic": default_diag,
 		"skip_missing": skip_missing,
+		"empirical": empirical,
 	}
+
+
+def _compute_empirical_percentile_minutes(
+	key_names: List[str],
+	percentile: float,
+	*,
+	item_code: Optional[str] = None,
+	min_samples: int = 3,
+) -> Optional[Tuple[int, int, float]]:
+	"""Compute empirical percentile duration (minutes) from completed closed Repair Order Service history.
+
+	Returns (ceil_minutes, sample_count, raw_percentile_minutes) or None when fewer than min_samples exist.
+	"""
+	clean_keys = [str(k).strip() for k in (key_names or []) if isinstance(k, str) and k.strip()]
+	clean_item = item_code.strip() if isinstance(item_code, str) and item_code.strip() else None
+	if not clean_keys and not clean_item:
+		return None
+	if not frappe.db.exists("DocType", "Repair Order") or not frappe.db.exists("DocType", "Repair Order Service"):
+		return None
+
+	ros = frappe.qb.DocType("Repair Order Service")
+	ro = frappe.qb.DocType("Repair Order")
+
+	match_cond = None
+	if clean_keys:
+		match_cond = (ros.service_package.isin(clean_keys)) | (ros.service_title.isin(clean_keys))
+	if clean_item:
+		item_part_cond = ros.parts.like(f'%"{clean_item}"%')
+		pkg_or_title = (ros.service_package == clean_item) | (ros.service_title == clean_item) | item_part_cond
+		match_cond = (match_cond | pkg_or_title) if match_cond is not None else pkg_or_title
+
+	rows = (
+		frappe.qb.from_(ros)
+		.inner_join(ro)
+		.on((ros.parent == ro.name) & (ros.parenttype == "Repair Order"))
+		.select(ros.actual_duration_hours, ros.service_package, ros.service_title, ros.parts)
+		.where(ro.status == "Closed / Released")
+		.where(ros.is_completed == 1)
+		.where(ros.actual_duration_hours > 0)
+		.where(match_cond)
+		.run(as_dict=True)
+	)
+
+	key_set = set(clean_keys)
+	samples: List[float] = []
+	for row in rows:
+		hrs = flt(row.get("actual_duration_hours"))
+		if hrs <= 0:
+			continue
+		if clean_item:
+			matched_direct = row.get("service_package") in key_set or row.get("service_title") in key_set or row.get("service_package") == clean_item or row.get("service_title") == clean_item
+			if not matched_direct:
+				part_codes = _extract_part_item_codes(row.get("parts"))
+				if clean_item not in part_codes:
+					continue
+		samples.append(hrs * 60.0)
+
+	if len(samples) < min_samples:
+		return None
+
+	samples.sort()
+	n = len(samples)
+	idx = min(n - 1, max(0, math.ceil(float(percentile) * n) - 1))
+	raw_val = float(samples[idx])
+	return (max(1, math.ceil(raw_val)), n, raw_val)
 
 
 def _prefetch_items_meta(item_codes: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -336,23 +405,54 @@ def get_estimate(item_code: Optional[str] = None, **kwargs) -> Dict[str, Any]:
 	else:
 		sigma = opts["default_sigma"]
 
+	if opts["empirical"]:
+		emp_keys = [
+			str(k).strip()
+			for k in (kwargs.get("service_package"), kwargs.get("service_title"))
+			if isinstance(k, str) and k.strip()
+		]
+		emp = _compute_empirical_percentile_minutes(
+			emp_keys,
+			opts["percentile"],
+			item_code=clean_code,
+		)
+		if emp is not None:
+			emp_p_pure, sample_count, _ = emp
+			return {
+				"duration_minutes": emp_p_pure + opts["buffer_padding"],
+				"p_pure": emp_p_pure,
+				"buffer_padding": opts["buffer_padding"],
+				"percentile": opts["percentile"],
+				"sigma": sigma,
+				"empirical_used": True,
+				"sample_count": sample_count,
+			}
+
 	if frt is None or frt <= 0:
-		return {
+		res = {
 			"duration_minutes": 0,
 			"p_pure": 0,
 			"buffer_padding": opts["buffer_padding"],
 			"percentile": opts["percentile"],
 			"sigma": sigma,
 		}
+		if opts["empirical"]:
+			res["empirical_used"] = False
+			res["sample_count"] = 0
+		return res
 
 	p_pure = estimate_duration(frt, sigma=sigma, percentile=opts["percentile"])
-	return {
+	res = {
 		"duration_minutes": p_pure + opts["buffer_padding"],
 		"p_pure": p_pure,
 		"buffer_padding": opts["buffer_padding"],
 		"percentile": opts["percentile"],
 		"sigma": sigma,
 	}
+	if opts["empirical"]:
+		res["empirical_used"] = False
+		res["sample_count"] = 0
+	return res
 
 
 @frappe.whitelist()
@@ -577,10 +677,32 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 	items_meta = _prefetch_items_meta(item_codes)
 
 	operations: List[Dict[str, float]] = []
+	empirical_sample_counts: Dict[str, int] = {}
+	single_emp_p_pure: Optional[int] = None
+	z_pct = _Z_SCORES.get(opts["percentile"])
+	if z_pct is None:
+		z_pct = approximate_z_score(opts["percentile"])
+
 	for s in services:
+		sig = _resolve_service_sigma(s, opts["default_sigma"], items_meta=items_meta)
+		if opts["empirical"]:
+			emp_keys = [
+				str(v).strip()
+				for v in (getattr(s, "service_package", None), getattr(s, "service_title", None))
+				if isinstance(v, str) and v.strip()
+			]
+			emp = _compute_empirical_percentile_minutes(emp_keys, opts["percentile"])
+			if emp is not None:
+				emp_ceil, emp_count, raw_emp_min = emp
+				label = getattr(s, "service_package", None) or getattr(s, "service_title", None) or f"row_{len(operations) + 1}"
+				empirical_sample_counts[label] = emp_count
+				single_emp_p_pure = emp_ceil
+				eff_frt = raw_emp_min / math.exp(float(sig) * float(z_pct))
+				operations.append({"flat_rate_minutes": float(max(0.1, eff_frt)), "sigma": float(sig)})
+				continue
+
 		frt_min = _resolve_service_frt_minutes(s, package_hours=package_hours, items_meta=items_meta)
 		if frt_min is not None and frt_min > 0:
-			sig = _resolve_service_sigma(s, opts["default_sigma"], items_meta=items_meta)
 			operations.append({"flat_rate_minutes": float(frt_min), "sigma": float(sig)})
 
 	if not operations:
@@ -592,11 +714,22 @@ def estimate_repair_order(repair_order: Optional[str] = None, **kwargs) -> Dict[
 				"sigma": float(diag_sigma),
 			})
 
-	res = _estimate_operations_core(
-		operations,
-		percentile=opts["percentile"],
-		buffer_padding=opts["buffer_padding"],
-	)
+	if opts["empirical"] and len(operations) == 1 and single_emp_p_pure is not None and len(empirical_sample_counts) == 1:
+		res = {
+			"total_duration_minutes": single_emp_p_pure + opts["buffer_padding"],
+			"p_pure": single_emp_p_pure,
+			"buffer_padding": opts["buffer_padding"],
+			"operations_count": 1,
+		}
+	else:
+		res = _estimate_operations_core(
+			operations,
+			percentile=opts["percentile"],
+			buffer_padding=opts["buffer_padding"],
+		)
+	if opts["empirical"]:
+		res["empirical_used"] = bool(empirical_sample_counts)
+		res["empirical_sample_counts"] = empirical_sample_counts
 	res["total_minutes"] = res["total_duration_minutes"]
 	res["repair_order"] = repair_order_name
 	return res

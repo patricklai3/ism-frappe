@@ -7,18 +7,16 @@ import frappe
 from frappe.utils import today
 
 from ism.tests.base import retry_on_deadlock
-from ism.tests.constants import (
-	LEGACY_TEST_PREFIX,
-	PRESERVED_PAYMENT_ENTRIES,
-	PRESERVED_REPAIR_ORDERS,
-	PRESERVED_SALES_INVOICES,
-	STATIC_FIXTURE_CUSTOMER,
-	STATIC_FIXTURE_EMPLOYEES,
-	STATIC_FIXTURE_VEHICLE_VIN,
-	TEST_PREFIX,
-)
+from ism.tests.constants import TEST_PREFIX
 
-PREFIX = LEGACY_TEST_PREFIX
+PREFIX = "Test "
+CUSTOMER = f"{PREFIX}Customer"
+VEHICLE_VIN = "5YJSA1E26CF000001"
+_FIXTURE_EMPLOYEES = frozenset({
+	f"{PREFIX}Tech One",
+	f"{PREFIX}Tech Two",
+	f"{PREFIX}Tech Three",
+})
 
 EQUIPMENT_TAGS = ["Lift", "Alignment Rack", "HV Battery Station"]
 
@@ -124,10 +122,6 @@ ITEMS = {
 		"standard_rate": 200.0,
 	},
 }
-
-CUSTOMER = STATIC_FIXTURE_CUSTOMER
-VEHICLE_VIN = STATIC_FIXTURE_VEHICLE_VIN
-
 
 def get_default_company():
 	return frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed"
@@ -431,11 +425,12 @@ def teardown_transactional():
 	try:
 		ro_names = []
 		if frappe.db.exists("DocType", "Repair Order"):
-			ro_set = set(
-				frappe.get_all("Repair Order", filters=[["customer", "=", CUSTOMER]], pluck="name")
-				+ frappe.get_all("Repair Order", filters=[["customer", "like", f"{TEST_PREFIX}%"]], pluck="name")
+			ro_names = list(
+				set(
+					frappe.get_all("Repair Order", filters=[["customer", "=", CUSTOMER]], pluck="name")
+					+ frappe.get_all("Repair Order", filters=[["customer", "like", f"{TEST_PREFIX}%"]], pluck="name")
+				)
 			)
-			ro_names = [r for r in ro_set if r not in PRESERVED_REPAIR_ORDERS]
 
 		# 1. Clean Schedule Entries with test bays, temp bays, test customers, or test ROs
 		if frappe.db.exists("DocType", "Schedule Entry"):
@@ -464,7 +459,7 @@ def teardown_transactional():
 				+ frappe.get_all("Leave Application", filters=[["employee", "like", f"{TEST_PREFIX}%"]], pluck="name")
 				+ frappe.get_all(
 					"Leave Application",
-					filters=[["employee_name", "in", list(STATIC_FIXTURE_EMPLOYEES)]],
+					filters=[["employee_name", "in", list(_FIXTURE_EMPLOYEES)]],
 					pluck="name",
 				)
 			)
@@ -482,15 +477,14 @@ def teardown_transactional():
 						_cancel_and_delete_doc("Schedule Entry", se_name, errors)
 
 				si_name = getattr(doc, "sales_invoice", None)
-				if si_name and si_name not in PRESERVED_SALES_INVOICES and frappe.db.exists("Sales Invoice", si_name):
+				if si_name and frappe.db.exists("Sales Invoice", si_name):
 					pe_refs = frappe.get_all(
 						"Payment Entry Reference",
 						filters={"reference_doctype": "Sales Invoice", "reference_name": si_name},
 						pluck="parent",
 					)
 					for pe_name in set(pe_refs):
-						if pe_name not in PRESERVED_PAYMENT_ENTRIES:
-							_cancel_and_delete_doc("Payment Entry", pe_name, errors)
+						_cancel_and_delete_doc("Payment Entry", pe_name, errors)
 					_cancel_and_delete_doc("Sales Invoice", si_name, errors)
 					doc.db_set("sales_invoice", None)
 					doc.reload()

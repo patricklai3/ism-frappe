@@ -212,40 +212,26 @@ ensure_golden_fp() {
   printf '%s' "$fp"
 }
 
-if [[ ! -s "$GOLDEN_FILE" || "$REFRESH_GOLDEN" -eq 1 || "$RECREATE" -eq 1 ]]; then
-  PRIMARY_DB_NAME="$(python3 -c 'import json; print(json.load(open("/home/real2/projects/.project/frappe_docker/development/frappe-bench/sites/development.localhost/site_config.json")).get("db_name", "_c6b75eebb8edc84d"))')"
-  echo "[provision-slots] Dumping primary DB '$PRIMARY_DB_NAME' -> $GOLDEN_FILE..."
-  TMP_GOLDEN="$GOLDEN_FILE.tmp.$$"
-  docker exec "$CONTAINER_DB" mariadb-dump -uroot -p"$MARIADB_ROOT_PW" \
-    --single-transaction --routines --triggers "$PRIMARY_DB_NAME" \
-    | gzip -1 > "$TMP_GOLDEN"
-  if [[ ! -s "$TMP_GOLDEN" ]]; then
-    rm -f "$TMP_GOLDEN"
-    echo "[provision-slots] Golden dump produced an empty archive." >&2
-    exit 1
-  fi
-  mv -f "$TMP_GOLDEN" "$GOLDEN_FILE"
-  GOLDEN_FP="$(ensure_golden_fp)"
-  echo "[provision-slots] Golden DB snapshot updated ($(du -h "$GOLDEN_FILE" | cut -f1), schema_fp=${GOLDEN_FP:0:8})."
-elif [[ ! -s "$GOLDEN_FP_FILE" ]]; then
-  GOLDEN_FP="$(ensure_golden_fp)"
-else
-  GOLDEN_FP="$(tr -d '[:space:]' < "$GOLDEN_FP_FILE")"
-fi
-
-provision_slot_fs_and_venv() {
-  local k="$1"
-  local refresh_ism="${2:-0}"
-  docker exec -i "$CONTAINER_FRAPPE" bash -s -- "$k" "$CONTAINER_PRIMARY_BENCH" "$CONTAINER_SLOTS_ROOT" "$refresh_ism" <<'EOF'
+provision_bench_fs_and_venv() {
+  local bench_dir_name="$1"
+  local site_name="$2"
+  local db_name="$3"
+  local db_pw="$4"
+  local redis_idx="$5"
+  local refresh_ism="${6:-0}"
+  docker exec -i "$CONTAINER_FRAPPE" bash -s -- \
+    "$bench_dir_name" "$site_name" "$db_name" "$db_pw" "$redis_idx" \
+    "$CONTAINER_PRIMARY_BENCH" "$CONTAINER_SLOTS_ROOT" "$refresh_ism" <<'EOF'
 set -euo pipefail
-k="$1"
-PRIMARY_BENCH="$2"
-SLOTS_ROOT="$3"
-REFRESH_ISM="$4"
-SLOT_DIR="$SLOTS_ROOT/slot-$k"
-SITE_NAME="wt${k}.localhost"
-SLOT_DB="_ism_slot_${k}"
-SLOT_PW="ism_slot_${k}_pw"
+BENCH_DIR_NAME="$1"
+SITE_NAME="$2"
+SLOT_DB="$3"
+SLOT_PW="$4"
+REDIS_IDX="$5"
+PRIMARY_BENCH="$6"
+SLOTS_ROOT="$7"
+REFRESH_ISM="$8"
+SLOT_DIR="$SLOTS_ROOT/$BENCH_DIR_NAME"
 
 mkdir -p \
   "$SLOT_DIR/apps" \
@@ -270,7 +256,7 @@ if [[ ! -f "$SLOT_DIR/apps/ism/pyproject.toml" || "$REFRESH_ISM" -eq 1 ]]; then
 fi
 
 if [[ ! -d "$SLOT_DIR/env" ]]; then
-  echo "[provision-slots] Hardlink-cloning env for slot-$k..."
+  echo "[provision-slots] Hardlink-cloning env for $BENCH_DIR_NAME..."
   cp -al "$PRIMARY_BENCH/env" "$SLOT_DIR/env"
 
   # Break hardlinks and rewrite shebangs in slot env/bin/* so wrapper scripts stay isolated.
@@ -305,7 +291,7 @@ PY
     -e "$SLOT_DIR/apps/ism"
 fi
 
-# Verify Python resolves ism strictly inside this slot
+# Verify Python resolves ism strictly inside this bench directory
 "$SLOT_DIR/env/bin/python" -c "import ism, os; p=os.path.realpath(ism.__file__); expected='$SLOT_DIR/apps/ism/'; assert p.startswith(expected), f'{p} does not start with {expected}'"
 
 cp -f "$PRIMARY_BENCH/sites/apps.txt" "$SLOT_DIR/sites/apps.txt"
@@ -330,10 +316,10 @@ for d in css js locale; do
   fi
 done
 
-python3 - "$PRIMARY_BENCH" "$SLOT_DIR" "$k" "$SITE_NAME" "$SLOT_DB" "$SLOT_PW" <<'PY'
+python3 - "$PRIMARY_BENCH" "$SLOT_DIR" "$REDIS_IDX" "$SITE_NAME" "$SLOT_DB" "$SLOT_PW" <<'PY'
 import json, os, sys
-primary_bench, slot_dir, k_str, site_name, slot_db, slot_pw = sys.argv[1:7]
-k = int(k_str)
+primary_bench, slot_dir, idx_str, site_name, slot_db, slot_pw = sys.argv[1:7]
+idx = int(idx_str)
 
 with open(os.path.join(primary_bench, "sites", "common_site_config.json"), "r", encoding="utf-8") as f:
     common = json.load(f)
@@ -341,15 +327,16 @@ with open(os.path.join(primary_bench, "sites", "common_site_config.json"), "r", 
 common.update({
     "background_workers": 1,
     "default_site": site_name,
-    "file_watcher_port": 6790 + k,
+    "file_watcher_port": 6790 + idx,
     "gunicorn_workers": 2,
     "live_reload": False,
-    "redis_cache": f"redis://redis-cache:6379/{k}?health_check_interval=30",
-    "redis_queue": f"redis://redis-queue:6379/{k}?health_check_interval=30",
-    "redis_socketio": f"redis://redis-queue:6379/{k}",
+    "mariadb_user_host_login_scope": "%",
+    "redis_cache": f"redis://redis-cache:6379/{idx}?health_check_interval=30",
+    "redis_queue": f"redis://redis-queue:6379/{idx}?health_check_interval=30",
+    "redis_socketio": f"redis://redis-queue:6379/{idx}",
     "serve_default_site": True,
-    "socketio_port": 9000 + k,
-    "webserver_port": 8000 + k,
+    "socketio_port": 9000 + idx,
+    "webserver_port": 8000 + idx,
 })
 
 with open(os.path.join(slot_dir, "sites", "common_site_config.json"), "w", encoding="utf-8") as f:
@@ -379,6 +366,74 @@ with open(os.path.join(slot_dir, "sites", site_name, "site_config.json"), "w", e
 PY
 EOF
 }
+
+provision_slot_fs_and_venv() {
+  local k="$1"
+  local refresh_ism="${2:-0}"
+  provision_bench_fs_and_venv "slot-${k}" "wt${k}.localhost" "_ism_slot_${k}" "ism_slot_${k}_pw" "$k" "$refresh_ism"
+}
+
+build_clean_golden_snapshot() {
+  echo "[provision-slots] Building clean Golden DB snapshot from fresh site + ism.testing.catalog.seed_all..."
+  (
+    exec 203>"$LOCK_DIR/golden-build.lock"
+    flock 203
+
+    local golden_wsl="$WSL_SLOTS_ROOT/golden-site"
+    local golden_ctr="$CONTAINER_SLOTS_ROOT/golden-site"
+    local golden_site="golden.localhost"
+    local golden_db="_ism_golden_build"
+    local golden_pw="ism_golden_pw"
+
+    provision_bench_fs_and_venv "golden-site" "$golden_site" "$golden_db" "$golden_pw" "9" "1"
+
+    local apps_csv
+    apps_csv="$(python3 - "$WSL_PRIMARY_BENCH/sites/development.localhost/site_config.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+apps = json.load(open(p, "r", encoding="utf-8")).get("installed_apps", []) if os.path.isfile(p) else []
+apps = [a for a in apps if a and a != "frappe"]
+print(",".join(apps) if apps else "erpnext,hrms,ism")
+PY
+)"
+
+    install_clean_ism_site "$golden_wsl" "$golden_ctr" "$golden_site" "$golden_db" "$golden_pw" "9" "$apps_csv"
+
+    docker exec -w "$golden_ctr/sites" "$CONTAINER_FRAPPE" "$golden_ctr/env/bin/python" - <<'PY'
+import frappe
+frappe.init(site="golden.localhost", sites_path=".")
+frappe.connect()
+try:
+    assert frappe.db.exists("Company", "Lightspeed EV"), "Lightspeed EV missing from clean golden site"
+    assert frappe.db.count("Repair Order") == 0, "Expected 0 Repair Orders in clean golden site"
+    bad_bays = frappe.get_all("Service Bay", filters={"name": ["like", "Test %"]}, pluck="name")
+    assert not bad_bays, f"Unexpected legacy Service Bays: {bad_bays}"
+finally:
+    frappe.destroy()
+PY
+
+    local tmp_golden="${GOLDEN_FILE}.tmp.$$"
+    docker exec "$CONTAINER_DB" mariadb-dump -uroot -p"$MARIADB_ROOT_PW" \
+      --single-transaction --routines --triggers "$golden_db" \
+      | gzip -1 > "$tmp_golden"
+    if [[ ! -s "$tmp_golden" ]]; then
+      rm -f "$tmp_golden"
+      echo "[provision-slots] Clean Golden dump produced an empty archive." >&2
+      exit 1
+    fi
+    mv -f "$tmp_golden" "$GOLDEN_FILE"
+  )
+}
+
+if [[ ! -s "$GOLDEN_FILE" || "$REFRESH_GOLDEN" -eq 1 || "$RECREATE" -eq 1 ]]; then
+  build_clean_golden_snapshot
+  GOLDEN_FP="$(ensure_golden_fp)"
+  echo "[provision-slots] Clean Golden DB snapshot updated ($(du -h "$GOLDEN_FILE" | cut -f1), schema_fp=${GOLDEN_FP:0:8})."
+elif [[ ! -s "$GOLDEN_FP_FILE" ]]; then
+  GOLDEN_FP="$(ensure_golden_fp)"
+else
+  GOLDEN_FP="$(tr -d '[:space:]' < "$GOLDEN_FP_FILE")"
+fi
 
 seed_slot_db_and_migrate() {
   local k="$1"

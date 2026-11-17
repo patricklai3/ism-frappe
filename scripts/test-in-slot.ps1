@@ -8,6 +8,7 @@ param (
     [int]$Slot = 0,
     [int]$Slots = 5,
     [switch]$FreshDb = $false,
+    [switch]$CleanReinstall = $false,
     [switch]$KeepDb = $false,
     [switch]$SkipMigrate = $false,
     [switch]$ForceMigrate = $false,
@@ -121,6 +122,7 @@ $ArgList = @(
 )
 
 if ($FreshDb) { $ArgList += "--fresh-db" }
+if ($CleanReinstall) { $ArgList += "--clean-reinstall" }
 if ($KeepDb) { $ArgList += "--keep-db" }
 if ($SkipMigrate) { $ArgList += "--skip-migrate" }
 if ($ForceMigrate) { $ArgList += "--force-migrate" }
