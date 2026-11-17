@@ -164,3 +164,48 @@ class TestRepairVehicle(ISMTestCase):
 		self.assertEqual(intel["deferred_services"]["total_count"], 2)
 		self.assertEqual(intel["deferred_services"]["safety_hazard_count"], 1)
 		self.assertEqual(flt(intel["deferred_services"]["open_estimated_total"]), 650.0)
+
+	def test_2024_to_2026_model_sx_hw4_and_model_y_juniper_decoding(self):
+		"""Verify 2024-2026 Model S/X return HW4 regardless of sequence and Model Y Juniper drive codes decode."""
+		from ism.ism.doctype.repair_vehicle.vin_decoder import get_hardware_generation
+
+		# Direct get_hardware_generation checks for 2024-2026 Model S & X (even with low sequence numbers)
+		for model_code in ("S", "X"):
+			for year_code in ("R", "S", "T"):  # 2024, 2025, 2026
+				self.assertEqual(get_hardware_generation(model_code, 1000, "F", year_code), {"t": "HW4"})
+
+		# End-to-end VIN decoding for 2024-2026 Model S & Model X
+		for wmi, model_code, body, drive, expected_model in (
+			("5YJ", "S", "A", "5", "Model S"),
+			("7SA", "X", "C", "6", "Model X"),
+		):
+			for year_code, expected_year in (("R", "2024"), ("S", "2025"), ("T", "2026")):
+				template = f"{wmi}{model_code}{body}1E{drive}0{year_code}F001234"
+				vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+				decoded = decode_tesla_vin(vin)
+				self.assertEqual(decoded["is_valid_vin"], 1)
+				self.assertEqual(decoded["model"], expected_model)
+				self.assertEqual(decoded["model_year"], expected_year)
+				self.assertEqual(decoded["autopilot_hardware"], "HW4")
+
+		# 2025-2026 Model Y Juniper drive unit codes (RWD + AWD, including T)
+		juniper_cases = (
+			("D", "S", "2025", "RWD", "Standard Range"),
+			("R", "S", "2025", "RWD", "Standard Range"),
+			("S", "T", "2026", "RWD", "Standard Range"),
+			("E", "S", "2025", "AWD", "Long Range"),
+			("F", "T", "2026", "AWD", "Performance"),
+			("K", "S", "2025", "AWD", "Long Range"),
+			("L", "T", "2026", "AWD", "Performance"),
+			("T", "T", "2026", "AWD", "Performance"),
+		)
+		for drive_code, year_code, expected_year, expected_dt, expected_trim in juniper_cases:
+			vin = f"7SAYGDE{drive_code}0{year_code}A012345"
+			vin = f"{vin[:8]}{compute_vin_check_digit(vin)}{vin[9:]}"
+			decoded = decode_tesla_vin(vin)
+			self.assertEqual(decoded["is_valid_vin"], 1)
+			self.assertEqual(decoded["model"], "Model Y")
+			self.assertEqual(decoded["model_year"], expected_year)
+			self.assertEqual(decoded["drivetrain"], expected_dt)
+			self.assertEqual(decoded["trim"], expected_trim)
+			self.assertEqual(decoded["autopilot_hardware"], "HW4")

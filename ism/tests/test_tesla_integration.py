@@ -690,4 +690,73 @@ class TestTeslaIntegration(ISMTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			tesla_api._read_bounded_tesla_response(oversized_resp)
 
+	def test_import_tesla_procedure_offline_raw_html_and_markdown(self):
+		"""Verify raw_html and raw_markdown import procedures offline without network fetches."""
+		cust = self.create_test_customer()
+		veh = self.create_test_vehicle(
+			vin="5YJ3E1EBXNF998877",
+			customer=cust.name,
+			model="Model 3",
+			model_year="2022",
+			manufactured_month="05/22",
+		)
+		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name)
+
+		raw_html = """
+		<html>
+			<head><title>Upper Control Arm - Front (Remove and Replace)</title></head>
+			<body>
+				<h1>Upper Control Arm - Front - LH (Remove and Replace)</h1>
+				<div>Correction Code: 31011402</div>
+				<div>FRT: 1.25</div>
+				<p>Replace bolt 1044321-00-G if removed.</p>
+			</body>
+		</html>
+		"""
+		with patch("ism.api.tesla._fetch_tesla_html", side_effect=AssertionError("Network fetch must not run")):
+			res_html = import_tesla_procedure(
+				repair_order=ro.name,
+				raw_html=raw_html,
+			)
+		self.assertEqual(res_html["status"], "success")
+		self.assertEqual(res_html["correction_code"], "31011402")
+		self.assertEqual(flt(res_html["frt"]), 1.25)
+		pkg_html = frappe.get_doc("Service Package", res_html["service_package"])
+		self.track(pkg_html)
+
+		# Markdown import with optional source URL metadata (still no network fetch)
+		raw_md = """# Cabin Air Filter (Remove and Replace)
+Correction Code: 18100102
+FRT: 0.45
+Parts: 1107681-00-A
+"""
+		optional_url = "https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-CABIN-FILTER.html"
+		with patch("ism.api.tesla._fetch_tesla_html", side_effect=AssertionError("Network fetch must not run")):
+			res_md = import_tesla_procedure(
+				repair_order=ro.name,
+				url=optional_url,
+				raw_markdown=raw_md,
+			)
+		self.assertEqual(res_md["status"], "success")
+		self.assertEqual(res_md["correction_code"], "18100102")
+		self.assertEqual(flt(res_md["frt"]), 0.45)
+		pkg_md = frappe.get_doc("Service Package", res_md["service_package"])
+		self.track(pkg_md)
+		self.assertEqual(pkg_md.tesla_manual_url, optional_url)
+
+		ro.reload()
+		self.assertEqual(len(ro.services), 2)
+
+		# Validation guards: non-string, oversized payload, and invalid optional URL
+		with self.assertRaises((frappe.ValidationError, frappe.exceptions.FrappeTypeError)):
+			import_tesla_procedure(repair_order=ro.name, raw_html=["not-a-str"])
+		with self.assertRaises(frappe.ValidationError):
+			import_tesla_procedure(repair_order=ro.name, raw_markdown="x" * (tesla_api._MAX_TESLA_HTML_BYTES + 1))
+		with self.assertRaises(frappe.ValidationError):
+			import_tesla_procedure(
+				repair_order=ro.name,
+				url="https://evil.example.com/manual.html",
+				raw_markdown=raw_md,
+			)
+
 

@@ -25,6 +25,7 @@ from ism.utils.tesla_manual import (
 	detect_service_side,
 	normalize_tesla_procedure,
 	parse_tesla_procedure_html,
+	parse_tesla_procedure_markdown,
 	swap_side_in_title,
 	validate_vehicle_compatibility,
 )
@@ -85,6 +86,8 @@ def import_tesla_procedure(
 	repair_order: str,
 	url: Optional[str] = None,
 	data: Optional[Union[dict[str, Any], str]] = None,
+	raw_html: Optional[str] = None,
+	raw_markdown: Optional[str] = None,
 	on_conflict: str = "skip",
 	force: Any = False,
 	allow_generation_mismatch: Any = False,
@@ -101,6 +104,12 @@ def import_tesla_procedure(
 	url = _optional_str(url, "Tesla procedure URL")
 	if url:
 		_validate_tesla_url(url)
+	raw_html = _optional_str(raw_html, "Raw HTML")
+	raw_markdown = _optional_str(raw_markdown, "Raw Markdown")
+	if raw_html and len(raw_html.encode("utf-8")) > _MAX_TESLA_HTML_BYTES:
+		frappe.throw(frappe._("Raw HTML payload exceeds maximum allowed size."), frappe.ValidationError)
+	if raw_markdown and len(raw_markdown.encode("utf-8")) > _MAX_TESLA_HTML_BYTES:
+		frappe.throw(frappe._("Raw Markdown payload exceeds maximum allowed size."), frappe.ValidationError)
 
 	if not frappe.db.exists("Repair Order", repair_order):
 		frappe.throw(frappe._("Repair Order '{0}' does not exist.").format(repair_order))
@@ -112,7 +121,11 @@ def import_tesla_procedure(
 	is_forced = _coerce_bool(force) or _coerce_bool(allow_generation_mismatch)
 
 	raw_data = _parse_raw_procedure_data(data)
-	if not raw_data and url:
+	if not raw_data and raw_html:
+		raw_data = parse_tesla_procedure_html(raw_html, url=url or "")
+	elif not raw_data and raw_markdown:
+		raw_data = parse_tesla_procedure_markdown(raw_markdown, url=url or "")
+	elif not raw_data and url:
 		raw_data = fetch_and_parse_tesla_procedure(url)
 
 	if not raw_data or (not raw_data.get("title") and not raw_data.get("procedure_title") and not raw_data.get("procedure_name") and not raw_data.get("correction_code")):
