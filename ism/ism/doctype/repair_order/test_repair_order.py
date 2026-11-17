@@ -495,7 +495,7 @@ class TestRepairOrder(ISMTestCase):
 		ro.authorize_jobs(
 			approvals={"1": "Approved", "2": "Approved"},
 			channel="In-Person Signature",
-			signer_name="Test Customer",
+			signer_name="Liam Chen",
 		)
 		ro.reload()
 		self.assertEqual(ro.services[1].status, "Approved")
@@ -725,7 +725,7 @@ class TestRepairOrder(ISMTestCase):
 			docname=ro.name,
 			approvals={"1": "Approved", "2": "Approved"},
 			channel="In-Person Signature",
-			signer_name="Prestiga-Biz",
+			signer_name="Liam Chen",
 			signature_image=fake_sig,
 		)
 		self.assertEqual(res.get("status"), "success")
@@ -736,7 +736,7 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.services[0].status, "Approved")
 		self.assertEqual(ro.services[1].status, "Approved")
 		self.assertEqual(ro.status, "Authorized - In Progress")
-		self.assertEqual(ro.authorized_by, "Prestiga-Biz")
+		self.assertEqual(ro.authorized_by, "Liam Chen")
 		self.assertIsNotNone(ro.audit_hash)
 
 	def test_manual_advisor_approval_and_cascade(self):
@@ -809,7 +809,7 @@ class TestRepairOrder(ISMTestCase):
 			"docname": ro.name,
 			"approvals": json.dumps({"1": "Approved", "JOB-1": "Approved"}),
 			"channel": "In-Person Signature",
-			"signer_name": "Prestiga-Biz",
+			"signer_name": "Liam Chen",
 			"signature_image": fake_sig,
 			"notes": "Customer signed on shop tablet",
 		}
@@ -820,7 +820,7 @@ class TestRepairOrder(ISMTestCase):
 		ro.reload()
 		self.assertEqual(ro.approval_status, "Approved")
 		self.assertEqual(ro.status, "Authorized - In Progress")
-		self.assertEqual(ro.authorized_by, "Prestiga-Biz")
+		self.assertEqual(ro.authorized_by, "Liam Chen")
 		self.assertEqual(ro.verbal_notes, "Customer signed on shop tablet")
 		self.assertEqual(ro.services[0].status, "Approved")
 		self.assertIsNotNone(ro.audit_hash)

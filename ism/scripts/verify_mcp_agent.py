@@ -43,7 +43,7 @@ def run(site: str = "development.localhost"):
 	import frappe
 	from frappe.core.doctype.user.user import generate_keys
 	from frappe.mcp.test_utils import McpTestCase
-	from ism.tests.test_fixtures import CUSTOMER, VEHICLE_VIN, setup_all
+	from ism.testing.catalog import get_master_manifest, seed_all
 
 	if not getattr(frappe.local, "db", None):
 		frappe.init(site=site)
@@ -54,7 +54,10 @@ def run(site: str = "development.localhost"):
 	print("=" * 60)
 
 	frappe.set_user("Administrator")
-	setup_all()
+	seed_all(commit=True)
+	manifest = get_master_manifest()
+	customer = manifest.resolve("customers.retail_1")
+	vehicle_vin = manifest.resolve("vehicles.veh_model3_liam")
 
 	# 1. Setup Role and Test Agent User
 	print("\n[1/5] Verifying RBAC and Dedicated Agent User...")
@@ -120,8 +123,8 @@ def run(site: str = "development.localhost"):
 				"arguments": {
 					"method": "ism.api.agent.create_quote",
 					"args": {
-						"customer": CUSTOMER,
-						"vehicle": VEHICLE_VIN,
+						"customer": customer,
+						"vehicle": vehicle_vin,
 						"odometer_in": 45000,
 						"concern": "Front suspension rattle verification",
 					},
