@@ -1248,6 +1248,135 @@ class TestPartsManagement(ISMTestCase):
 			1,
 		)
 
+	def test_existing_company_tax_setup_preserved_without_override(self):
+		"""Verify existing company tax templates, Tax Rules, and Accounts Settings are preserved untouched."""
+		from ism.setup import (
+			get_or_create_default_purchase_tax_template,
+			get_or_create_default_sales_tax_template,
+			setup_default_taxes_and_payments,
+		)
+
+		company = self._get_company()
+		abbr = frappe.db.get_value("Company", company, "abbr") or company
+		default_hst_name = f"13% HST - {abbr}"
+		tax_account = (
+			frappe.db.get_value("Account", {"company": company, "account_type": "Tax", "is_group": 0}, "name")
+			or frappe.db.get_value("Account", {"company": company, "root_type": "Liability", "is_group": 0}, "name")
+			or frappe.db.get_value("Account", {"company": company, "is_group": 0}, "name")
+		)
+		self.assertTrue(tax_account)
+
+		savepoint = "test_preserve_existing_taxes"
+		frappe.db.savepoint(savepoint)
+		try:
+			for dt_name in ("Sales Taxes and Charges Template", "Purchase Taxes and Charges Template"):
+				tbl = frappe.qb.DocType(dt_name)
+				frappe.qb.update(tbl).set(tbl.disabled, 1).set(tbl.is_default, 0).where(
+					tbl.company == company
+				).run()
+
+			frappe.db.delete("Tax Rule", {"company": company})
+
+			had_hst_sales = bool(frappe.db.exists("Sales Taxes and Charges Template", default_hst_name))
+			had_hst_purchase = bool(frappe.db.exists("Purchase Taxes and Charges Template", default_hst_name))
+
+			custom_sales_tmpl = frappe.get_doc({
+				"doctype": "Sales Taxes and Charges Template",
+				"title": f"{TEST_PREFIX}Acct HST Sales",
+				"company": company,
+				"is_default": 1,
+				"disabled": 0,
+				"taxes": [
+					{
+						"charge_type": "On Net Total",
+						"account_head": tax_account,
+						"rate": 13.0,
+						"description": "Custom HST Sales @ 13.0%",
+					}
+				],
+			}).insert(ignore_permissions=True)
+
+			custom_purchase_tmpl = frappe.get_doc({
+				"doctype": "Purchase Taxes and Charges Template",
+				"title": f"{TEST_PREFIX}Acct HST ITC",
+				"company": company,
+				"is_default": 1,
+				"disabled": 0,
+				"taxes": [
+					{
+						"category": "Total",
+						"add_deduct_tax": "Add",
+						"charge_type": "On Net Total",
+						"account_head": tax_account,
+						"rate": 13.0,
+						"description": "Custom HST ITC @ 13.0%",
+					}
+				],
+			}).insert(ignore_permissions=True)
+
+			custom_rule = frappe.get_doc({
+				"doctype": "Tax Rule",
+				"tax_type": "Sales",
+				"company": company,
+				"sales_tax_template": custom_sales_tmpl.name,
+				"priority": 1,
+				"from_date": "2020-01-01",
+				"use_for_shopping_cart": 0,
+			}).insert(ignore_permissions=True)
+
+			frappe.db.set_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template", 0)
+
+			setup_default_taxes_and_payments(only_if_missing=False)
+			s_res = get_or_create_default_sales_tax_template(company)
+			p_res = get_or_create_default_purchase_tax_template(company)
+
+			self.assertEqual(s_res, custom_sales_tmpl.name)
+			self.assertEqual(p_res, custom_purchase_tmpl.name)
+			self.assertEqual(
+				frappe.db.get_value("Sales Taxes and Charges Template", custom_sales_tmpl.name, "is_default"),
+				1,
+			)
+			self.assertEqual(
+				frappe.db.get_value("Purchase Taxes and Charges Template", custom_purchase_tmpl.name, "is_default"),
+				1,
+			)
+
+			if had_hst_sales:
+				self.assertEqual(
+					frappe.db.get_value("Sales Taxes and Charges Template", default_hst_name, "disabled"),
+					1,
+				)
+				self.assertEqual(
+					frappe.db.get_value("Sales Taxes and Charges Template", default_hst_name, "is_default"),
+					0,
+				)
+			else:
+				self.assertFalse(frappe.db.exists("Sales Taxes and Charges Template", default_hst_name))
+
+			if had_hst_purchase:
+				self.assertEqual(
+					frappe.db.get_value("Purchase Taxes and Charges Template", default_hst_name, "disabled"),
+					1,
+				)
+				self.assertEqual(
+					frappe.db.get_value("Purchase Taxes and Charges Template", default_hst_name, "is_default"),
+					0,
+				)
+			else:
+				self.assertFalse(frappe.db.exists("Purchase Taxes and Charges Template", default_hst_name))
+
+			self.assertEqual(
+				frappe.db.get_value("Tax Rule", custom_rule.name, "sales_tax_template"),
+				custom_sales_tmpl.name,
+			)
+			self.assertEqual(
+				frappe.db.get_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template"),
+				0,
+			)
+		finally:
+			frappe.db.rollback(save_point=savepoint)
+			frappe.clear_cache(doctype="Accounts Settings")
+
 	def test_bulk_import_parts_structured_json(self):
 		"""Verify bulk_import_parts accepts structured list[dict] and JSON string payloads with aliases, supplier linking, and error reporting."""
 		pkg = quick_create_service_package(

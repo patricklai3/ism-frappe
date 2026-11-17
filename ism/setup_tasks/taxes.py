@@ -3,6 +3,11 @@
 
 import frappe
 
+_TAX_TEMPLATE_RULE_FIELD = {
+	"Sales Taxes and Charges Template": ("Sales", "sales_tax_template"),
+	"Purchase Taxes and Charges Template": ("Purchase", "purchase_tax_template"),
+}
+
 
 def _resolve_default_company(company=None):
 	"""Resolve explicit, user default, global default, or first configured Company without hardcoding."""
@@ -15,51 +20,8 @@ def _resolve_default_company(company=None):
 	)
 
 
-def _company_has_default_hst_setup(comp):
-	abbr = comp.abbr or comp.name
-	template_name = f"13% HST - {abbr}"
-	return bool(
-		frappe.db.exists("Sales Taxes and Charges Template", template_name)
-		and frappe.db.exists("Purchase Taxes and Charges Template", template_name)
-		and frappe.db.exists("Item Tax Template", template_name)
-	)
-
-
-def _ensure_company_tax_template(template_doctype, company_name, template_name, tax_row):
-	"""Idempotently ensure the 13% HST template exists and is the sole default for the company."""
-	if not frappe.db.exists(template_doctype, template_name):
-		try:
-			tmpl = frappe.get_doc({
-				"doctype": template_doctype,
-				"title": "13% HST",
-				"company": company_name,
-				"is_default": 1,
-				"taxes": [tax_row],
-			})
-			tmpl.insert(ignore_permissions=True)
-		except Exception as exc:
-			frappe.logger("ism").warning(
-				f"Could not create {template_doctype} '{template_name}' for {company_name}: {exc}"
-			)
-	else:
-		frappe.db.set_value(template_doctype, template_name, "is_default", 1)
-
-	other_names = frappe.get_all(
-		template_doctype,
-		filters={"company": company_name, "is_default": 1, "name": ["!=", template_name]},
-		pluck="name",
-	)
-	if other_names:
-		dt = frappe.qb.DocType(template_doctype)
-		(
-			frappe.qb.update(dt)
-			.set(dt.is_default, 0)
-			.where(dt.name.isin(other_names))
-		).run()
-
-
-def _ensure_default_tax_rule(tax_type, template_name, company):
-	"""Ensure a generic default Tax Rule exists for Sales or Purchase in this company."""
+def _get_generic_tax_rules(tax_type, company):
+	"""Return Tax Rules for company and tax_type that apply without party/item/category filters."""
 	all_rules = frappe.get_all(
 		"Tax Rule",
 		filters={"company": company, "tax_type": tax_type},
@@ -75,10 +37,9 @@ def _ensure_default_tax_rule(tax_type, template_name, company):
 			"item_group",
 			"tax_category",
 		],
+		order_by="priority desc, creation asc",
 	)
-
-	template_field = "sales_tax_template" if tax_type == "Sales" else "purchase_tax_template"
-	generic_rules = [
+	return [
 		r
 		for r in all_rules
 		if not r.get("customer")
@@ -90,35 +51,111 @@ def _ensure_default_tax_rule(tax_type, template_name, company):
 		and not r.get("tax_category")
 	]
 
-	if generic_rules:
-		rule_name = generic_rules[0].name
-		if generic_rules[0].get(template_field) != template_name:
-			frappe.db.set_value("Tax Rule", rule_name, template_field, template_name)
-		for dup in generic_rules[1:]:
-			frappe.delete_doc("Tax Rule", dup.name, ignore_permissions=True)
-	else:
+
+def _get_existing_generic_tax_rule_template(tax_type, company_name):
+	"""Return an active tax template referenced by an existing generic Tax Rule, if any."""
+	template_field = "sales_tax_template" if tax_type == "Sales" else "purchase_tax_template"
+	template_doctype = (
+		"Sales Taxes and Charges Template"
+		if tax_type == "Sales"
+		else "Purchase Taxes and Charges Template"
+	)
+	for rule in _get_generic_tax_rules(tax_type, company_name):
+		tmpl_name = rule.get(template_field)
+		if tmpl_name and frappe.db.exists(template_doctype, {"name": tmpl_name, "disabled": 0}):
+			return tmpl_name
+	return None
+
+
+def _get_existing_company_tax_template(template_doctype, company_name):
+	"""Return existing active default, rule-mapped, or first active tax template for a company."""
+	default_tmpl = frappe.db.get_value(
+		template_doctype,
+		{"company": company_name, "is_default": 1, "disabled": 0},
+		"name",
+	)
+	if default_tmpl:
+		return default_tmpl
+
+	tax_type, _ = _TAX_TEMPLATE_RULE_FIELD[template_doctype]
+	rule_tmpl = _get_existing_generic_tax_rule_template(tax_type, company_name)
+	if rule_tmpl:
+		return rule_tmpl
+
+	active_tmpls = frappe.get_all(
+		template_doctype,
+		filters={"company": company_name, "disabled": 0},
+		pluck="name",
+		order_by="creation asc",
+		limit=1,
+	)
+	if active_tmpls:
+		return active_tmpls[0]
+	return None
+
+
+def _company_has_default_hst_setup(comp):
+	c_name = comp if isinstance(comp, str) else comp.name
+	return bool(
+		_get_existing_company_tax_template("Sales Taxes and Charges Template", c_name)
+		and _get_existing_company_tax_template("Purchase Taxes and Charges Template", c_name)
+	)
+
+
+def _ensure_company_tax_template(template_doctype, company_name, template_name, tax_row):
+	"""Idempotently create 13% HST template when a company has no active template of this type."""
+	if not frappe.db.exists(template_doctype, template_name):
 		try:
-			rule = frappe.get_doc({
-				"doctype": "Tax Rule",
-				"tax_type": tax_type,
-				"company": company,
-				template_field: template_name,
-				"priority": 1,
-				"from_date": "2020-01-01",
-				"use_for_shopping_cart": 0,
+			tmpl = frappe.get_doc({
+				"doctype": template_doctype,
+				"title": "13% HST",
+				"company": company_name,
+				"is_default": 1,
+				"disabled": 0,
+				"taxes": [tax_row],
 			})
-			rule.insert(ignore_permissions=True)
+			tmpl.insert(ignore_permissions=True)
 		except Exception as exc:
-			frappe.logger("ism").warning(f"Could not create default {tax_type} Tax Rule for {company}: {exc}")
+			frappe.logger("ism").warning(
+				f"Could not create {template_doctype} '{template_name}' for {company_name}: {exc}"
+			)
+	elif not frappe.db.exists(template_doctype, {"company": company_name, "is_default": 1, "disabled": 0}):
+		frappe.db.set_value(template_doctype, template_name, {"is_default": 1, "disabled": 0})
 
 
-def ensure_company_13_percent_hst_setup(comp):
-	"""Ensure 13% HST account, Sales and Purchase Taxes templates, Item Tax Template, and Tax Rules exist."""
+def _ensure_default_tax_rule(tax_type, template_name, company):
+	"""Create a generic default Tax Rule only when no generic Tax Rule exists for the company."""
+	if _get_generic_tax_rules(tax_type, company):
+		return
+
+	template_field = "sales_tax_template" if tax_type == "Sales" else "purchase_tax_template"
+	try:
+		rule = frappe.get_doc({
+			"doctype": "Tax Rule",
+			"tax_type": tax_type,
+			"company": company,
+			template_field: template_name,
+			"priority": 1,
+			"from_date": "2020-01-01",
+			"use_for_shopping_cart": 0,
+		})
+		rule.insert(ignore_permissions=True)
+	except Exception as exc:
+		frappe.logger("ism").warning(f"Could not create default {tax_type} Tax Rule for {company}: {exc}")
+
+
+def ensure_company_13_percent_hst_setup(comp) -> bool:
+	"""Seed 13% HST defaults only for tax types missing active templates on the company."""
 	if isinstance(comp, str):
 		comp = frappe.get_cached_doc("Company", comp)
 	c_name = comp.name
 	abbr = comp.abbr or c_name
 	currency = comp.default_currency or "CAD"
+
+	has_sales = bool(_get_existing_company_tax_template("Sales Taxes and Charges Template", c_name))
+	has_purchase = bool(_get_existing_company_tax_template("Purchase Taxes and Charges Template", c_name))
+	if has_sales and has_purchase:
+		return False
 
 	duties_and_taxes = (
 		frappe.db.get_value("Account", {"account_name": "Duties and Taxes", "company": c_name}, "name")
@@ -142,32 +179,39 @@ def ensure_company_13_percent_hst_setup(comp):
 	tax_head = account_name if frappe.db.exists("Account", account_name) else duties_and_taxes
 	template_name = f"13% HST - {abbr}"
 
-	_ensure_company_tax_template(
-		"Sales Taxes and Charges Template",
-		c_name,
-		template_name,
-		{
-			"charge_type": "On Net Total",
-			"account_head": tax_head,
-			"rate": 13.0,
-			"description": "HST @ 13.0%",
-		},
-	)
-	_ensure_company_tax_template(
-		"Purchase Taxes and Charges Template",
-		c_name,
-		template_name,
-		{
-			"category": "Total",
-			"add_deduct_tax": "Add",
-			"charge_type": "On Net Total",
-			"account_head": tax_head,
-			"rate": 13.0,
-			"description": "HST @ 13.0%",
-		},
-	)
+	if not has_sales:
+		_ensure_company_tax_template(
+			"Sales Taxes and Charges Template",
+			c_name,
+			template_name,
+			{
+				"charge_type": "On Net Total",
+				"account_head": tax_head,
+				"rate": 13.0,
+				"description": "HST @ 13.0%",
+			},
+		)
+		_ensure_default_tax_rule("Sales", template_name, c_name)
 
-	if not frappe.db.exists("Item Tax Template", template_name):
+	if not has_purchase:
+		_ensure_company_tax_template(
+			"Purchase Taxes and Charges Template",
+			c_name,
+			template_name,
+			{
+				"category": "Total",
+				"add_deduct_tax": "Add",
+				"charge_type": "On Net Total",
+				"account_head": tax_head,
+				"rate": 13.0,
+				"description": "HST @ 13.0%",
+			},
+		)
+		_ensure_default_tax_rule("Purchase", template_name, c_name)
+
+	if not frappe.db.exists("Item Tax Template", {"company": c_name, "disabled": 0}) and not frappe.db.exists(
+		"Item Tax Template", template_name
+	):
 		try:
 			it_tmpl = frappe.get_doc({
 				"doctype": "Item Tax Template",
@@ -181,12 +225,11 @@ def ensure_company_13_percent_hst_setup(comp):
 				f"Could not create Item Tax Template '{template_name}' for {c_name}: {exc}"
 			)
 
-	_ensure_default_tax_rule("Sales", template_name, c_name)
-	_ensure_default_tax_rule("Purchase", template_name, c_name)
+	return True
 
 
 def setup_default_taxes_and_payments(only_if_missing=False):
-	"""Ensure 13% HST tax templates and Debit / Interac Mode of Payment exist."""
+	"""Ensure missing 13% HST defaults and Debit / Interac Mode of Payment exist without overriding existing setups."""
 	companies = frappe.get_all(
 		"Company",
 		fields=["name", "abbr", "default_currency", "default_bank_account", "default_cash_account"],
@@ -231,42 +274,40 @@ def setup_default_taxes_and_payments(only_if_missing=False):
 			if updated_mop:
 				mop_doc.save(ignore_permissions=True)
 
-	try:
-		frappe.db.set_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template", 1)
-	except Exception as exc:
-		frappe.logger("ism").warning(f"Could not configure Accounts Settings auto-tax setting: {exc}")
-
+	seeded_any = False
 	for comp in companies:
-		ensure_company_13_percent_hst_setup(comp)
+		if ensure_company_13_percent_hst_setup(comp):
+			seeded_any = True
+
+	if (
+		seeded_any
+		or frappe.db.get_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template") is None
+	):
+		try:
+			frappe.db.set_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template", 1)
+		except Exception as exc:
+			frappe.logger("ism").warning(f"Could not configure Accounts Settings auto-tax setting: {exc}")
 
 
 def _get_or_create_default_tax_template(template_doctype, company=None):
-	"""Return (or create) the default 13% HST template for Sales or Purchase in the target company."""
+	"""Return existing company tax template or seed default 13% HST template if none exists."""
 	resolved_company = _resolve_default_company(company)
 	if not resolved_company:
 		return None
 
-	abbr = frappe.db.get_value("Company", resolved_company, "abbr") or resolved_company
-	template_name = f"13% HST - {abbr}"
+	existing = _get_existing_company_tax_template(template_doctype, resolved_company)
+	if existing:
+		return existing
 
-	if not frappe.db.exists(template_doctype, template_name):
-		ensure_company_13_percent_hst_setup(resolved_company)
-
-	if frappe.db.exists(template_doctype, template_name):
-		return template_name
-
-	return frappe.db.get_value(
-		template_doctype,
-		{"company": resolved_company, "is_default": 1},
-		"name",
-	)
+	ensure_company_13_percent_hst_setup(resolved_company)
+	return _get_existing_company_tax_template(template_doctype, resolved_company)
 
 
 def get_or_create_default_purchase_tax_template(company=None):
-	"""Return the default 13% HST Purchase Taxes and Charges Template for the company."""
+	"""Return the existing or default 13% HST Purchase Taxes and Charges Template for the company."""
 	return _get_or_create_default_tax_template("Purchase Taxes and Charges Template", company)
 
 
 def get_or_create_default_sales_tax_template(company=None):
-	"""Return the default 13% HST Sales Taxes and Charges Template for the company."""
+	"""Return the existing or default 13% HST Sales Taxes and Charges Template for the company."""
 	return _get_or_create_default_tax_template("Sales Taxes and Charges Template", company)

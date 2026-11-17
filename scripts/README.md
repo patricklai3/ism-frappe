@@ -8,6 +8,7 @@ All scripts detect the repository root dynamically relative to their location. T
 
 - [sync-to-wsl.ps1](sync-to-wsl.ps1): Pushes files from Windows to WSL2 once using checksum verification.
 - [sync-from-wsl.ps1](sync-from-wsl.ps1): Pulls files from WSL2 to Windows once.
+- [push-deploy-subtree.ps1](push-deploy-subtree.ps1): Splits `ism-frappe/` from `HEAD` and pushes to the Frappe Cloud deploy remote (`staging` / `production`).
 - [watch-sync.ps1](watch-sync.ps1): Watches the repository for changes and pushes them to WSL2 automatically (PowerShell).
 - [watch-sync.mjs](watch-sync.mjs): Watches the repository for changes and pushes them to WSL2 automatically (Node.js).
 - [start-remote-tunnel.ps1](start-remote-tunnel.ps1): Exposes dev site on port 8000 via Cloudflare Tunnel with custom domain or quick URL and mobile QR code.

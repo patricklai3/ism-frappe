@@ -58,4 +58,8 @@ jspm_packages/
 scripts/.tunnel-config.json
 logs/
 
+# Tooling & test caches
+.codegraph/
+.pytest_cache/
+
 
