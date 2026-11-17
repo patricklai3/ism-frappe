@@ -5,7 +5,6 @@ import json
 import frappe
 
 from ism.tests.base import ISMTestCase
-from ism.tests.test_fixtures import CUSTOMER, PREFIX, VEHICLE_VIN, ensure_ism_settings, setup_all
 
 try:
 	from ism.scheduling.estimation_light import (
@@ -42,24 +41,38 @@ class TestEstimationMath(ISMTestCase):
 	- Feature 5: Configurable Buffer Padding & Dynamic ISM Settings
 	"""
 
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		setup_all()
-
-	@classmethod
-	def tearDownClass(cls):
-		super().tearDownClass()
-
 	def setUp(self):
 		super().setUp()
-		self.item_brake1 = f"{PREFIX}EST_ITEM_001"
-		self.item_brake2 = f"{PREFIX}EST_ITEM_002"
-		self.item_tire = f"{PREFIX}EST_ITEM_TIRE"
-		self.item_elec = f"{PREFIX}EST_ITEM_ELEC"
+		self.manifest = self.get_manifest()
+		self.customer = self.manifest.customers["retail_1"]
+		self.vehicle = self.manifest.vehicles["veh_model3_liam"]
+		self.item_brake1 = "SIM_EST_ITEM_001"
+		self.item_brake2 = "SIM_EST_ITEM_002"
+		self.item_tire = "SIM_EST_ITEM_TIRE"
+		self.item_elec = "SIM_EST_ITEM_ELEC"
+		for code, name, group, frt, rate in (
+			(self.item_brake1, "Brake Pad Front", "Brake", 1.0, 100.0),
+			(self.item_brake2, "Brake Rotor Rear", "Brake", 1.5, 120.0),
+			(self.item_tire, "Tire Mount & Balance", "Tire", 0.5, 50.0),
+			(self.item_elec, "High Voltage Harness Diagnostic", "Electrical", 2.0, 200.0),
+		):
+			self.create_test_item(
+				code,
+				item_name=name,
+				item_group=group,
+				is_stock_item=0,
+				custom_frt=frt,
+				standard_rate=rate,
+			)
 
-	def tearDown(self):
-		super().tearDown()
+	def _set_ism_settings(self, **kwargs):
+		if not frappe.db.exists("DocType", "ISM Settings"):
+			return
+		settings = frappe.get_single("ISM Settings")
+		for key, val in kwargs.items():
+			setattr(settings, key, val)
+		settings.save(ignore_permissions=True)
+		frappe.clear_cache(doctype="ISM Settings")
 
 	def _require_math(self):
 		if estimate_duration is None:
@@ -210,7 +223,7 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier1_f5_single_item_estimate_with_buffer(self):
 		"""F5: get_estimate adds buffer_padding_minutes from ISM Settings."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80, estimation_sigma=0.30)
+		self._set_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80, estimation_sigma=0.30)
 		res = get_estimate(self.item_brake1)  # Brake FRT 1.0 hr = 60m, sigma 0.20 -> P80 pure is 71
 		self.assertIsInstance(res, dict)
 		self.assertEqual(res["p_pure"], 71)
@@ -220,7 +233,7 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier1_f5_multi_item_estimate_with_buffer(self):
 		"""F5: get_total_estimate sums items with F-W and adds buffer padding."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=15)
+		self._set_ism_settings(buffer_padding_minutes=15)
 		res = get_total_estimate([self.item_brake1, self.item_brake2])
 		self.assertIsInstance(res, dict)
 		self.assertEqual(res["buffer_padding"], 15)
@@ -229,7 +242,7 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier1_f5_zero_buffer_setting(self):
 		"""F5: buffer_padding_minutes=0 adds no padding."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=0)
+		self._set_ism_settings(buffer_padding_minutes=0)
 		res = get_estimate(self.item_brake1)
 		p_pure = res["p_pure"] if isinstance(res, dict) else res
 		self.assertEqual(p_pure, 71)
@@ -237,7 +250,7 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier1_f5_max_buffer_setting(self):
 		"""F5: buffer_padding_minutes=30 adds 30 minutes."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=30)
+		self._set_ism_settings(buffer_padding_minutes=30)
 		res = get_estimate(self.item_brake1)
 		total = res["duration_minutes"] if isinstance(res, dict) else res
 		self.assertEqual(total, 71 + 30)
@@ -335,7 +348,7 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier2_f5_missing_item_fallback_frt(self):
 		"""F5 Boundary: Missing Item in get_estimate uses fallback FRT."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80, estimation_sigma=0.30)
+		self._set_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80, estimation_sigma=0.30)
 		res = get_estimate("NON_EXISTENT_PART_XYZ", fallback_frt=45.0, sigma=0.30)
 		# 45 min at 0.30 sigma P80 -> ceil(exp(ln(45) + 0.30*0.8416)) = 58 + 10 buffer = 68
 		self.assertIsInstance(res, dict)
@@ -357,7 +370,7 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier3_fw_sum_with_category_sigmas_and_buffer(self):
 		"""Tier 3: Multi-operation repair across diverse categories with buffer padding."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=15, estimation_percentile=0.85)
+		self._set_ism_settings(buffer_padding_minutes=15, estimation_percentile=0.85)
 		res = get_total_estimate([self.item_brake1, self.item_elec, self.item_tire])
 		self.assertIsInstance(res, dict)
 		self.assertEqual(res["buffer_padding"], 15)
@@ -367,11 +380,11 @@ class TestEstimationMath(ISMTestCase):
 	def test_tier3_dynamic_settings_recalculation(self):
 		"""Tier 3: Mutating ISM Settings percentile & buffer immediately alters calculation."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=5, estimation_percentile=0.50)
+		self._set_ism_settings(buffer_padding_minutes=5, estimation_percentile=0.50)
 		res_p50 = get_estimate(self.item_brake1)
 		dur_p50 = res_p50["duration_minutes"] if isinstance(res_p50, dict) else res_p50
 
-		ensure_ism_settings(buffer_padding_minutes=25, estimation_percentile=0.95)
+		self._set_ism_settings(buffer_padding_minutes=25, estimation_percentile=0.95)
 		res_p95 = get_estimate(self.item_brake1)
 		dur_p95 = res_p95["duration_minutes"] if isinstance(res_p95, dict) else res_p95
 
@@ -392,7 +405,7 @@ class TestEstimationMath(ISMTestCase):
 		Evaluates diversification savings vs naive sum and adds shop standard buffer.
 		"""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=15, estimation_percentile=0.80)
+		self._set_ism_settings(buffer_padding_minutes=15, estimation_percentile=0.80)
 
 		items = [self.item_brake1, self.item_brake2, self.item_elec, self.item_tire]
 		res = get_total_estimate(items)
@@ -412,8 +425,8 @@ class TestEstimationMath(ISMTestCase):
 	def test_estimate_repair_order_with_multiple_services(self):
 		"""estimate_repair_order accurately aggregates active services from Repair Order."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80)
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		self._set_ism_settings(buffer_padding_minutes=10, estimation_percentile=0.80)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 		ro.append("services", {
 			"service_title": "Front Brake Rotor Replacement",
 			"labor_hours": 1.0,
@@ -438,8 +451,8 @@ class TestEstimationMath(ISMTestCase):
 	def test_estimate_repair_order_declined_service_skipped(self):
 		"""estimate_repair_order ignores declined services."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=0, estimation_percentile=0.80)
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		self._set_ism_settings(buffer_padding_minutes=0, estimation_percentile=0.80)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 		ro.append("services", {
 			"service_title": "Standard Brake Service",
 			"labor_hours": 1.0,
@@ -460,8 +473,8 @@ class TestEstimationMath(ISMTestCase):
 	def test_estimate_repair_order_empty_services_fallback(self):
 		"""estimate_repair_order falls back to diagnostic duration when RO has no services."""
 		self._require_service()
-		ensure_ism_settings(default_diagnostic_duration=60, buffer_padding_minutes=10, estimation_percentile=0.80)
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		self._set_ism_settings(default_diagnostic_duration=60, buffer_padding_minutes=10, estimation_percentile=0.80)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 		# Clear services if any
 		ro.set("services", [])
 		ro.save(ignore_permissions=True)
@@ -496,12 +509,12 @@ class TestEstimationMath(ISMTestCase):
 	def test_estimate_repair_order_resolves_sigma_from_parts_json(self):
 		"""estimate_repair_order inspects JSON Repair Order Service.parts for item_group sigma."""
 		self._require_service()
-		ensure_ism_settings(buffer_padding_minutes=0, estimation_percentile=0.80, estimation_sigma=0.30)
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		self._set_ism_settings(buffer_padding_minutes=0, estimation_percentile=0.80, estimation_sigma=0.30)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 		ro.append("services", {
 			"service_title": "Custom Seasonal Swap",
 			"labor_hours": 1.0,
-			"parts": json.dumps([{"item_code": f"{PREFIX}EST_ITEM_TIRE", "qty": 4}]),
+			"parts": json.dumps([{"item_code": self.item_tire, "qty": 4}]),
 			"status": "Approved",
 		})
 		ro.save(ignore_permissions=True)

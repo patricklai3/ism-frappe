@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 import frappe
-from ism.tests.base import ISMTestCase, TEST_PREFIX
+from ism.tests.base import ISMTestCase
 
 
 class TestScheduleEntryType(ISMTestCase):
@@ -35,7 +35,7 @@ class TestScheduleEntryType(ISMTestCase):
 
 	def test_create_custom_schedule_entry_type(self):
 		"""Verify custom Schedule Entry Type creation and uniqueness rule."""
-		type_name = f"{TEST_PREFIX}Custom_Type"
+		type_name = "Sim_Custom_Type"
 		if frappe.db.exists("Schedule Entry Type", type_name):
 			frappe.delete_doc("Schedule Entry Type", type_name, force=True)
 
@@ -44,9 +44,10 @@ class TestScheduleEntryType(ISMTestCase):
 			"type_name": type_name,
 			"requires_repair_order": 0,
 			"color": "#123456",
-			"description": "Test custom schedule entry type",
+			"description": "Custom schedule entry type",
 		})
 		doc.insert()
+		self.track(doc)
 
 		self.assertTrue(frappe.db.exists("Schedule Entry Type", type_name))
 		fetched = frappe.get_doc("Schedule Entry Type", type_name)
@@ -69,7 +70,7 @@ class TestScheduleEntryType(ISMTestCase):
 
 	def test_delete_in_use_schedule_entry_type_blocked(self):
 		"""Verify custom entry type cannot be deleted while referenced by Schedule Entry."""
-		type_name = f"{TEST_PREFIX}InUseType"
+		type_name = "Sim_InUseType"
 		if frappe.db.exists("Schedule Entry Type", type_name):
 			frappe.delete_doc("Schedule Entry Type", type_name, force=True)
 
@@ -78,6 +79,7 @@ class TestScheduleEntryType(ISMTestCase):
 			"type_name": type_name,
 			"requires_repair_order": 0,
 		}).insert()
+		self.track(custom_type)
 
 		se = frappe.get_doc({
 			"doctype": "Schedule Entry",
@@ -112,7 +114,7 @@ class TestScheduleEntryType(ISMTestCase):
 
 	def test_rename_to_standard_schedule_entry_type_blocked(self):
 		"""Verify custom entry types cannot be renamed to adopt a standard type name."""
-		custom_name = f"{TEST_PREFIX}Custom_Rename_Target"
+		custom_name = "Sim_Custom_Rename_Target"
 		if frappe.db.exists("Schedule Entry Type", custom_name):
 			frappe.delete_doc("Schedule Entry Type", custom_name, force=True)
 

@@ -5,15 +5,6 @@ import frappe
 from frappe.utils import add_days, today
 
 from ism.tests.base import ISMTestCase
-from ism.tests.test_fixtures import (
-	setup_all,
-	teardown_transactional,
-	ensure_ism_settings,
-	create_test_schedule_entry,
-	PREFIX,
-	CUSTOMER,
-	VEHICLE_VIN,
-)
 
 try:
 	from ism.api.scheduling import (
@@ -57,31 +48,25 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	- Tier 4: Real-World Scenarios 1–4
 	"""
 
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls.emp_map = setup_all()
-		cls.bay1 = f"{PREFIX}Bay 1"
-		cls.bay2 = f"{PREFIX}Bay 2"
-		cls.tech1_id = cls.emp_map.get("tech_active_1")
-		cls.tech2_id = cls.emp_map.get("tech_active_2")
-
-	@classmethod
-	def tearDownClass(cls):
-		teardown_transactional()
-		super().tearDownClass()
-
 	def setUp(self):
 		super().setUp()
-		ensure_ism_settings(holiday_list=None)
-		self.bay1 = self.__class__.bay1
-		self.bay2 = self.__class__.bay2
-		self.tech1_id = self.__class__.tech1_id
-		self.tech2_id = self.__class__.tech2_id
-		self.emp_map = self.__class__.emp_map
+		self.manifest = self.get_manifest()
+		self.bay1 = self.manifest.bays["main_lift"]
+		self.bay2 = self.manifest.bays["alignment"]
+		self.tech1_id = self.manifest.techs["marcus"]
+		self.tech2_id = self.manifest.techs["elena"]
+		self.customer = self.manifest.customers["retail_1"]
+		self.vehicle = self.manifest.vehicles["veh_model3_liam"]
+		self._set_ism_settings(holiday_list=None)
 
-	def tearDown(self):
-		super().tearDown()
+	def _set_ism_settings(self, **kwargs):
+		if not frappe.db.exists("DocType", "ISM Settings"):
+			return
+		settings = frappe.get_single("ISM Settings")
+		for key, val in kwargs.items():
+			setattr(settings, key, val)
+		settings.save(ignore_permissions=True)
+		frappe.clear_cache(doctype="ISM Settings")
 
 	def _require_doctype(self, dt):
 		if not frappe.db.exists("DocType", dt):
@@ -112,7 +97,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 
 	def test_tier1_f29_ro_checked_in_creation(self):
 		"""F29: Repair Order can be created directly in 'Checked In' stage."""
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN, status="Checked In")
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle, status="Checked In")
 		self.assertEqual(ro.status, "Checked In")
 
 	def test_tier1_f29_ro_statuses_do_not_contain_appointment_states(self):
@@ -146,10 +131,10 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	def test_tier1_f30_schedule_entry_creation_syncs_to_ro_child_table(self):
 		"""F30: Creating a Schedule Entry automatically populates the RO child table."""
 		self._require_doctype("Schedule Entry")
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 
 		target_date = today()
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=target_date,
 			scheduled_time="10:00:00",
@@ -168,9 +153,9 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	def test_tier1_f30_schedule_entry_update_syncs_to_ro_child_table(self):
 		"""F30: Updating a Schedule Entry (bay/status) updates the linked RO child table."""
 		self._require_doctype("Schedule Entry")
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=today(),
 			scheduled_time="11:00:00",
@@ -191,11 +176,11 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	def test_tier1_f31_multiple_schedule_entries_single_ro(self):
 		"""F31: Multiple Schedule Entries can be linked to a single active Repair Order."""
 		self._require_doctype("Schedule Entry")
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 
 		target_date = today()
 		# Initial diagnostic session
-		se1 = create_test_schedule_entry(
+		se1 = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -206,7 +191,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		self.track(se1)
 
 		# Supplemental repair session in afternoon
-		se2 = create_test_schedule_entry(
+		se2 = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=target_date,
 			scheduled_time="13:00:00",
@@ -224,13 +209,13 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	def test_tier1_f31_supplemental_different_bay_permitted(self):
 		"""F31: Supplemental session can book a different specialized bay (e.g. Alignment Rack)."""
 		self._require_doctype("Schedule Entry")
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 
 		target_date = today()
-		se_diag = create_test_schedule_entry(repair_order=ro.name, scheduled_date=target_date, scheduled_time="09:00:00", estimated_duration=60, service_bay=self.bay1)
+		se_diag = self.create_test_schedule_entry(repair_order=ro.name, scheduled_date=target_date, scheduled_time="09:00:00", estimated_duration=60, service_bay=self.bay1)
 		self.track(se_diag)
 
-		se_align = create_test_schedule_entry(repair_order=ro.name, scheduled_date=target_date, scheduled_time="14:00:00", estimated_duration=60, service_bay=self.bay2)
+		se_align = self.create_test_schedule_entry(repair_order=ro.name, scheduled_date=target_date, scheduled_time="14:00:00", estimated_duration=60, service_bay=self.bay2)
 		self.track(se_align)
 
 		self.assertEqual(se_diag.service_bay, self.bay1)
@@ -239,7 +224,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	def test_tier1_f31_supplemental_on_active_ro_retains_status(self):
 		"""F31: Adding supplemental entries does not reset or corrupt active RO state."""
 		self._require_doctype("Schedule Entry")
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
 		try:
 			ro.status = "In Progress"
 			ro.save(ignore_permissions=True)
@@ -249,7 +234,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 			ro.status = "Authorized - In Progress"
 			ro.save(ignore_permissions=True)
 
-		se_supp = create_test_schedule_entry(repair_order=ro.name, scheduled_date=add_days(today(), 1), scheduled_time="09:00:00", estimated_duration=60, service_bay=self.bay1)
+		se_supp = self.create_test_schedule_entry(repair_order=ro.name, scheduled_date=add_days(today(), 1), scheduled_time="09:00:00", estimated_duration=60, service_bay=self.bay1)
 		self.track(se_supp)
 
 		ro.reload()
@@ -263,7 +248,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		self._require_doctype("Schedule Entry")
 
 		target_date = today()
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			scheduled_date=target_date,
 			scheduled_time="10:00:00",
 			estimated_duration=60,
@@ -286,8 +271,8 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 	def test_tier2_ro_schedule_entry_deletion_syncs_child_table(self):
 		"""Tier 2: Deleting a Schedule Entry automatically removes it from RO child table."""
 		self._require_doctype("Schedule Entry")
-		ro = self.create_test_repair_order(customer=CUSTOMER, vehicle=VEHICLE_VIN)
-		se = create_test_schedule_entry(
+		ro = self.create_test_repair_order(customer=self.customer, vehicle=self.vehicle)
+		se = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=today(),
 			scheduled_time="09:00:00",
@@ -343,14 +328,14 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 
 		# Step 1: Create Repair Order
 		ro = self.create_test_repair_order(
-			customer=CUSTOMER,
-			vehicle=VEHICLE_VIN,
+			customer=self.customer,
+			vehicle=self.vehicle,
 			status="Checked In",
 			customer_concern="Vibration at 65 mph",
 		)
 
 		# Step 2: Book Initial Appointment
-		se_initial = create_test_schedule_entry(
+		se_initial = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=today(),
 			scheduled_time="08:30:00",
@@ -365,7 +350,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		self.assertEqual(ro.schedule_entries[0].schedule_entry, se_initial.name)
 
 		# Step 3: Supplemental Work Session (Parts Arrived)
-		se_supplemental = create_test_schedule_entry(
+		se_supplemental = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=today(),
 			scheduled_time="14:00:00",
@@ -409,7 +394,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 			"from_date": target_date,
 			"to_date": target_date,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -430,8 +415,8 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		if not self.tech1_id:
 			self.skipTest("Tech 1 not available")
 
-		ro = self.create_test_repair_order(CUSTOMER, VEHICLE_VIN)
-		confirmed_se = create_test_schedule_entry(
+		ro = self.create_test_repair_order(self.customer, self.vehicle)
+		confirmed_se = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=today(),
 			scheduled_time="10:00:00",
@@ -446,7 +431,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		span_start = today()
 		query_start = add_days(today(), 2)
 		query_end = add_days(today(), 3)
-		span_se = create_test_schedule_entry(
+		span_se = self.create_test_schedule_entry(
 			repair_order=ro.name,
 			scheduled_date=span_start,
 			scheduled_time="08:00:00",
@@ -477,7 +462,7 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		self.assertIn(confirmed_se.name, {e["name"] for e in list_events})
 
 		for bad_filter in (
-			{"customer": CUSTOMER},
+			{"customer": self.customer},
 			[["Schedule Entry", "owner", "=", "Administrator"]],
 			[["Schedule Entry", "status", "like", "%"]],
 			{"status": "BogusStatus"},
