@@ -10,6 +10,8 @@ from frappe.utils import add_days, now_datetime
 from frappe.website.serve import get_response_content
 
 from ism.api.approval import (
+	_PORTAL_RATE_LIMITS,
+	clear_portal_rate_limits,
 	get_or_create_approval_token,
 	get_public_quote_approval,
 	send_approval_request,
@@ -24,6 +26,7 @@ from ism.api.inspection import (
 	record_check_in_inspection,
 )
 from ism.api.sms import _is_valid_sms_webhook_url, dispatch_sms, get_sms_unconfigured_reason
+from ism.ism.doctype.repair_order.fulfillment import _process_stock_update_event
 from ism.templates.pages.quote_approval import get_context as get_portal_context
 from ism.tests.base import ISMTestCase, TEST_PREFIX
 
@@ -49,12 +52,14 @@ class TestApprovalAndInspection(ISMTestCase):
 	def setUp(self):
 		super().setUp()
 		frappe.set_user("Administrator")
+		clear_portal_rate_limits()
 		settings = frappe.get_single("ISM Settings")
 		self._orig_settings = {field: getattr(settings, field, None) for field in _SETTINGS_FIELDS}
 		self._orig_sms_api_key = settings.get_password("sms_gateway_api_key", raise_exception=False) if settings.sms_gateway_api_key else ""
 
 	def tearDown(self):
 		try:
+			clear_portal_rate_limits()
 			settings = frappe.get_single("ISM Settings")
 			for field, value in self._orig_settings.items():
 				settings.set(field, value)
@@ -647,3 +652,253 @@ class TestApprovalAndInspection(ISMTestCase):
 			self.assertTrue(ok_res["success"])
 			self.assertEqual(ok_res["message_id"], "loop_1")
 			post_mock.assert_called_once()
+
+	def test_portal_rate_limiting_per_ip_and_per_token(self):
+		"""Verify per-IP and per-token rate limits block brute-force and replay abuse on guest portal."""
+		read_token_limit = _PORTAL_RATE_LIMITS["read"]["token"]
+		read_ip_limit = _PORTAL_RATE_LIMITS["read"]["ip"]
+		submit_token_limit = _PORTAL_RATE_LIMITS["submit"]["token"]
+		submit_ip_limit = _PORTAL_RATE_LIMITS["submit"]["ip"]
+
+		# 1. Read endpoint: per-token limit
+		with patch.object(frappe.local, "request_ip", "198.51.100.10"):
+			for _idx in range(read_token_limit):
+				res = get_public_quote_approval("nonexistent-token-1")
+				self.assertFalse(res["valid"])
+			with self.assertRaises(frappe.TooManyRequestsError):
+				get_public_quote_approval("nonexistent-token-1")
+
+		# 2. Read endpoint: per-IP limit across distinct tokens
+		clear_portal_rate_limits()
+		with patch.object(frappe.local, "request_ip", "198.51.100.11"):
+			for idx in range(read_ip_limit):
+				res = get_public_quote_approval(f"nonexistent-token-{idx}")
+				self.assertFalse(res["valid"])
+			with self.assertRaises(frappe.TooManyRequestsError):
+				get_public_quote_approval("nonexistent-token-overflow")
+
+		# 3. Submit endpoint: per-token limit
+		clear_portal_rate_limits()
+		for _idx in range(submit_token_limit):
+			with self.assertRaises(frappe.ValidationError):
+				submit_customer_approval(
+					token="bad-submit-token",
+					approvals={"Job": "Approved"},
+					signer_name="",
+					ip_address="198.51.100.20",
+				)
+		with self.assertRaises(frappe.TooManyRequestsError):
+			submit_customer_approval(
+				token="bad-submit-token",
+				approvals={"Job": "Approved"},
+				signer_name="",
+				ip_address="198.51.100.20",
+			)
+
+		# 4. Submit endpoint: per-IP limit across distinct tokens
+		clear_portal_rate_limits()
+		for idx in range(submit_ip_limit):
+			with self.assertRaises(frappe.ValidationError):
+				submit_customer_approval(
+					token=f"bad-submit-token-{idx}",
+					approvals={"Job": "Approved"},
+					signer_name="",
+					ip_address="198.51.100.21",
+				)
+		with self.assertRaises(frappe.TooManyRequestsError):
+			submit_customer_approval(
+				token="bad-submit-token-overflow",
+				approvals={"Job": "Approved"},
+				signer_name="",
+				ip_address="198.51.100.21",
+			)
+
+	def test_portal_approval_emits_realtime_and_action_item_with_dedup(self):
+		"""Verify portal approval/decline emits ism_ro_approval_updated and dedups Shop Action Item."""
+		_, _, ro = self._make_ro_with_services(
+			services=[
+				{
+					"service_title": "Brake Pad Service",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 150.0,
+					"labor_amount": 150.0,
+					"parts_total": 0.0,
+					"total_amount": 150.0,
+				},
+				{
+					"service_title": "Cabin Air Filter",
+					"status": "Pending Approval",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+					"labor_amount": 50.0,
+					"parts_total": 0.0,
+					"total_amount": 50.0,
+				},
+			]
+		)
+		token, _ = get_or_create_approval_token(ro.name)
+		ro.reload()
+		svc1, svc2 = ro.services[0].name, ro.services[1].name
+
+		frappe.set_user("Guest")
+		try:
+			with patch("frappe.publish_realtime") as mock_realtime:
+				res1 = submit_customer_approval(
+					token=token,
+					approvals={svc1: "Approved"},
+					signer_name="Alex Driver",
+					signature_data=TINY_PNG_DATA_URI,
+					ip_address="203.0.113.5",
+				)
+				self.assertTrue(res1["success"])
+				approval_calls = [c for c in mock_realtime.call_args_list if c.args and c.args[0] == "ism_ro_approval_updated"]
+				self.assertEqual(len(approval_calls), 1)
+				rt_payload = approval_calls[0].args[1]
+				self.assertEqual(rt_payload["repair_order"], ro.name)
+				self.assertTrue(approval_calls[0].kwargs.get("after_commit"))
+
+			items = frappe.get_all(
+				"Shop Action Item",
+				filters={"reference_doctype": "Repair Order", "reference_name": ro.name, "category": "General"},
+				fields=["name", "title", "priority", "status"],
+			)
+			self.assertEqual(len(items), 1)
+			self.track("Shop Action Item", items[0].name)
+			self.assertEqual(items[0].priority, "Medium")
+			self.assertEqual(items[0].status, "Open")
+
+			# Second submission (declining remaining service) updates existing open item instead of duplicating
+			with patch("frappe.publish_realtime") as mock_realtime:
+				res2 = submit_customer_approval(
+					token=token,
+					approvals={svc2: "Declined"},
+					signer_name="Alex Driver",
+					ip_address="203.0.113.5",
+				)
+				self.assertTrue(res2["success"])
+				approval_calls = [c for c in mock_realtime.call_args_list if c.args and c.args[0] == "ism_ro_approval_updated"]
+				self.assertEqual(len(approval_calls), 1)
+
+			items_after = frappe.get_all(
+				"Shop Action Item",
+				filters={"reference_doctype": "Repair Order", "reference_name": ro.name, "category": "General"},
+				fields=["name", "title", "priority", "status"],
+			)
+			self.assertEqual(len(items_after), 1)
+			self.assertEqual(items_after[0].name, items[0].name)
+			self.assertEqual(items_after[0].priority, "High")
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_stock_update_event_emits_realtime_and_action_item(self):
+		"""Verify stock arrival unlocking a Waiting on Parts RO emits realtime and deduped Shop Action Item."""
+		_, _, ro = self._make_ro_with_services(
+			services=[
+				{
+					"service_title": "Rotor Replacement",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 150.0,
+					"labor_amount": 150.0,
+					"parts_total": 0.0,
+					"total_amount": 150.0,
+				}
+			],
+			status="Waiting on Parts",
+		)
+		frappe.db.set_value("Repair Order", ro.name, "status", "Waiting on Parts", update_modified=False)
+
+		with (
+			patch("ism.ism.doctype.repair_order.repair_order.RepairOrder._check_parts_stock_availability", return_value=(True, [])),
+			patch("frappe.publish_realtime") as mock_realtime,
+		):
+			_process_stock_update_event()
+
+		ro.reload()
+		self.assertEqual(ro.status, "Authorized - In Progress")
+		parts_calls = [c for c in mock_realtime.call_args_list if c.args and c.args[0] == "ism_ro_parts_ready"]
+		self.assertEqual(len(parts_calls), 1)
+		self.assertEqual(parts_calls[0].args[1]["repair_order"], ro.name)
+
+		items = frappe.get_all(
+			"Shop Action Item",
+			filters={"reference_doctype": "Repair Order", "reference_name": ro.name, "category": "Inventory / Parts"},
+			fields=["name", "title", "priority", "status"],
+		)
+		self.assertEqual(len(items), 1)
+		self.track("Shop Action Item", items[0].name)
+		self.assertEqual(items[0].priority, "High")
+
+		# Re-running stock update when RO returns to Waiting on Parts updates existing open item
+		frappe.db.set_value("Repair Order", ro.name, "status", "Waiting on Parts", update_modified=False)
+		with (
+			patch("ism.ism.doctype.repair_order.repair_order.RepairOrder._check_parts_stock_availability", return_value=(True, [])),
+			patch("frappe.publish_realtime"),
+		):
+			_process_stock_update_event()
+
+		items_after = frappe.get_all(
+			"Shop Action Item",
+			filters={"reference_doctype": "Repair Order", "reference_name": ro.name, "category": "Inventory / Parts"},
+			pluck="name",
+		)
+		self.assertEqual(len(items_after), 1)
+
+	def test_ready_for_pickup_sms_on_work_completed(self):
+		"""Verify Ready for Pickup SMS dispatches on transition to Work Completed only when enabled."""
+		_, _, ro = self._make_ro_with_services(
+			services=[
+				{
+					"service_title": "Tire Rotation",
+					"status": "Approved",
+					"labor_hours": 0.5,
+					"labor_rate": 120.0,
+					"labor_amount": 60.0,
+					"parts_total": 0.0,
+					"total_amount": 60.0,
+				}
+			],
+			status="Authorized - In Progress",
+		)
+		ro.approval_status = "Approved"
+		ro.vehicle_location = "In Bay / Being Serviced"
+		ro.save(ignore_permissions=True)
+
+		# 1. Disabled by default: no SMS sent on transition to Work Completed
+		with patch("ism.ism.doctype.repair_order.fulfillment.dispatch_sms") as mock_sms:
+			ro.toggle_service_completion(service_row_id=ro.services[0].name, is_completed=1)
+			ro.park_vehicle()
+			ro.reload()
+			self.assertEqual(ro.status, "Work Completed")
+			mock_sms.assert_not_called()
+
+		# 2. Enabled in ISM Settings: SMS sent when transitioning into Work Completed
+		ro.toggle_service_completion(service_row_id=ro.services[0].name, is_completed=0)
+		frappe.db.set_value(
+			"Repair Order",
+			ro.name,
+			{"status": "Authorized - In Progress", "vehicle_location": "Completed / Parked in Lot"},
+			update_modified=False,
+		)
+		ro.reload()
+
+		orig_get_single = frappe.get_single
+
+		def _fake_get_single(doctype):
+			if doctype == "ISM Settings":
+				return SimpleNamespace(enable_ready_for_pickup_sms=1)
+			return orig_get_single(doctype)
+
+		with (
+			patch("ism.ism.doctype.repair_order.fulfillment.frappe.get_single", side_effect=_fake_get_single),
+			patch("ism.ism.doctype.repair_order.fulfillment.dispatch_sms", return_value={"success": True}) as mock_sms,
+		):
+			ro.toggle_service_completion(service_row_id=ro.services[0].name, is_completed=1)
+			ro.reload()
+			self.assertEqual(ro.status, "Work Completed")
+			mock_sms.assert_called_once()
+			phone_arg, msg_arg = mock_sms.call_args.args
+			self.assertEqual(phone_arg, "+14165550199")
+			self.assertIn(ro.name, msg_arg)
+			self.assertIn("ready for pickup", msg_arg.lower())

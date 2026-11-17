@@ -3,6 +3,7 @@
 
 import base64
 import binascii
+import hashlib
 import json
 
 import frappe
@@ -17,6 +18,120 @@ _ALLOWED_SIGNATURE_PREFIXES = (
 	"data:image/jpeg;base64,",
 	"data:image/webp;base64,",
 )
+_PORTAL_RATE_LIMIT_PREFIX = "ism:portal_rl"
+_PORTAL_RATE_LIMIT_WINDOW_SEC = 60
+_PORTAL_RATE_LIMITS = {
+	"read": {"ip": 30, "token": 30},
+	"submit": {"ip": 15, "token": 10},
+}
+
+
+def _get_portal_client_ip(ip_override: str | None = None) -> str:
+	"""Resolve client IP from request context (ignoring untrusted overrides when HTTP request is active)."""
+	if getattr(frappe.local, "request", None):
+		raw_ip = (
+			getattr(frappe.local, "request_ip", None)
+			or frappe.get_request_header("X-Forwarded-For")
+			or getattr(frappe.local.request, "remote_addr", None)
+		)
+	else:
+		raw_ip = (
+			ip_override.strip()
+			if isinstance(ip_override, str) and ip_override.strip()
+			else getattr(frappe.local, "request_ip", None)
+		)
+	if isinstance(raw_ip, str) and raw_ip.strip():
+		return raw_ip.split(",")[0].strip()
+	return "unknown"
+
+
+def _increment_rate_limit_key(cache_key: str, limit: int, window_sec: int = _PORTAL_RATE_LIMIT_WINDOW_SEC) -> None:
+	"""Increment a Redis-backed rate-limit counter and throw TooManyRequestsError when exceeded."""
+	cache = frappe.cache()
+	current = cint(cache.get_value(cache_key) or 0) + 1
+	cache.set_value(cache_key, current, expires_in_sec=window_sec)
+	if current > limit:
+		frappe.throw(
+			_("Too many requests. Please wait a moment and try again."),
+			frappe.TooManyRequestsError,
+		)
+
+
+def _enforce_portal_rate_limit(endpoint: str, token: str | None = None, ip_override: str | None = None) -> None:
+	"""Enforce per-IP and per-token rate limits on public guest approval endpoints."""
+	limits = _PORTAL_RATE_LIMITS[endpoint]
+	client_ip = _get_portal_client_ip(ip_override=ip_override)
+	_increment_rate_limit_key(f"{_PORTAL_RATE_LIMIT_PREFIX}:{endpoint}:ip:{client_ip}", limits["ip"])
+	if isinstance(token, str) and token.strip():
+		token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()[:24]
+		_increment_rate_limit_key(f"{_PORTAL_RATE_LIMIT_PREFIX}:{endpoint}:tok:{token_hash}", limits["token"])
+
+
+def clear_portal_rate_limits() -> None:
+	"""Clear guest portal rate-limit keys from cache (for hermetic test runs)."""
+	cache = frappe.cache()
+	if hasattr(cache, "delete_keys"):
+		cache.delete_keys(f"{_PORTAL_RATE_LIMIT_PREFIX}:*")
+
+
+def _notify_shop_floor_approval(doc, normalized_approvals: dict[str, str], signer_name: str) -> None:
+	"""Emit realtime event and create/update a Shop Action Item for advisor visibility."""
+	frappe.publish_realtime(
+		"ism_ro_approval_updated",
+		{
+			"repair_order": doc.name,
+			"status": doc.status,
+			"approval_status": doc.approval_status,
+			"authorized_by": doc.authorized_by,
+			"vehicle": doc.vehicle,
+			"customer": doc.customer,
+		},
+		after_commit=True,
+	)
+
+	decisions = set(normalized_approvals.values())
+	has_declined = "Declined" in decisions
+	has_approved = "Approved" in decisions
+	if doc.approval_status == "Declined" or (has_declined and not has_approved):
+		title = _("Customer Declined Estimate for {0}").format(doc.name)
+	elif doc.approval_status == "Partially Approved" or (has_approved and has_declined):
+		title = _("Customer Partially Approved Estimate for {0}").format(doc.name)
+	else:
+		title = _("Customer Approved Estimate for {0}").format(doc.name)
+
+	priority = "High" if has_declined else "Medium"
+	details = _(
+		"Customer approval submitted by {0} via portal. Approval Status: {1}. Order Status: {2}."
+	).format(signer_name.strip(), doc.approval_status, doc.status)
+
+	existing = frappe.get_all(
+		"Shop Action Item",
+		filters={
+			"reference_doctype": "Repair Order",
+			"reference_name": doc.name,
+			"category": "General",
+			"status": ["in", ["Open", "In Progress"]],
+		},
+		order_by="modified desc",
+		limit_page_length=1,
+		pluck="name",
+	)
+	if existing:
+		item_doc = frappe.get_doc("Shop Action Item", existing[0])
+		item_doc.title = title
+		item_doc.priority = priority
+		item_doc.details = details
+		item_doc.save(ignore_permissions=True)
+	else:
+		item_doc = frappe.new_doc("Shop Action Item")
+		item_doc.title = title
+		item_doc.category = "General"
+		item_doc.priority = priority
+		item_doc.status = "Open"
+		item_doc.reference_doctype = "Repair Order"
+		item_doc.reference_name = doc.name
+		item_doc.details = details
+		item_doc.insert(ignore_permissions=True)
 
 
 def _ensure_approval_token_for_doc(doc) -> tuple[str, str]:
@@ -83,6 +198,8 @@ def get_public_quote_approval(token: str) -> dict:
 	"""Fetch Repair Order details for the public guest approval portal via secure token."""
 	if token is not None and not isinstance(token, str):
 		frappe.throw(_("Invalid approval token format."))
+
+	_enforce_portal_rate_limit("read", token=token)
 
 	if not token or not token.strip():
 		return {"valid": False, "error": _("Invalid or missing approval token.")}
@@ -195,6 +312,11 @@ def submit_customer_approval(
 ) -> dict:
 	"""Public guest endpoint to record digital signature and per-service decisions."""
 	kwargs.pop("cmd", None)
+	_enforce_portal_rate_limit(
+		"submit",
+		token=token if isinstance(token, str) else None,
+		ip_override=ip_address if isinstance(ip_address, str) else None,
+	)
 	if not token or not isinstance(token, str) or not token.strip():
 		frappe.throw(_("Missing or invalid approval token."))
 
@@ -251,6 +373,8 @@ def submit_customer_approval(
 		)
 	finally:
 		frappe.flags._ism_public_approval_portal = prev_portal_flag
+
+	_notify_shop_floor_approval(doc, normalized_approvals, signer_name)
 
 	return {
 		"success": True,
