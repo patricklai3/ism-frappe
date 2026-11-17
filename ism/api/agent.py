@@ -64,6 +64,7 @@ from ism.api.agent_quotes import (
 	create_quote as _create_quote_impl,
 	duplicate_service_for_opposite_side as _duplicate_service_for_opposite_side_impl,
 	get_deferred_services as _get_deferred_services_impl,
+	record_ro_deposit as _record_ro_deposit_impl,
 	send_quote_for_approval as _send_quote_for_approval_impl,
 	toggle_service_completion as _toggle_service_completion_impl,
 	update_job_status as _update_job_status_impl,
@@ -157,6 +158,7 @@ __all__ = [
 	"now_datetime",
 	"receive_purchase_order",
 	"record_check_in_inspection",
+	"record_ro_deposit",
 	"reschedule_appointment",
 	"resolve_shop_action_item",
 	"search_vehicles",
@@ -207,7 +209,11 @@ def amend_quote(
 	repair_order: str,
 	add_services: Optional[Union[List[Any], str]] = None,
 	remove_service_indices: Optional[Union[List[int], str]] = None,
+	update_services: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
+	discount_amount: Optional[Union[float, int, str]] = None,
+	shop_supplies_amount: Optional[Union[float, int, str]] = None,
+	environmental_fee_amount: Optional[Union[float, int, str]] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Safely amend lines on an unapproved Repair Order in Draft Estimate state."""
@@ -215,7 +221,11 @@ def amend_quote(
 		repair_order=repair_order,
 		add_services=add_services,
 		remove_service_indices=remove_service_indices,
+		update_services=update_services,
 		notes=notes,
+		discount_amount=discount_amount,
+		shop_supplies_amount=shop_supplies_amount,
+		environmental_fee_amount=environmental_fee_amount,
 		include_summary=include_summary,
 	)
 
@@ -547,11 +557,30 @@ def create_purchase_invoice(
 
 
 @frappe.whitelist()
+def record_ro_deposit(
+	repair_order: str,
+	amount: Union[float, int, str],
+	payment_method: str = "Debit / Interac",
+	reference_no: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Record a customer deposit payment against a Repair Order."""
+	return _record_ro_deposit_impl(
+		repair_order=repair_order,
+		amount=amount,
+		payment_method=payment_method,
+		reference_no=reference_no,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
 def checkout_repair_order(
 	repair_order: str,
 	payment_method: Optional[str] = None,
 	paid_amount: Optional[float] = None,
 	odometer_out: Optional[int] = None,
+	payments: Optional[Union[List[Any], str]] = None,
 	confirm: Any = False,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
@@ -561,6 +590,7 @@ def checkout_repair_order(
 		payment_method=payment_method,
 		paid_amount=paid_amount,
 		odometer_out=odometer_out,
+		payments=payments,
 		confirm=confirm,
 		include_summary=include_summary,
 	)

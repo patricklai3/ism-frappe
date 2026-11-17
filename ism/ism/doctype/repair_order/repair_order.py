@@ -13,7 +13,10 @@ from ism.ism.doctype.repair_order.authorization import (
 	sync_approval_status_to_services,
 	validate_authorization_guards,
 )
-from ism.ism.doctype.repair_order.billing import process_ro_payment_and_release
+from ism.ism.doctype.repair_order.billing import (
+	process_ro_payment_and_release,
+	record_ro_deposit,
+)
 from ism.ism.doctype.repair_order.fulfillment import (
 	check_ro_parts_stock_availability,
 	complete_linked_schedule_entries,
@@ -325,11 +328,23 @@ class RepairOrder(Document):
 		)
 
 	@frappe.whitelist()
+	def record_deposit(self, amount, payment_method="Debit / Interac", reference_no=None, **kwargs):
+		"""Record an upfront customer deposit Payment Entry against this Repair Order."""
+		return record_ro_deposit(
+			self,
+			amount=amount,
+			payment_method=payment_method,
+			reference_no=reference_no,
+			**kwargs,
+		)
+
+	@frappe.whitelist()
 	def process_payment_and_release(
 		self,
 		payment_method="Debit / Interac",
 		paid_amount=None,
 		odometer_out=None,
+		payments=None,
 		**kwargs,
 	):
 		"""Finalize billing audit, create Sales Invoice and Payment Entry, and release vehicle."""
@@ -338,6 +353,7 @@ class RepairOrder(Document):
 			payment_method=payment_method,
 			paid_amount=paid_amount,
 			odometer_out=odometer_out,
+			payments=payments,
 			**kwargs,
 		)
 

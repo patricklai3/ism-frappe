@@ -42,6 +42,7 @@ from ism.api.agent import (
 	list_shop_action_items,
 	receive_purchase_order,
 	record_check_in_inspection,
+	record_ro_deposit,
 	reschedule_appointment,
 	resolve_shop_action_item,
 	search_vehicles,
@@ -1928,3 +1929,169 @@ class TestAgentFacade(ISMTestCase):
 		self.assertTrue(cleared["success"])
 		self.assertFalse(cleared["data"].get("service_bay"))
 		self.assertFalse(frappe.db.get_value("Schedule Entry", se_name, "service_bay"))
+
+	def test_amend_quote_in_place_update_services_and_fees(self):
+		"""Verify amend_quote supports in-place row updates, order fees/discounts, and row guardrails."""
+		res = create_quote(
+			customer_name=f"{PREFIX}Amend InPlace Cust",
+			vehicle_identifier="5YJ3E1EBXNF999111",
+			odometer_in=42000,
+			services=[
+				{"service_title": "Brake Fluid Flush", "labor_hours": 1.0, "labor_rate": 140.0},
+				{"service_title": "Cabin Filter", "labor_hours": 0.5, "labor_rate": 140.0},
+			],
+		)
+		ro_name = self._track_quote_ro(res)
+		row_1_name = res["data"]["services"][0]["name"]
+		row_2_name = res["data"]["services"][1]["name"]
+
+		# Update row 1 by service_row_id and row 2 by 1-based idx, plus order-level fees/discount
+		upd = amend_quote(
+			repair_order=ro_name,
+			update_services=[
+				{
+					"service_row_id": row_1_name,
+					"job_title": "Brake Fluid Flush (DOT 4)",
+					"labor_hours": 1.5,
+					"labor_rate": 150.0,
+					"discount_amount": 15.0,
+					"notes": "Customer requested synthetic DOT 4",
+				},
+				{
+					"idx": 2,
+					"labor_hours": 0.75,
+				},
+			],
+			discount_amount=20.0,
+			shop_supplies_amount=12.5,
+			environmental_fee_amount=4.0,
+		)
+		self.assertTrue(upd["success"])
+		ro = frappe.get_doc("Repair Order", ro_name)
+		self.assertEqual(ro.services[0].name, row_1_name)
+		self.assertEqual(ro.services[0].service_title, "Brake Fluid Flush (DOT 4)")
+		self.assertEqual(ro.services[0].labor_hours, 1.5)
+		self.assertEqual(ro.services[0].labor_rate, 150.0)
+		self.assertEqual(ro.services[1].name, row_2_name)
+		self.assertEqual(ro.services[1].labor_hours, 0.75)
+
+		# Guardrails: missing selector, ambiguous selector, out-of-range idx, negative discount
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=[{"labor_hours": 2.0}])
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=[{"service_row_id": row_1_name, "idx": 1, "labor_hours": 2.0}])
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=[{"idx": 99, "labor_hours": 2.0}])
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, discount_amount=-5.0)
+
+		# Guardrail: reject in-place edit on row with approval_status == "Approved" or status == "Approved"
+		ro_approved_row = frappe.get_doc("Repair Order", ro_name)
+		ro_approved_row.services[0].approval_status = "Approved"
+		with patch("ism.api.agent_quotes._get_ro_doc", return_value=ro_approved_row):
+			with self.assertRaises(frappe.ValidationError):
+				amend_quote(repair_order=ro_name, update_services=[{"service_row_id": row_1_name, "labor_hours": 3.0}])
+
+		# Also test row.status == "Approved" on Partially Approved RO (row 2 unapproved can be updated)
+		frappe.db.set_value("Repair Order Service", row_1_name, "status", "Approved")
+		frappe.db.set_value("Repair Order", ro_name, "approval_status", "Partially Approved")
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=[{"service_row_id": row_1_name, "labor_hours": 3.0}])
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, remove_service_indices=[1])
+		part_upd = amend_quote(
+			repair_order=ro_name,
+			update_services=[{"service_row_id": row_2_name, "labor_hours": 1.25}],
+		)
+		self.assertTrue(part_upd["success"])
+		self.assertEqual(frappe.get_doc("Repair Order", ro_name).services[1].labor_hours, 1.25)
+
+	def test_record_ro_deposit_facade_and_validation(self):
+		"""Verify record_ro_deposit validates inputs, delegates to RepairOrder.record_deposit, and returns envelope."""
+		res = create_quote(
+			customer_name=f"{PREFIX}Deposit Cust",
+			vehicle_identifier="5YJ3E1EBXNF999112",
+			odometer_in=43000,
+			services=[{"service_title": "Battery Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
+		)
+		ro_name = self._track_quote_ro(res)
+
+		with self.assertRaises(frappe.ValidationError):
+			record_ro_deposit(repair_order=ro_name, amount=-10)
+		with self.assertRaises(frappe.ValidationError):
+			record_ro_deposit(repair_order=ro_name, amount=0)
+
+		with patch(
+			"ism.ism.doctype.repair_order.repair_order.RepairOrder.record_deposit",
+			create=True,
+			return_value={"payment_entry": "ACC-PAY-TEST-001", "deposit_amount": 100.0},
+		) as mock_dep:
+			dep_res = record_ro_deposit(
+				repair_order=ro_name,
+				amount=100.0,
+				payment_method="Visa",
+				reference_no="AUTH-123",
+				include_summary=True,
+			)
+		mock_dep.assert_called_once_with(amount=100.0, payment_method="Visa", reference_no="AUTH-123")
+		self.assertTrue(dep_res["success"])
+		self.assertEqual(dep_res["data"]["repair_order"], ro_name)
+		self.assertEqual(dep_res["data"]["amount"], 100.0)
+		self.assertEqual(dep_res["data"]["deposit_amount"], 100.0)
+		self.assertEqual(dep_res["data"]["payment_method"], "Visa")
+		self.assertEqual(dep_res["data"]["reference_no"], "AUTH-123")
+		self.assertEqual(dep_res["data"]["payment_entry"], "ACC-PAY-TEST-001")
+		self.assertIn("summary_card", dep_res)
+
+	def test_checkout_repair_order_split_payments_facade(self):
+		"""Verify checkout_repair_order validates and forwards split-tender payments."""
+		res = create_quote(
+			customer_name=f"{PREFIX}Split Checkout Cust",
+			vehicle_identifier="5YJ3E1EBXNF999113",
+			odometer_in=44000,
+			services=[{"service_title": "Tire Rotation", "labor_hours": 0.5, "labor_rate": 140.0}],
+		)
+		ro_name = self._track_quote_ro(res)
+
+		with self.assertRaises(frappe.ValidationError):
+			checkout_repair_order(repair_order=ro_name, payments=[], odometer_out=44005, confirm=True)
+		with self.assertRaises(frappe.ValidationError):
+			checkout_repair_order(
+				repair_order=ro_name,
+				payments=[{"payment_method": "Visa", "amount": -50}],
+				odometer_out=44005,
+				confirm=True,
+			)
+
+		tenders = [
+			{"payment_method": "Visa", "amount": 50.0, "reference_no": "V-10"},
+			{"payment_method": "Cash", "amount": 29.10},
+		]
+		with patch(
+			"ism.ism.doctype.repair_order.repair_order.RepairOrder.process_payment_and_release",
+			return_value={
+				"payment_entry": "ACC-PAY-SPLIT-1",
+				"payment_entries": ["ACC-PAY-SPLIT-1", "ACC-PAY-SPLIT-2"],
+				"deposit_allocated": 25.0,
+			},
+		) as mock_rel:
+			chk_res = checkout_repair_order(
+				repair_order=ro_name,
+				payments=json.dumps(tenders),
+				odometer_out=44005,
+				confirm=True,
+			)
+		self.assertTrue(chk_res["success"])
+		self.assertEqual(chk_res["data"]["payment_entry"], "ACC-PAY-SPLIT-1")
+		self.assertEqual(chk_res["data"]["payment_entries"], ["ACC-PAY-SPLIT-1", "ACC-PAY-SPLIT-2"])
+		self.assertEqual(chk_res["data"]["deposit_allocated"], 25.0)
+		mock_rel.assert_called_once()
+		call_kwargs = mock_rel.call_args.kwargs
+		self.assertEqual(call_kwargs["odometer_out"], 44005)
+		self.assertEqual(
+			call_kwargs["payments"],
+			[
+				{"payment_method": "Visa", "amount": 50.0, "reference_no": "V-10"},
+				{"payment_method": "Cash", "amount": 29.1},
+			],
+		)

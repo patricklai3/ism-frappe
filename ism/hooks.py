@@ -163,6 +163,13 @@ doc_events = {
 	"Stock Reconciliation": {
 		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
 	},
+	"Sales Invoice": {
+		"on_cancel": "ism.ism.doctype.repair_order.billing.on_sales_invoice_cancel",
+	},
+	"Payment Entry": {
+		"on_submit": "ism.ism.doctype.repair_order.billing.on_payment_entry_submit",
+		"on_cancel": "ism.ism.doctype.repair_order.billing.on_payment_entry_cancel",
+	},
 }
 
 # Scheduled Tasks
