@@ -5,17 +5,23 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import random
 from typing import Any, Optional
 
 import frappe
 from frappe.core.doctype.user.user import generate_keys
+from frappe.utils import flt
 
-from ism.testing.builder import SimContext, seed_historical_telemetry
+from ism.testing.builder import SimContext, _normalize_anchor_date, seed_historical_telemetry
 from ism.testing.catalog import (
 	CANONICAL_COMPANY,
+	CANONICAL_MAIN_WAREHOUSE,
 	CATALOG_SEED,
+	_PART_SPECS,
 	get_master_manifest,
 	seed_catalog_manifest,
+	seed_inventory_and_parts,
 )
 from ism.testing.manifest import SimManifest
 
@@ -51,6 +57,100 @@ def _ensure_layer1_manifest(anchor_date: Optional[str] = None, force_seed: bool 
 	manifest = get_master_manifest(seed=CATALOG_SEED, anchor_date=anchor_date)
 	_ensure_canonical_bay_states(manifest)
 	return manifest
+
+
+def _cancel_and_delete_doc(doctype: str, name: str) -> None:
+	"""Cancel (if submitted) and forcefully delete a Layer 3 document."""
+	if not frappe.db.exists(doctype, name):
+		return
+	doc = frappe.get_doc(doctype, name)
+	if getattr(doc, "docstatus", 0) == 1:
+		doc.cancel()
+	frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+
+
+def _find_preserved_historical_ros(anchor_date: str, max_count: int = 30) -> set[str]:
+	"""Return up to `max_count` closed historical telemetry ROs in T-60d..T-1d to preserve."""
+	anchor_dt = _normalize_anchor_date(anchor_date)
+	start_str = (anchor_dt - _dt.timedelta(days=60)).isoformat()
+	end_str = (anchor_dt - _dt.timedelta(days=1)).isoformat()
+	candidates = frappe.get_all(
+		"Repair Order",
+		filters={
+			"company": CANONICAL_COMPANY,
+			"status": "Closed / Released",
+			"posting_date": ["between", [start_str, end_str]],
+			"sales_invoice": ["is", "not set"],
+		},
+		order_by="name asc",
+		pluck="name",
+		limit=int(max_count),
+	)
+	return set(candidates)
+
+
+def _resync_opening_inventory_if_drifted(manifest: SimManifest) -> None:
+	"""Reconcile Main Shop Stores Bin quantities back to canonical Layer 1 bands if drifted."""
+	main_wh = manifest.warehouses.get("main_stores") or CANONICAL_MAIN_WAREHOUSE
+	drifted = False
+	for spec in _PART_SPECS:
+		item_code = spec["item_code"]
+		if not frappe.db.exists("Item", item_code):
+			drifted = True
+			break
+		current_qty = flt(frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": main_wh}, "actual_qty"))
+		if abs(current_qty - float(spec["stock_qty"])) > 1e-6:
+			drifted = True
+			break
+	if drifted:
+		seed_inventory_and_parts(manifest, random.Random(CATALOG_SEED))
+
+
+def _reset_layer3_world(manifest: SimManifest, anchor_date: str, *, keep_historical: bool = True) -> None:
+	"""Cleanly tear down prior Layer 3 transactional docs, restore bays, and resync opening stock."""
+	preserved_ros = _find_preserved_historical_ros(anchor_date) if keep_historical else set()
+
+	ro_filters: dict[str, Any] = {"name": ["not in", list(preserved_ros)]} if preserved_ros else {}
+	target_ros = frappe.get_all("Repair Order", filters=ro_filters, pluck="name")
+
+	for ro_name in target_ros:
+		if frappe.db.get_value("Repair Order", ro_name, "sales_invoice"):
+			frappe.db.set_value("Repair Order", ro_name, "sales_invoice", None, update_modified=False)
+
+	if frappe.db.exists("DocType", "Vehicle Deferred Service"):
+		if preserved_ros:
+			frappe.db.sql(
+				"DELETE FROM `tabVehicle Deferred Service` "
+				"WHERE COALESCE(repair_order, '') != '' AND repair_order NOT IN %s",
+				(tuple(preserved_ros),),
+			)
+		else:
+			frappe.db.sql(
+				"DELETE FROM `tabVehicle Deferred Service` WHERE COALESCE(repair_order, '') != ''"
+			)
+
+	for doctype in (
+		"Schedule Entry",
+		"Shop Action Item",
+		"Payment Entry",
+		"Purchase Receipt",
+		"Purchase Invoice",
+		"Sales Invoice",
+		"Stock Entry",
+		"Purchase Order",
+		"Request for Quotation",
+		"Leave Application",
+	):
+		if not frappe.db.exists("DocType", doctype):
+			continue
+		for name in frappe.get_all(doctype, pluck="name"):
+			_cancel_and_delete_doc(doctype, name)
+
+	for ro_name in target_ros:
+		_cancel_and_delete_doc("Repair Order", ro_name)
+
+	_ensure_canonical_bay_states(manifest)
+	_resync_opening_inventory_if_drifted(manifest)
 
 
 def _ensure_historical_telemetry(ctx: SimContext, n_closed_ros: int = 30) -> list[str]:
@@ -505,10 +605,15 @@ def build_profile(
 		raise ValueError(f"Unsupported profile '{profile}'. Expected one of {VALID_PROFILES}.")
 
 	commit_flag = _parse_commit_flag(commit)
-	base_manifest = _ensure_layer1_manifest(
-		anchor_date=anchor_date,
-		force_seed=(profile == "clean_master"),
+	resolved_anchor = _normalize_anchor_date(anchor_date).isoformat()
+	base_manifest = _ensure_layer1_manifest(anchor_date=resolved_anchor, force_seed=False)
+	_reset_layer3_world(
+		base_manifest,
+		resolved_anchor,
+		keep_historical=(profile != "clean_master"),
 	)
+	if profile == "clean_master":
+		base_manifest = _ensure_layer1_manifest(anchor_date=resolved_anchor, force_seed=True)
 	base_manifest.profile = profile
 	ctx = SimContext(seed=int(seed), anchor_date=base_manifest.anchor_date, manifest=base_manifest)
 
