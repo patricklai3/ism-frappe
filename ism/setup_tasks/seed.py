@@ -151,6 +151,8 @@ def ensure_ism_roles():
 	"""Ensure standard ISM roles exist with appropriate Desk access."""
 	roles = [
 		{"role_name": "ISM Manager", "desk_access": 1},
+		{"role_name": "ISM Service Advisor", "desk_access": 1},
+		{"role_name": "ISM Technician", "desk_access": 1},
 	]
 	for r in roles:
 		if not frappe.db.exists("Role", r["role_name"]):

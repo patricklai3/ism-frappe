@@ -181,8 +181,82 @@ def sync_approval_status_to_services(ro) -> None:
 	ro._update_parts_waiting_status()
 
 
+def _get_cost_tolerance_limits() -> tuple[float, float]:
+	"""Read cost tolerance percentage and flat cap from ISM Settings."""
+	try:
+		settings = frappe.get_cached_doc("ISM Settings")
+		pct = max(0.0, flt(getattr(settings, "cost_tolerance_percentage", 0.0)))
+		flat = max(0.0, flt(getattr(settings, "cost_tolerance_flat_amount", 0.0)))
+		return pct, flat
+	except Exception:
+		return 0.0, 0.0
+
+
+def _compute_max_allowed_amount(authorized_amount: float, pct: float, flat: float) -> float:
+	"""Compute maximum allowed total_amount before customer re-authorization is required."""
+	base = max(0.0, flt(authorized_amount))
+	pct_allowance = base * (pct / 100.0) if pct > 0 else None
+	flat_allowance = flat if flat > 0 else None
+	if pct_allowance is not None and flat_allowance is not None:
+		overrun = min(pct_allowance, flat_allowance)
+	elif pct_allowance is not None:
+		overrun = pct_allowance
+	elif flat_allowance is not None:
+		overrun = flat_allowance
+	else:
+		overrun = 0.0
+	return flt(base + overrun, 2)
+
+
+def _should_enforce_cost_tolerance(ro, service) -> bool:
+	"""Return True when an Approved service row has a locked estimate to enforce against."""
+	if service.status != "Approved":
+		return False
+	if flt(service.total_amount, 2) <= 0:
+		return False
+
+	raw_auth = getattr(service, "authorized_amount", None)
+	if raw_auth is not None and flt(raw_auth, 2) > 0:
+		return True
+
+	# Zero-cost warranty/comp job explicitly authorized at $0 whose total later increased.
+	# Legacy rows (already Approved with total_amount > 0 and authorized_amount == 0) and
+	# direct/manual approvals without authorize_repair_order_jobs remain exempt.
+	before = service.get_doc_before_save() if hasattr(service, "get_doc_before_save") else None
+	return bool(
+		before is not None
+		and before.status == "Approved"
+		and flt(before.total_amount, 2) == 0.0
+		and (getattr(ro, "authorized_at", None) or getattr(ro, "approval_logs", None))
+	)
+
+
 def validate_authorization_guards(ro) -> None:
 	"""Enforce authorization blocks before moving beyond draft/pending, entering bay, or completing work."""
+	demoted = False
+	pct, flat = None, None
+	for s in ro.services:
+		if _should_enforce_cost_tolerance(ro, s):
+			if pct is None:
+				pct, flat = _get_cost_tolerance_limits()
+			max_allowed = _compute_max_allowed_amount(flt(s.authorized_amount, 2), pct, flat)
+			if flt(s.total_amount, 2) > max_allowed:
+				s.status = "Pending Approval"
+				demoted = True
+
+	if demoted:
+		ro.approval_status = _derive_approval_status(ro.services)
+		ro.total_billed_hours = sum(flt(s.labor_hours) for s in ro.services if s.status == "Approved")
+		if ro.approval_status == "Pending Approval" and ro.status in (
+			"Authorized - In Progress",
+			"Waiting on Parts",
+		):
+			ro.status = "Pending Authorization"
+		if hasattr(ro, "_calculate_taxes_and_totals"):
+			ro._calculate_taxes_and_totals()
+		if hasattr(ro, "_update_parts_waiting_status"):
+			ro._update_parts_waiting_status()
+
 	has_approved = any(s.status == "Approved" for s in ro.services)
 	has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in ro.services)
 	if has_pending and ro.approval_status == "Approved":
@@ -326,6 +400,9 @@ def authorize_repair_order_jobs(
 	else:
 		saved_signature = None
 
+	if hasattr(ro, "_calculate_service_totals"):
+		ro._calculate_service_totals()
+
 	newly_approved = []
 	newly_declined = []
 	newly_authorized_amount = 0.0
@@ -336,6 +413,7 @@ def authorize_repair_order_jobs(
 				if s.status != "Approved":
 					newly_approved.append(s)
 					newly_authorized_amount += flt(s.total_amount)
+					s.authorized_amount = flt(s.total_amount, 2)
 				s.status = "Approved"
 	else:
 		for s in ro.services:
@@ -349,6 +427,7 @@ def authorize_repair_order_jobs(
 			if decision in _VALID_DECISIONS:
 				s.status = decision
 				if decision == "Approved":
+					s.authorized_amount = flt(s.total_amount, 2)
 					newly_approved.append(s)
 					newly_authorized_amount += flt(s.total_amount)
 				elif decision == "Declined":

@@ -14,6 +14,7 @@
   "sms_gateway_endpoint",
   "sms_gateway_api_key",
   "sms_sender_id",
+  "enable_ready_for_pickup_sms",
   "sb_scheduling",
   "operating_hours_start",
   "operating_hours_end",
@@ -33,7 +34,9 @@
   "buffer_padding_minutes",
   "default_diagnostic_duration",
   "sb_pricing",
-  "default_labor_rate"
+  "default_labor_rate",
+  "shop_supplies_percentage",
+  "shop_supplies_cap"
  ],
  "fields": [
   {
@@ -92,6 +95,12 @@
    "fieldname": "sms_sender_id",
    "fieldtype": "Data",
    "label": "Sender ID / From Number"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_ready_for_pickup_sms",
+   "fieldtype": "Check",
+   "label": "Enable Ready for Pickup SMS"
   },
   {
    "fieldname": "sb_scheduling",
@@ -210,11 +219,23 @@
    "fieldname": "default_labor_rate",
    "fieldtype": "Currency",
    "label": "Default Labor Rate"
+  },
+  {
+   "default": "0",
+   "fieldname": "shop_supplies_percentage",
+   "fieldtype": "Percent",
+   "label": "Shop Supplies (%)"
+  },
+  {
+   "default": "0",
+   "fieldname": "shop_supplies_cap",
+   "fieldtype": "Currency",
+   "label": "Shop Supplies Cap ($)"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-13 14:30:00.000000",
+ "modified": "2026-11-17 07:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",
@@ -243,6 +264,14 @@
    "role": "ISM Manager",
    "share": 1,
    "write": 1
+  },
+  {
+   "read": 1,
+   "role": "ISM Service Advisor"
+  },
+  {
+   "read": 1,
+   "role": "ISM Technician"
   }
  ],
  "row_format": "Dynamic",

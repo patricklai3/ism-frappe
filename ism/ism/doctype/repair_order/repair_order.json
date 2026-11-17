@@ -33,6 +33,9 @@
   "sec_services",
   "services",
   "sec_totals",
+  "discount_amount",
+  "shop_supplies_amount",
+  "environmental_fee_amount",
   "taxes_and_charges",
   "tax_rate",
   "col_totals",
@@ -75,6 +78,7 @@
   "sales_invoice",
   "payment_status",
   "col_payment",
+  "deposit_amount",
   "paid_amount",
   "outstanding_amount"
  ],
@@ -259,17 +263,43 @@
   },
   {
    "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "discount_amount",
+   "fieldtype": "Currency",
+   "label": "Discount Amount",
+   "permlevel": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "shop_supplies_amount",
+   "fieldtype": "Currency",
+   "label": "Shop Supplies Amount",
+   "permlevel": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "environmental_fee_amount",
+   "fieldtype": "Currency",
+   "label": "Environmental Fee Amount",
+   "permlevel": 1
+  },
+  {
+   "allow_on_submit": 1,
    "fieldname": "taxes_and_charges",
    "fieldtype": "Link",
    "label": "Taxes and Charges Template",
-   "options": "Sales Taxes and Charges Template"
+   "options": "Sales Taxes and Charges Template",
+   "permlevel": 1
   },
   {
    "allow_on_submit": 1,
    "default": "13.0",
    "fieldname": "tax_rate",
    "fieldtype": "Percent",
-   "label": "Tax Rate (%)"
+   "label": "Tax Rate (%)",
+   "permlevel": 1
   },
   {
    "fieldname": "col_totals",
@@ -313,6 +343,7 @@
    "fieldtype": "Select",
    "label": "Approval Status",
    "options": "Estimating\nPending Approval\nApproved\nPartially Approved\nDeclined",
+   "permlevel": 1,
    "search_index": 1
   },
   {
@@ -335,13 +366,15 @@
    "allow_on_submit": 1,
    "fieldname": "authorized_by",
    "fieldtype": "Data",
-   "label": "Authorized By"
+   "label": "Authorized By",
+   "permlevel": 1
   },
   {
    "allow_on_submit": 1,
    "fieldname": "authorized_at",
    "fieldtype": "Datetime",
-   "label": "Authorized At"
+   "label": "Authorized At",
+   "permlevel": 1
   },
   {
    "fieldname": "col_auth",
@@ -351,13 +384,15 @@
    "allow_on_submit": 1,
    "fieldname": "signature_image",
    "fieldtype": "Attach Image",
-   "label": "Customer Signature"
+   "label": "Customer Signature",
+   "permlevel": 1
   },
   {
    "allow_on_submit": 1,
    "fieldname": "verbal_notes",
    "fieldtype": "Small Text",
-   "label": "Verbal Authorization Notes"
+   "label": "Verbal Authorization Notes",
+   "permlevel": 1
   },
   {
    "allow_on_submit": 1,
@@ -556,6 +591,14 @@
   {
    "allow_on_submit": 1,
    "default": "0",
+   "fieldname": "deposit_amount",
+   "fieldtype": "Currency",
+   "label": "Deposit Amount",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
    "fieldname": "paid_amount",
    "fieldtype": "Currency",
    "label": "Paid Amount",
@@ -580,7 +623,7 @@
  ],
  "is_submittable": 0,
  "links": [],
- "modified": "2026-11-13 15:00:00.000000",
+ "modified": "2026-11-17 07:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Repair Order",
@@ -598,6 +641,59 @@
    "role": "System Manager",
    "share": 1,
    "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "ISM Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "ISM Service Advisor",
+   "write": 1
+  },
+  {
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Technician",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "ISM Technician",
+   "write": 0
   },
   {
    "create": 1,
