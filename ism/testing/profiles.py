@@ -106,8 +106,22 @@ def _resync_opening_inventory_if_drifted(manifest: SimManifest) -> None:
 		seed_inventory_and_parts(manifest, random.Random(CATALOG_SEED))
 
 
+def _clear_rq_queues() -> None:
+	"""Empty stale RQ background queues on non-worker bench slots to prevent QueueOverloaded."""
+	if getattr(frappe.flags, "in_test", False):
+		return
+	try:
+		from frappe.utils.background_jobs import get_queues
+
+		for queue in get_queues():
+			queue.empty()
+	except Exception:
+		pass
+
+
 def _reset_layer3_world(manifest: SimManifest, anchor_date: str, *, keep_historical: bool = True) -> None:
 	"""Cleanly tear down prior Layer 3 transactional docs, restore bays, and resync opening stock."""
+	_clear_rq_queues()
 	preserved_ros = _find_preserved_historical_ros(anchor_date) if keep_historical else set()
 
 	ro_filters: dict[str, Any] = {"name": ["not in", list(preserved_ros)]} if preserved_ros else {}
@@ -624,6 +638,7 @@ def build_profile(
 
 	if commit_flag:
 		frappe.db.commit()
+		_clear_rq_queues()
 	return ctx.manifest
 
 
@@ -663,10 +678,12 @@ def provision_agent_api_keys(user: str = "manager@lightspeedev.ca") -> dict[str,
 	if not frappe.db.exists("User", user):
 		frappe.throw(frappe._("User '{0}' does not exist.").format(user), frappe.DoesNotExistError)
 
+	_clear_rq_queues()
 	keys = generate_keys(user)
 	api_key = keys.get("api_key") or frappe.db.get_value("User", user, "api_key")
 	api_secret = keys.get("api_secret")
 	frappe.db.commit()
+	_clear_rq_queues()
 
 	return {
 		"user": user,
