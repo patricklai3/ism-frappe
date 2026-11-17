@@ -13,8 +13,18 @@ ISM uses a layered, deterministic testing and simulation stack backed by a clean
    - `SimBuilder` walks real ISM domain APIs (`RepairOrder`, `authorize_jobs`, `submit_procurement_orders`, `create_purchase_invoice`, `ScheduleEntry`, `pick_up_vehicle`, `add_supplement`, `create_shop_action_item`, `toggle_service_completion`, `park_vehicle`, `record_deposit`, `process_payment_and_release`) up to any target `VALID_RO_STAGES` state.
    - `seed_historical_telemetry(ctx, n_closed_ros=30)` seeds closed historical ROs across `T-60d..T-1d` with log-normal `actual_duration_hours` so `estimation_service.py` (`empirical=True`) computes empirical percentiles.
    - `SimManifest` maps logical handles to exact DB names and supports JSON round-trips, `resolve()`, and `interpolate()`.
-3. **Layer 3 — World Profiles & `monte_carlo(seed)` (`profiles.py`, `monte_carlo.py`, Stage 2)**:
-   - Composes `SimContext` + `SimBuilder` into repeatable evaluation profiles and seeded edge-discovery worlds.
+3. **Layer 3 — World Profiles & `monte_carlo(seed)` (`profiles.py`, `monte_carlo.py`)**:
+   - **Profiles (`ism/testing/profiles.py`)**: `VALID_PROFILES = ("clean_master", "eval_standard", "swarm_crunch_day")`.
+     - `build_profile(profile="eval_standard", *, seed=42, anchor_date=None, commit=False) -> SimManifest`
+     - `seed_profile(profile="eval_standard", seed=42, anchor_date=None, commit=True) -> dict[str, Any]` (clean JSON-safe `bench execute` wrapper; zero-arg helpers: `seed_clean_master()`, `seed_eval_standard()`, `seed_swarm_crunch_day()`).
+     - `provision_agent_api_keys(user="manager@lightspeedev.ca") -> dict[str, Any]` generates/commits API keys (`generate_keys(user)`) and returns `{"user", "api_key", "api_secret", "company"}`.
+     - **`clean_master`**: Layer 1 canonical masters only via `seed_catalog_manifest`.
+     - **`eval_standard`**: `metadata["target_date"] = next_open_day(1)`, `metadata["historical_ro_count"] = 30`, 30 closed historical ROs (`ros.hist_1..hist_30`), approved leave for `techs.elena` (`leave_applications.elena_tomorrow`), conflict booking at `09:00:00` 90m in `bays.main_lift` with `techs.marcus` (`ros.conflict_ro`, `schedule_entries.conflict_main_lift`), secondary booking at `10:00:00` 60m in `bays.hv_diagnostics` with `techs.noah` (`ros.hv_scheduled_ro`, `schedule_entries.hv_morning`), two unscheduled `authorized_in_stock` ROs (`ros.unscheduled_ro`, `ros.unscheduled_secondary_ro`), open PO + submitted `Bank Draft` advance PE (`ros.open_po_ro`, `pos.eval_open_po`, `pes.eval_open_po_advance`), and zero-stock RFQ RO (`ros.zero_stock_ro`, `rfqs.eval_open_rfq`).
+     - **`swarm_crunch_day`**: ~85.3% bay utilization (435/510 min across `main_lift`, `alignment`, `hv_diagnostics`, `tire_quick` on `target_date`), tight-band FIFO contention (`ros.crunch_fifo_winner` `Authorized - In Progress` vs `ros.crunch_fifo_loser` `Waiting on Parts`), unapproved over-tolerance supplements (`> max(10%, $20)`) with `Shop Action Item` records (`action_items.crunch_over_tol_1..2`), and commercial fleet batch intake (`fleet_1` across `veh_fleet_1..5` via `ros.crunch_fleet_1..5`).
+   - **Monte Carlo (`ism/testing/monte_carlo.py`)**:
+     - `monte_carlo(seed, *, anchor_date=None, n_arrivals=None, walk_in_prob=0.35, stockout_prob=0.25, supplement_prob=0.30, tolerance_breach_prob=0.40, tech_leave_prob=0.20, bay_outage_prob=0.15, partial_decline_prob=0.20, deposit_prob=0.35, split_tender_prob=0.30, commit=False) -> SimManifest`
+     - `seed_monte_carlo(seed=1, anchor_date=None, commit=True, **params) -> dict[str, Any]`
+     - Uses deterministic `random.Random(int(seed))`, safely restores mutated `Service Bay.is_active` flags after scheduling, and populates `metadata["monte_carlo_summary"]` (`seed`, `target_date`, `n_arrivals`, `conflict_ros`, `waiting_on_parts_ros`, `unscheduled_ros`, `over_tolerance_ros`, `partially_approved_ros`, `closed_ros`, `walk_in_ros`, `outage_bays`, `techs_on_leave`, `entity_counts`).
 
 ---
 
