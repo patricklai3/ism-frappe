@@ -3,15 +3,13 @@
 
 import frappe
 from ism.tests.base import ISMTestCase
-from ism.setup import seed_equipment_tags
 
 
 class TestServiceBay(ISMTestCase):
 	def setUp(self):
 		super().setUp()
-		seed_equipment_tags()
-		self.bay_alpha = "Test Unit Bay Alpha"
-		self.bay_beta = "Test Unit Bay Beta"
+		self.bay_alpha = "Sim Unit Bay Alpha"
+		self.bay_beta = "Sim Unit Bay Beta"
 		self.cleanup()
 
 	def tearDown(self):
@@ -77,7 +75,7 @@ class TestServiceBay(ISMTestCase):
 		self.assertNotIn(self.bay_beta, active_bays)
 
 	def test_equipment_tag_deletion_protection(self):
-		test_tag_name = "Test Special Tool Tag"
+		test_tag_name = "Sim Special Tool Tag"
 		if not frappe.db.exists("Equipment Tag", test_tag_name):
 			tag_doc = frappe.get_doc({
 				"doctype": "Equipment Tag",

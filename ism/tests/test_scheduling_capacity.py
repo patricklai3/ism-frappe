@@ -6,15 +6,6 @@ import frappe
 from frappe.utils import add_days, today
 
 from ism.tests.base import ISMTestCase
-from ism.tests.test_fixtures import (
-	setup_all,
-	teardown_transactional,
-	ensure_ism_settings,
-	create_test_schedule_entry,
-	PREFIX,
-	CUSTOMER,
-	VEHICLE_VIN,
-)
 
 try:
 	from ism.api.scheduling import (
@@ -72,42 +63,41 @@ class TestSchedulingCapacity(ISMTestCase):
 	- Features 19–22: DocTypes (Service Bay, Equipment Tag, Schedule Entry Type, Schedule Entry)
 	"""
 
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls.emp_map = setup_all()
-		cls.bay1 = f"{PREFIX}Bay 1"
-		cls.bay2 = f"{PREFIX}Bay 2"
-		cls.bay3 = f"{PREFIX}Bay 3"  # Inactive
-		cls.tech1_id = cls.emp_map.get("tech_active_1")
-		cls.tech2_id = cls.emp_map.get("tech_active_2")
-		cls.tech3_id = cls.emp_map.get("tech_inactive")
-
-	@classmethod
-	def tearDownClass(cls):
-		teardown_transactional()
-		super().tearDownClass()
-
 	def setUp(self):
 		super().setUp()
-		ensure_ism_settings(holiday_list=None)
-		self.bay1 = self.__class__.bay1
-		self.bay2 = self.__class__.bay2
-		self.bay3 = self.__class__.bay3
-		self.tech1_id = self.__class__.tech1_id
-		self.tech2_id = self.__class__.tech2_id
-		self.tech3_id = self.__class__.tech3_id
-		self.emp_map = self.__class__.emp_map
+		self.manifest = self.get_manifest()
+		self.bay1 = self.manifest.bays["main_lift"]
+		self.bay2 = self.manifest.bays["alignment"]
+		self.bay3 = self.manifest.bays["offline"]  # Inactive
+		self.active_bays = [
+			self.manifest.bays[k]
+			for k in ("main_lift", "alignment", "hv_diagnostics", "tire_quick")
+		]
+		self.tech1_id = self.manifest.techs["marcus"]
+		self.tech2_id = self.manifest.techs["elena"]
+		self.tech3_id = self.manifest.techs["inactive_tech"]
+		self.customer = self.manifest.customers["retail_1"]
+		self.vehicle = self.manifest.vehicles["veh_model3_liam"]
+		self._set_ism_settings(holiday_list=None)
 
 		# Lazily allocate test Repair Order only for tests that actually reference self.test_ro1
 		self._test_ro1 = None
+
+	def _set_ism_settings(self, **kwargs):
+		if not frappe.db.exists("DocType", "ISM Settings"):
+			return
+		settings = frappe.get_single("ISM Settings")
+		for key, val in kwargs.items():
+			setattr(settings, key, val)
+		settings.save(ignore_permissions=True)
+		frappe.clear_cache(doctype="ISM Settings")
 
 	@property
 	def test_ro1(self):
 		if self._test_ro1 is None:
 			self._test_ro1 = self.create_test_repair_order(
-				customer=CUSTOMER,
-				vehicle=VEHICLE_VIN,
+				customer=self.customer,
+				vehicle=self.vehicle,
 				odometer_in=45000,
 			)
 		return self._test_ro1
@@ -163,7 +153,7 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_tier1_f6_end_time_defaults_from_ism_settings(self):
 		"""F6: When break_start/end not passed, reads from ISM Settings."""
 		self._require_sched_api()
-		ensure_ism_settings(break_start="12:00:00", break_end="13:00:00")  # 60m lunch
+		self._set_ism_settings(break_start="12:00:00", break_end="13:00:00")  # 60m lunch
 		eff = effective_end_time("11:30:00", 60)  # naive 12:30 -> spans 12:00 -> +60 min = 13:30
 		self.assertEqual(eff, timedelta(hours=13, minutes=30))
 
@@ -173,7 +163,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(
+		self.track(self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -190,7 +180,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(
+		self.track(self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -204,7 +194,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		"""F7: Inserting overlapping Schedule Entry on same bay raises ValidationError."""
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(
+		self.track(self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -228,7 +218,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -247,7 +237,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(
+		self.track(self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -258,12 +248,12 @@ class TestSchedulingCapacity(ISMTestCase):
 
 	# --- Feature 8: Equipment Tag Filtering ---
 	def test_tier1_f8_equipment_tag_single_match(self):
-		"""F8: Requesting 'Lift' matches Bay 1 and Bay 2."""
+		"""F8: Requesting 'Lift' matches active lift bays."""
 		self._require_sched_api()
 		self._require_doctype("Service Bay")
 		target_date = today()
 		assigned = auto_assign_bay(target_date, "08:00:00", 60, required_tags=["Lift"])
-		self.assertIn(assigned, [self.bay1, self.bay2])
+		self.assertIn(assigned, self.active_bays)
 
 	def test_tier1_f8_equipment_tag_exclusive_match(self):
 		"""F8: Requesting 'Alignment Rack' matches only Bay 2."""
@@ -274,19 +264,19 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.assertEqual(assigned, self.bay2)
 
 	def test_tier1_f8_bay_missing_tag_excluded(self):
-		"""F8: Bay 1 (which lacks 'Alignment Rack') is not assigned when rack required."""
+		"""F8: Bays lacking 'Alignment Rack' are not assigned when rack required."""
 		self._require_sched_api()
 		self._require_doctype("Service Bay")
 		target_date = today()
 		# Book Bay 2 so the only rack bay is busy
-		self.track(create_test_schedule_entry(
+		self.track(self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
 			estimated_duration=120,
 			service_bay=self.bay2,
 		))
-		# Attempting to assign with Alignment Rack should fail because Bay 1 cannot handle it
+		# Attempting to assign with Alignment Rack should fail because other bays cannot handle it
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "08:00:00", 60, required_tags=["Alignment Rack"])
 
@@ -295,15 +285,15 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		target_date = today()
 		assigned = auto_assign_bay(target_date, "08:00:00", 60, required_tags=[])
-		self.assertIn(assigned, [self.bay1, self.bay2])
+		self.assertIn(assigned, self.active_bays)
 
 	def test_tier1_f8_inactive_bay_never_matched(self):
-		"""F8: Bay 3 (inactive) is never matched regardless of equipment."""
+		"""F8: Offline/inactive bay is never matched regardless of equipment."""
 		self._require_sched_api()
 		target_date = today()
-		# Occupy Bay 1 and Bay 2
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay2))
+		# Occupy all active bays
+		for bay_name in self.active_bays:
+			self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=bay_name))
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "08:00:00", 60)
 
@@ -314,7 +304,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		target_date = today()
 		bay = auto_assign_bay(target_date, "09:00:00", 60)
 		self.assertTrue(bool(bay))
-		self.assertIn(bay, [self.bay1, self.bay2])
+		self.assertIn(bay, self.active_bays)
 
 	def test_tier1_f9_earliest_fit_order(self):
 		"""F9: auto_assign_bay consistently selects lowest-index or first available bay."""
@@ -324,21 +314,22 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.assertIsNotNone(bay)
 
 	def test_tier1_f9_auto_assign_respects_existing_bookings(self):
-		"""F9: When Bay 1 is booked, auto-assign assigns Bay 2."""
+		"""F9: When Bay 1 is booked, auto-assign assigns another active bay."""
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
+		self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
 		assigned = auto_assign_bay(target_date, "08:30:00", 60)
-		self.assertEqual(assigned, self.bay2)
+		self.assertIn(assigned, self.active_bays)
+		self.assertNotEqual(assigned, self.bay1)
 
 	def test_tier1_f9_auto_assign_full_shop_raises(self):
 		"""F9: When all active bays are booked, auto_assign_bay raises ValidationError."""
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay2))
+		for bay_name in self.active_bays:
+			self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=bay_name))
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "08:30:00", 60)
 
@@ -348,14 +339,14 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_tech_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		ensure_ism_settings(enable_technician_capacity=1)
+		self._set_ism_settings(enable_technician_capacity=1)
 
 		on_duty = [t for t in get_active_technicians(target_date) if not t.get("on_leave")]
 		self.assertTrue(on_duty)
 		for idx, tech in enumerate(on_duty):
 			bay = self.bay1 if idx == 0 else None
 			self.track(
-				create_test_schedule_entry(
+				self.create_test_schedule_entry(
 					repair_order=self.test_ro1.name,
 					scheduled_date=target_date,
 					scheduled_time="09:00:00",
@@ -370,9 +361,11 @@ class TestSchedulingCapacity(ISMTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "09:00:00", 60)
 
-		# Disabling technician capacity gating allows auto_assign_bay to pick the free bay
-		ensure_ism_settings(enable_technician_capacity=0)
-		self.assertEqual(auto_assign_bay(target_date, "09:00:00", 60), self.bay2)
+		# Disabling technician capacity gating allows auto_assign_bay to pick a free bay
+		self._set_ism_settings(enable_technician_capacity=0)
+		assigned = auto_assign_bay(target_date, "09:00:00", 60)
+		self.assertIn(assigned, self.active_bays)
+		self.assertNotEqual(assigned, self.bay1)
 
 	# --- Feature 10: Slot Generator with Capacity Indicators ---
 	def test_tier1_f10_slot_generator_operating_hours(self):
@@ -402,7 +395,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
+		self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
 		bay1_slots = get_available_slots(target_date, 60, service_bay=self.bay1)
 		bay1_times = [s["start_time"] for s in bay1_slots]
 		self.assertNotIn("08:00", bay1_times)
@@ -455,14 +448,13 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_tier1_f11_non_technician_designation_excluded(self):
 		"""F11: Employees with designation != 'Technician' (e.g. 'Accountant') excluded."""
 		self._require_tech_api()
-		company = frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed"
 		acc = frappe.get_doc({
 			"doctype": "Employee",
-			"first_name": f"{PREFIX}Accountant",
-			"employee_name": f"{PREFIX}Accountant",
+			"first_name": "Sim Accountant",
+			"employee_name": "Sim Accountant",
 			"status": "Active",
 			"designation": "Accountant",
-			"company": company,
+			"company": self.manifest.company,
 			"gender": "Female",
 			"date_of_birth": "1991-01-01",
 			"date_of_joining": "2020-01-01",
@@ -500,7 +492,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"from_date": target_date,
 			"to_date": target_date,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -528,7 +520,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"from_date": target_date,
 			"to_date": target_date,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -555,7 +547,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"to_date": target_date,
 			"status": "Open",
 			"docstatus": 0,
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -578,7 +570,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"from_date": leave_date,
 			"to_date": leave_date,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -603,7 +595,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"from_date": start_date,
 			"to_date": end_date,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -630,12 +622,12 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_tech_api()
 		self._require_doctype("Schedule Entry")
 		target_date = add_days(today(), 5)
-		ensure_ism_settings(enable_technician_capacity=1)
+		self._set_ism_settings(enable_technician_capacity=1)
 		on_duty = [t for t in get_active_technicians(target_date) if not t.get("on_leave")]
 		self.assertTrue(on_duty)
 		for idx, tech in enumerate(on_duty):
 			bay = self.bay1 if idx == 0 else (self.bay2 if idx == 1 else None)
-			se = create_test_schedule_entry(
+			se = self.create_test_schedule_entry(
 				repair_order=self.test_ro1.name,
 				scheduled_date=target_date,
 				scheduled_time="09:00:00",
@@ -656,7 +648,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		if not self.tech1_id:
 			self.skipTest("Tech 1 not available")
 		target_date = today()
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1, assigned_technician=self.tech1_id))
+		self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1, assigned_technician=self.tech1_id))
 		chk = check_technician_availability(self.tech1_id, target_date, "09:00:00", 60)
 		self.assertFalse(chk["is_available"])
 		self.assertEqual(chk.get("reason"), "overlap")
@@ -665,7 +657,7 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_tier1_f15_toggle_disabled_bypasses_pool_limit(self):
 		"""F15: When enable_technician_capacity=0, pool limits are bypassed."""
 		self._require_tech_api()
-		ensure_ism_settings(enable_technician_capacity=0)
+		self._set_ism_settings(enable_technician_capacity=0)
 		pool = get_technician_pool_availability(today(), "09:00:00", 60)
 		# With toggle off, pool check returns is_available=True even if techs are busy
 		self.assertTrue(pool["is_available"])
@@ -701,9 +693,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Service Bay")
 		bay = frappe.get_doc({
 			"doctype": "Service Bay",
-			"bay_name": f"{PREFIX}Custom_Bay_X",
+			"bay_name": "Sim Custom Bay X",
 			"is_active": 1,
-			"description": "Custom test bay",
+			"description": "Custom sim bay",
 		}).insert(ignore_permissions=True)
 		self.track(bay)
 		self.assertTrue(bay.name)
@@ -713,10 +705,10 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Equipment Tag")
 		tag = frappe.get_doc({
 			"doctype": "Equipment Tag",
-			"tag_name": f"{PREFIX}Heavy_Duty_Crane",
+			"tag_name": "Sim Heavy Duty Crane",
 		}).insert(ignore_permissions=True)
 		self.track(tag)
-		self.assertEqual(tag.tag_name, f"{PREFIX}Heavy_Duty_Crane")
+		self.assertEqual(tag.tag_name, "Sim Heavy Duty Crane")
 
 	def test_tier1_f21_schedule_entry_type_seed(self):
 		"""F21: Seeded entry types (Diagnostic, Repair, Meeting, etc.) exist with colors."""
@@ -727,7 +719,7 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_tier1_f22_schedule_entry_crud(self):
 		"""F22: Schedule Entry persists time window, bay, tech, and status."""
 		self._require_doctype("Schedule Entry")
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=today(),
 			scheduled_time="14:00:00",
@@ -760,7 +752,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
+		self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
 		self.assertFalse(check_bay_availability(self.bay1, target_date, "07:30:00", 60))
 
 	def test_tier2_f7_partial_tail_overlap_blocked(self):
@@ -768,13 +760,13 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
+		self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=self.bay1))
 		self.assertFalse(check_bay_availability(self.bay1, target_date, "09:30:00", 60))
 
 	def test_tier2_f10_slot_generator_no_operating_hours(self):
 		"""F10 Boundary: If operating hours missing, handles gracefully."""
 		self._require_sched_api()
-		ensure_ism_settings(operating_hours_start="00:00:00", operating_hours_end="00:00:00")
+		self._set_ism_settings(operating_hours_start="00:00:00", operating_hours_end="00:00:00")
 		slots = get_available_slots(today(), 60)
 		self.assertEqual(len(slots), 0)
 
@@ -804,7 +796,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_sched_api()
 		self._require_doctype("Schedule Entry")
 		target_date = add_days(today(), 2)
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="09:00:00",
@@ -840,7 +832,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Schedule Entry")
 		target_date = today()
 		# 11:00 start, 120 min -> spans 12:00-12:30 lunch -> effective end 13:30!
-		self.track(create_test_schedule_entry(
+		self.track(self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="11:00:00",
@@ -860,11 +852,21 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_tech_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		ensure_ism_settings(enable_technician_capacity=1)
-		# Bay 2 is the only rack bay. If both tech 1 and tech 2 are occupied at 10:00,
+		self._set_ism_settings(enable_technician_capacity=1)
+		# Bay 2 is the only rack bay. If all on-duty technicians are occupied at 10:00,
 		# auto_assign_bay for Alignment Rack must fail due to technician pool exhaustion.
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="10:00:00", estimated_duration=60, service_bay=self.bay1, assigned_technician=self.tech1_id))
-		self.track(create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="10:00:00", estimated_duration=60, service_bay=self.bay2, assigned_technician=self.tech2_id))
+		on_duty = [t for t in get_active_technicians(target_date) if not t.get("on_leave")]
+		self.assertTrue(on_duty)
+		for idx, tech in enumerate(on_duty):
+			bay = self.bay1 if idx == 0 else None
+			self.track(self.create_test_schedule_entry(
+				repair_order=self.test_ro1.name,
+				scheduled_date=target_date,
+				scheduled_time="10:00:00",
+				estimated_duration=60,
+				service_bay=bay,
+				assigned_technician=tech["employee"],
+			))
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "10:00:00", 60, required_tags=["Alignment Rack"])
 
@@ -933,8 +935,8 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Schedule Entry")
 		se = frappe.get_doc({
 			"doctype": "Schedule Entry",
-			"customer": CUSTOMER,
-			"repair_vehicle": VEHICLE_VIN,
+			"customer": self.customer,
+			"repair_vehicle": self.vehicle,
 			"entry_type": "Diagnostic",
 			"scheduled_date": today(),
 			"scheduled_time": "10:00:00",
@@ -970,9 +972,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_tech_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		ensure_ism_settings(enable_technician_capacity=1)
+		self._set_ism_settings(enable_technician_capacity=1)
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -1011,7 +1013,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"from_date": target_date,
 			"to_date": target_date,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -1042,7 +1044,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Schedule Entry")
 		target_date = today()
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -1086,9 +1088,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_tech_api()
 		self._require_doctype("Schedule Entry")
 		target_date = today()
-		ensure_ism_settings(enable_technician_capacity=1)
+		self._set_ism_settings(enable_technician_capacity=1)
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=target_date,
 			scheduled_time="08:00:00",
@@ -1134,7 +1136,7 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_calculate_working_span_lunch_pause(self):
 		"""Span Test: Job starting at 11:30 for 60 mins pauses across lunch and finishes at 13:00."""
 		self._require_sched_api()
-		ensure_ism_settings(
+		self._set_ism_settings(
 			operating_hours_start="08:00:00",
 			operating_hours_end="17:00:00",
 			break_start="12:00:00",
@@ -1153,7 +1155,7 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_calculate_working_span_overnight(self):
 		"""Span Test: Job starting at 15:00 for 240 mins (4 hours) spans overnight to next day at 10:00."""
 		self._require_sched_api()
-		ensure_ism_settings(
+		self._set_ism_settings(
 			operating_hours_start="08:00:00",
 			operating_hours_end="17:00:00",
 			break_start="12:00:00",
@@ -1175,7 +1177,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		day1 = today()
 		day2 = add_days(day1, 1)
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=day1,
 			scheduled_time="15:00:00",
@@ -1199,7 +1201,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		day1 = today()
 		day2 = add_days(day1, 1)
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=day1,
 			scheduled_time="15:00:00",
@@ -1235,7 +1237,7 @@ class TestSchedulingCapacity(ISMTestCase):
 			"from_date": day2,
 			"to_date": day2,
 			"status": "Approved",
-			"company": frappe.db.get_single_value("Global Defaults", "default_company") or "Lightspeed",
+			"company": self.manifest.company,
 		})
 		leave.flags.ignore_validate = True
 		leave.flags.ignore_mandatory = True
@@ -1253,7 +1255,7 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Schedule Entry")
 		day1 = today()
 
-		se = create_test_schedule_entry(
+		se = self.create_test_schedule_entry(
 			repair_order=self.test_ro1.name,
 			scheduled_date=day1,
 			scheduled_time="15:00:00",

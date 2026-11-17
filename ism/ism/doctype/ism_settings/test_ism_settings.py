@@ -19,69 +19,14 @@ CANONICAL_ISM_SETTINGS = {
 	"buffer_padding_minutes": 0,
 	"default_diagnostic_duration": 60,
 	"default_labor_rate": 140.0,
+	"shop_supplies_percentage": 0.0,
+	"cost_tolerance_flat_amount": 20.0,
 	"sms_gateway_provider": "Disabled",
 }
 
 
 class TestISMSettings(ISMTestCase):
 	"""Unit tests for ISM Settings validations, default initialization, and transactional hygiene."""
-
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		frappe.db.rollback()
-		frappe.clear_cache(doctype="ISM Settings")
-		if hasattr(frappe.db, "value_cache"):
-			frappe.db.value_cache.clear()
-
-		# Zero-churn conditional baseline check: only update tabSingles if baseline diverged
-		current_settings = frappe.db.get_singles_dict("ISM Settings")
-		divergent = {}
-		for fieldname, expected_val in CANONICAL_ISM_SETTINGS.items():
-			curr_val = current_settings.get(fieldname) if current_settings else None
-			if curr_val is None:
-				divergent[fieldname] = expected_val
-			elif isinstance(expected_val, float):
-				try:
-					if abs(float(curr_val) - expected_val) > 1e-4:
-						divergent[fieldname] = expected_val
-				except (ValueError, TypeError):
-					divergent[fieldname] = expected_val
-			elif isinstance(expected_val, int):
-				try:
-					if int(curr_val) != expected_val:
-						divergent[fieldname] = expected_val
-				except (ValueError, TypeError):
-					divergent[fieldname] = expected_val
-			else:
-				if str(curr_val) != str(expected_val):
-					divergent[fieldname] = expected_val
-
-		if divergent:
-			for attempt in range(3):
-				try:
-					frappe.db.set_single_value("ISM Settings", divergent)
-					frappe.clear_cache(doctype="ISM Settings")
-					if hasattr(frappe.db, "value_cache"):
-						frappe.db.value_cache.clear()
-					frappe.db.commit()
-					break
-				except Exception as e:
-					if ("1020" in str(e) or "Deadlock" in str(e) or isinstance(e, frappe.QueryDeadlockError)) and attempt < 2:
-						frappe.db.rollback()
-						frappe.clear_cache(doctype="ISM Settings")
-						if hasattr(frappe.db, "value_cache"):
-							frappe.db.value_cache.clear()
-						continue
-					raise
-
-	@classmethod
-	def tearDownClass(cls):
-		frappe.db.rollback()
-		frappe.clear_cache(doctype="ISM Settings")
-		if hasattr(frappe.db, "value_cache"):
-			frappe.db.value_cache.clear()
-		super().tearDownClass()
 
 	def setUp(self):
 		super().setUp()
@@ -116,6 +61,8 @@ class TestISMSettings(ISMTestCase):
 		self.assertGreaterEqual(int(settings.buffer_padding_minutes or 0), 0)
 		self.assertEqual(settings.default_diagnostic_duration, 60)
 		self.assertAlmostEqual(float(settings.default_labor_rate), 140.0, places=2)
+		self.assertAlmostEqual(float(settings.shop_supplies_percentage or 0.0), 0.0, places=2)
+		self.assertAlmostEqual(float(settings.cost_tolerance_flat_amount), 20.0, places=2)
 		self.assertEqual(settings.sms_gateway_provider, "Disabled")
 
 	def test_validate_operating_hours_order(self):
@@ -268,14 +215,14 @@ class TestISMSettings(ISMTestCase):
 			frappe.db.delete("Custom DocPerm", {"parent": "ISM Settings"})
 			frappe.clear_cache(doctype="ISM Settings")
 
-		user_email = f"test_ism_mgr_{frappe.generate_hash(length=6)}@example.com"
+		user_email = f"sim_ism_mgr_{frappe.generate_hash(length=6)}@example.com"
 		if frappe.db.exists("User", user_email):
 			frappe.delete_doc("User", user_email, force=True)
 
 		user = frappe.get_doc({
 			"doctype": "User",
 			"email": user_email,
-			"first_name": "Test ISM Manager",
+			"first_name": "Sim ISM Manager",
 			"roles": [{"role": "ISM Manager"}],
 		}).insert(ignore_permissions=True)
 		self.track(user)

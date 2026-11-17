@@ -6,26 +6,15 @@ from unittest.mock import patch
 
 import frappe
 from ism.ism.doctype.repair_order.repair_order import RepairOrder
-from ism.tests.base import ISMTestCase, TEST_PREFIX
+from ism.tests.base import ISMTestCase
 
 
 class TestScheduleEntry(ISMTestCase):
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls.cleanup_schedule_entries()
-
-	@classmethod
-	def tearDownClass(cls):
-		cls.cleanup_schedule_entries()
-		frappe.db.rollback()
-		super().tearDownClass()
-
 	def setUp(self):
 		super().setUp()
-		self.customer = self.create_test_customer()
-		unique_vin = f"5YJ3E1EBXNF{frappe.generate_hash(length=6).upper()}"
-		self.vehicle = self.create_test_vehicle(vin=unique_vin, customer=self.customer.name)
+		self.manifest = self.get_manifest()
+		self.customer = frappe.get_doc("Customer", self.manifest.customers["retail_1"])
+		self.vehicle = frappe.get_doc("Repair Vehicle", self.manifest.vehicles["veh_model3_liam"])
 		self.ro = self.create_test_repair_order(customer=self.customer.name, vehicle=self.vehicle.name)
 
 	def _insert_entry(self, doc_dict):
@@ -39,38 +28,6 @@ class TestScheduleEntry(ISMTestCase):
 					time.sleep(0.05 * (attempt + 1))
 					continue
 				raise
-
-	@classmethod
-	def cleanup_schedule_entries(cls):
-		"""Clean up residual test schedule entries created across runs."""
-		if not frappe.db.exists("DocType", "Schedule Entry"):
-			return
-
-		# Clean test entries with known test provisional names or titles
-		test_entries = frappe.get_all(
-			"Schedule Entry",
-			filters=[
-				["provisional_customer_name", "in", ["Alice Walker", "Provisional Client"]],
-			],
-			pluck="name",
-		) + frappe.get_all(
-			"Schedule Entry",
-			filters=[
-				["title", "like", f"{TEST_PREFIX}%"],
-			],
-			pluck="name",
-		) + frappe.get_all(
-			"Schedule Entry",
-			filters=[
-				["title", "like", "Guest%"],
-			],
-			pluck="name",
-		)
-		for se_name in set(test_entries):
-			try:
-				frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
-			except Exception:
-				pass
 
 	def test_schedule_entry_naming_series(self):
 		"""Verify that Schedule Entry generates SE-.##### series names."""
@@ -247,13 +204,7 @@ class TestScheduleEntry(ISMTestCase):
 		"""Verify assignment warnings use doc flags without msgprint, and No Show releases bay capacity."""
 		from ism.api.scheduling import check_bay_availability
 
-		if not frappe.db.exists("Service Bay", "Test Bay SE"):
-			bay = frappe.get_doc({
-				"doctype": "Service Bay",
-				"bay_name": "Test Bay SE",
-				"is_active": 1,
-			}).insert(ignore_permissions=True)
-			self.track(bay)
+		bay_name = self.manifest.bays["main_lift"]
 
 		se = self._insert_entry({
 			"doctype": "Schedule Entry",
@@ -261,9 +212,9 @@ class TestScheduleEntry(ISMTestCase):
 			"scheduled_date": frappe.utils.today(),
 			"scheduled_time": "09:00:00",
 			"estimated_duration": 60,
-			"service_bay": "Test Bay SE",
+			"service_bay": bay_name,
 		})
-		self.assertFalse(check_bay_availability("Test Bay SE", frappe.utils.today(), "09:00:00", 60))
+		self.assertFalse(check_bay_availability(bay_name, frappe.utils.today(), "09:00:00", 60))
 
 		with patch("frappe.msgprint") as mock_msgprint, patch(
 			"ism.api.technician_availability.check_technician_availability",
@@ -277,4 +228,4 @@ class TestScheduleEntry(ISMTestCase):
 
 		se.status = "No Show"
 		se.save(ignore_permissions=True)
-		self.assertTrue(check_bay_availability("Test Bay SE", frappe.utils.today(), "09:00:00", 60))
+		self.assertTrue(check_bay_availability(bay_name, frappe.utils.today(), "09:00:00", 60))
