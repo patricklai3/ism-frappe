@@ -100,7 +100,17 @@ def _get_vehicle_meta_for_ro(ro: Any) -> Optional[Dict[str, Any]]:
 
 def _serialize_ro_compact(ro: Any, vehicle_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 	meta = vehicle_meta if vehicle_meta is not None else _get_vehicle_meta_for_ro(ro)
-	return serialize_repair_order_compact(ro, vehicle_meta=meta)
+	data = serialize_repair_order_compact(ro, vehicle_meta=meta)
+	for field in ("discount_amount", "shop_supplies_amount", "environmental_fee_amount", "deposit_amount"):
+		if hasattr(ro, field) or getattr(ro, field, None) is not None:
+			data[field] = flt(getattr(ro, field, 0.0), 2)
+	ro_services = getattr(ro, "services", None) or []
+	for svc_obj, svc_dict in zip(ro_services, data.get("services") or []):
+		if hasattr(svc_obj, "discount_amount") or getattr(svc_obj, "discount_amount", None) is not None:
+			svc_dict["discount_amount"] = flt(getattr(svc_obj, "discount_amount", 0.0), 2)
+		if hasattr(svc_obj, "advisor_notes") or getattr(svc_obj, "advisor_notes", None) is not None:
+			svc_dict["advisor_notes"] = getattr(svc_obj, "advisor_notes", None)
+	return data
 
 
 def _resolve_customer(customer_name: str, phone: Optional[str] = None, email: Optional[str] = None) -> str:
@@ -555,12 +565,120 @@ def create_quote(
 	)
 
 
+def _apply_service_row_updates(ro: Any, update_services: Any) -> None:
+	"""Apply validated in-place updates to unapproved service rows on a Repair Order."""
+	if update_services in (None, [], ""):
+		return
+	parsed = parse_json_arg(update_services, [], label="update_services")
+	if isinstance(parsed, dict):
+		parsed = [parsed]
+	if not isinstance(parsed, list):
+		frappe.throw(_("update_services must be a list of service update dictionaries."), frappe.ValidationError)
+
+	ro_services = getattr(ro, "services", None) or []
+	row_by_name = {getattr(r, "name", None): r for r in ro_services if getattr(r, "name", None)}
+
+	for entry in parsed:
+		if not isinstance(entry, dict):
+			frappe.throw(_("Each update_services entry must be a dictionary."), frappe.ValidationError)
+
+		row_id = optional_str(entry.get("service_row_id"), "service_row_id")
+		raw_idx = entry.get("idx")
+		has_idx = raw_idx is not None and not (isinstance(raw_idx, str) and not raw_idx.strip())
+		if row_id is not None and has_idx:
+			frappe.throw(
+				_("Specify either service_row_id or idx in update_services, not both."),
+				frappe.ValidationError,
+			)
+		if row_id is None and not has_idx:
+			frappe.throw(
+				_("Each update_services entry must specify service_row_id or 1-based idx."),
+				frappe.ValidationError,
+			)
+
+		if row_id is not None:
+			row = row_by_name.get(row_id)
+			if row is None:
+				frappe.throw(
+					_("Service row '{0}' not found on {1}.").format(row_id, ro.name),
+					frappe.ValidationError,
+				)
+		else:
+			idx_1based = require_int(raw_idx, "idx", min_val=1)
+			if idx_1based > len(ro_services):
+				frappe.throw(
+					_("Service row idx {0} is out of range (1..{1}).").format(idx_1based, len(ro_services)),
+					frappe.ValidationError,
+				)
+			row = ro_services[idx_1based - 1]
+
+		if getattr(row, "approval_status", None) == "Approved":
+			label = getattr(row, "service_title", None) or getattr(row, "name", None) or ""
+			frappe.throw(
+				_(
+					"Cannot amend approved service row '{0}' in-place. Use add_supplement or unapprove/re-authorize first."
+				).format(label),
+				frappe.ValidationError,
+			)
+
+		title_val = _first_present(entry, ("service_title", "title", "job_title"), strip_str=True)
+		if title_val is not None:
+			row.service_title = require_str(title_val, "Service Title")
+
+		hours_val = _first_present(entry, _SERVICE_HOURS_ALIASES, strip_str=True)
+		if hours_val is not None:
+			row.labor_hours = optional_flt(hours_val, "Labor Hours", non_negative=True, default=0.0)
+
+		if "labor_rate" in entry and entry["labor_rate"] is not None:
+			row.labor_rate = optional_flt(entry["labor_rate"], "Labor Rate", non_negative=True, default=0.0)
+
+		if "discount_amount" in entry and entry["discount_amount"] is not None:
+			disc = optional_flt(entry["discount_amount"], "Service Discount Amount", non_negative=True, default=0.0)
+			setattr(row, "discount_amount", flt(disc, 2))
+
+		if "parts" in entry and entry["parts"] is not None:
+			raw_parts = entry["parts"]
+			if raw_parts in ([], ""):
+				row.parts = json.dumps([])
+				row.parts_total = 0.0
+			else:
+				validated_parts = _resolve_and_validate_parts(raw_parts)
+				row.parts = json.dumps(validated_parts)
+				row.parts_total = sum(
+					flt(
+						p.get("amount") if p.get("amount") is not None else flt(p.get("qty", 1)) * flt(p.get("rate", 0)),
+						2,
+					)
+					for p in validated_parts
+				)
+
+		if "advisor_notes" in entry or "notes" in entry:
+			raw_note = entry["advisor_notes"] if "advisor_notes" in entry else entry["notes"]
+			setattr(row, "advisor_notes", optional_str(raw_note, "Advisor Notes") or "")
+
+		if not cint(getattr(row, "is_flat_rate", 0)):
+			row.labor_amount = flt(flt(getattr(row, "labor_hours", 0.0)) * flt(getattr(row, "labor_rate", 0.0)), 2)
+		row.total_amount = max(
+			0.0,
+			flt(
+				flt(getattr(row, "labor_amount", 0.0))
+				+ flt(getattr(row, "parts_total", 0.0))
+				- flt(getattr(row, "discount_amount", 0.0)),
+				2,
+			),
+		)
+
+
 @frappe.whitelist()
 def amend_quote(
 	repair_order: str,
 	add_services: Optional[Union[List[Any], str]] = None,
 	remove_service_indices: Optional[Union[List[int], str]] = None,
+	update_services: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
+	discount_amount: Optional[Union[float, int, str]] = None,
+	shop_supplies_amount: Optional[Union[float, int, str]] = None,
+	environmental_fee_amount: Optional[Union[float, int, str]] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Safely amend lines on an unapproved Repair Order in Draft Estimate state."""
@@ -570,6 +688,8 @@ def amend_quote(
 			_("Cannot amend an approved or submitted Repair Order. Customer re-authorization is legally required."),
 			frappe.ValidationError,
 		)
+
+	_apply_service_row_updates(ro, update_services)
 
 	parsed_add = _coerce_service_list(add_services, label="add_services")
 	notes_str = optional_str(notes, "Notes")
@@ -596,6 +716,15 @@ def amend_quote(
 
 	if notes_str is not None:
 		ro.customer_concern = notes_str
+
+	for field, label, raw_val in (
+		("discount_amount", "Discount Amount", discount_amount),
+		("shop_supplies_amount", "Shop Supplies Amount", shop_supplies_amount),
+		("environmental_fee_amount", "Environmental Fee Amount", environmental_fee_amount),
+	):
+		if raw_val is not None and not (isinstance(raw_val, str) and not raw_val.strip()):
+			val = optional_flt(raw_val, label, non_negative=True, default=0.0)
+			setattr(ro, field, flt(val, 2))
 
 	ro.save()
 	duration_min = _estimate_duration_minutes(ro)
@@ -775,19 +904,110 @@ def update_job_status(
 	)
 
 
+def _parse_checkout_payments(payments: Any) -> Optional[List[Dict[str, Any]]]:
+	"""Validate and normalize split-tender payments list for checkout_repair_order."""
+	if payments is None or (isinstance(payments, str) and not payments.strip()):
+		return None
+	parsed = parse_json_arg(payments, None, label="payments") if isinstance(payments, str) else payments
+	if not isinstance(parsed, list) or not parsed:
+		frappe.throw(_("payments must be a non-empty list of payment tender objects."), frappe.ValidationError)
+	normalized: List[Dict[str, Any]] = []
+	for idx, entry in enumerate(parsed, start=1):
+		if not isinstance(entry, dict):
+			frappe.throw(_("Each payments entry (#{0}) must be a dictionary.").format(idx), frappe.ValidationError)
+		pm = optional_str(entry.get("payment_method"), f"payments[{idx}].payment_method")
+		if not pm:
+			frappe.throw(_("payments[{0}].payment_method is required.").format(idx), frappe.MandatoryError)
+		amt = optional_flt(entry.get("amount"), f"payments[{idx}].amount", positive=True, default=None)
+		if amt is None:
+			frappe.throw(_("payments[{0}].amount must be a positive number.").format(idx), frappe.ValidationError)
+		item: Dict[str, Any] = {"payment_method": pm, "amount": flt(amt, 2)}
+		ref = optional_str(entry.get("reference_no"), f"payments[{idx}].reference_no")
+		if ref is not None:
+			item["reference_no"] = ref
+		normalized.append(item)
+	return normalized
+
+
+@frappe.whitelist()
+def record_ro_deposit(
+	repair_order: str,
+	amount: Union[float, int, str],
+	payment_method: str = "Debit / Interac",
+	reference_no: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Record a customer deposit payment against a Repair Order."""
+	ro = _get_ro_doc(repair_order, ptype="write")
+	deposit_amt = optional_flt(amount, "Amount", positive=True, default=None)
+	if deposit_amt is None:
+		frappe.throw(_("Amount is required and must be positive."), frappe.MandatoryError)
+	method = optional_str(payment_method, "Payment Method") or "Debit / Interac"
+	ref_no = optional_str(reference_no, "Reference No")
+
+	deposit_res = ro.record_deposit(
+		amount=flt(deposit_amt, 2),
+		payment_method=method,
+		reference_no=ref_no,
+	)
+	ro.reload()
+
+	pe_name = None
+	if isinstance(deposit_res, dict):
+		pe_name = deposit_res.get("payment_entry")
+	elif isinstance(deposit_res, str) and deposit_res.strip():
+		pe_name = deposit_res.strip()
+
+	base_url = get_url()
+	urls = build_ro_urls(ro.name)
+	if pe_name:
+		urls["payment_entry"] = f"{base_url}/app/payment-entry/{quote(str(pe_name), safe='')}"
+
+	data: Dict[str, Any] = {
+		"repair_order": ro.name,
+		"status": ro.status,
+		"payment_status": getattr(ro, "payment_status", None),
+		"amount": flt(deposit_amt, 2),
+		"payment_method": method,
+		"reference_no": ref_no,
+		"deposit_amount": flt(getattr(ro, "deposit_amount", 0.0), 2),
+		"paid_amount": flt(getattr(ro, "paid_amount", 0.0), 2),
+		"grand_total": flt(getattr(ro, "grand_total", 0.0), 2),
+		"outstanding_amount": flt(getattr(ro, "outstanding_amount", 0.0), 2),
+	}
+	if pe_name:
+		data["payment_entry"] = pe_name
+
+	return build_agent_envelope(
+		success=True,
+		urls=urls,
+		data=data,
+		message=_("Recorded deposit of ${0:.2f} ({1}) on {2}.").format(flt(deposit_amt, 2), method, ro.name),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Deposit Recorded: `{ro.name}`\n"
+			f"- **Amount**: `${flt(deposit_amt, 2):,.2f}` ({method})\n"
+			f"- **Total Deposit**: `${flt(getattr(ro, 'deposit_amount', 0.0), 2):,.2f}` | "
+			f"**Outstanding**: `${flt(getattr(ro, 'outstanding_amount', 0.0), 2):,.2f}`"
+		),
+	)
+
+
 @frappe.whitelist()
 def checkout_repair_order(
 	repair_order: str,
 	payment_method: Optional[str] = None,
 	paid_amount: Optional[float] = None,
 	odometer_out: Optional[int] = None,
+	payments: Optional[Union[List[Any], str]] = None,
 	confirm: Any = False,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Invoice, record payment, complete linked schedule entries, and release a Repair Order."""
 	ro = _get_ro_doc(repair_order, ptype="write")
+	parsed_payments = _parse_checkout_payments(payments)
 	payment_method = optional_str(payment_method, "Payment Method")
-	if not payment_method:
+	if not payment_method and parsed_payments is None:
 		frappe.throw(_("Payment Method is required."), frappe.MandatoryError)
 	explicit_paid = optional_flt(paid_amount, "Paid Amount", positive=True, default=None)
 	validated_odo_out = _resolve_odometer_out(ro, odometer_out, "release a Repair Order")
@@ -799,11 +1019,14 @@ def checkout_repair_order(
 			frappe.ValidationError,
 		)
 
-	ro.process_payment_and_release(
-		payment_method=payment_method,
-		paid_amount=explicit_paid,
-		odometer_out=validated_odo_out,
-	)
+	release_kwargs: Dict[str, Any] = {
+		"payment_method": payment_method or parsed_payments[0]["payment_method"],
+		"paid_amount": explicit_paid,
+		"odometer_out": validated_odo_out,
+	}
+	if parsed_payments is not None:
+		release_kwargs["payments"] = parsed_payments
+	ro.process_payment_and_release(**release_kwargs)
 	ro.reload()
 
 	pe_name = None
