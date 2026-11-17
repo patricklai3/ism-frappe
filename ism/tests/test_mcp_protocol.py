@@ -11,12 +11,7 @@ from frappe.mcp.test_utils import McpTestCase
 from frappe.permissions import setup_custom_perms
 from frappe.utils import today
 
-from ism.tests.test_fixtures import (
-	CUSTOMER,
-	VEHICLE_VIN,
-	setup_all,
-	teardown_transactional,
-)
+from ism.tests.base import ISMTestCase
 
 
 _MCP_REQUIRED_PERMS = (
@@ -33,13 +28,8 @@ _MCP_REQUIRED_PERMS = (
 )
 
 
-class TestMcpProtocol(McpTestCase):
+class TestMcpProtocol(McpTestCase, ISMTestCase):
 	"""Integration tests validating Frappe v16 native MCP (/api/v2/mcp) support for ISM Agent Facade."""
-
-	_mcp_user = None
-	_mcp_authorization = None
-	_class_perm_restore_actions = []
-	_class_tracked_custom_perm_doctypes = set()
 
 	@classmethod
 	def _grant_role_permissions_into(
@@ -47,7 +37,6 @@ class TestMcpProtocol(McpTestCase):
 	) -> None:
 		"""Grant role permissions in Custom DocPerm without shadowing standard DocPerms."""
 		for dt, read, write, create in _MCP_REQUIRED_PERMS:
-			# Clear stale partial Custom DocPerms missing System Manager from legacy runs.
 			if (
 				frappe.db.exists("Custom DocPerm", {"parent": dt})
 				and frappe.db.exists("DocPerm", {"parent": dt, "role": "System Manager"})
@@ -130,107 +119,15 @@ class TestMcpProtocol(McpTestCase):
 
 	@classmethod
 	def _restore_role_permissions_from(cls, restore_actions: list, tracked_doctypes: set) -> None:
-		"""Restore Custom DocPerm rows modified during setup or tests."""
+		"""Clear permission caches for any DocTypes touched during a test."""
 		if not restore_actions:
 			return
-
-		frappe.set_user("Administrator")
-		frappe.db.rollback()
-		touched_doctypes = set()
-		for kind, dt, role, prev in reversed(restore_actions):
-			touched_doctypes.add(dt)
-			if kind == "delete_all":
-				frappe.db.delete("Custom DocPerm", {"parent": dt})
-			elif kind == "delete_role":
-				frappe.db.delete("Custom DocPerm", {"parent": dt, "role": role, "permlevel": 0})
-			elif kind == "restore" and prev:
-				existing = frappe.db.get_value(
-					"Custom DocPerm",
-					{"parent": dt, "role": role, "permlevel": 0, "if_owner": 0},
-					"name",
-				)
-				if existing:
-					frappe.db.set_value(
-						"Custom DocPerm",
-						existing,
-						{"read": prev[0], "write": prev[1], "create": prev[2]},
-						update_modified=False,
-					)
+		touched_doctypes = {dt for _, dt, _, _ in restore_actions}
 		for dt in touched_doctypes:
 			frappe.clear_cache(doctype=dt)
 		clear_user_cache()
-		frappe.db.commit()  # nosemgrep
 		restore_actions.clear()
 		tracked_doctypes.clear()
-
-	@classmethod
-	def _delete_user_with_retry(cls, user: str | None) -> None:
-		"""Resilient user deletion with retry to prevent MariaDB tabDocShare deadlocks."""
-		if not user:
-			return
-		frappe.set_user("Administrator")
-		for attempt in range(3):
-			try:
-				frappe.db.rollback()
-				frappe.delete_doc_if_exists("User", user, force=True, ignore_permissions=True)
-				frappe.db.commit()  # nosemgrep
-				break
-			except Exception:
-				frappe.db.rollback()
-				if attempt == 2:
-					raise
-
-	@classmethod
-	def setUpClass(cls) -> None:
-		super().setUpClass()
-		frappe.set_user("Administrator")
-		setup_all()
-		cls._class_perm_restore_actions = []
-		cls._class_tracked_custom_perm_doctypes = set()
-
-		if not frappe.db.exists("Role", "MCP Desk Tester"):
-			frappe.get_doc(doctype="Role", role_name="MCP Desk Tester", desk_access=1).insert(
-				ignore_permissions=True
-			)
-
-		cls._grant_role_permissions_into(
-			"MCP Desk Tester",
-			cls._class_perm_restore_actions,
-			cls._class_tracked_custom_perm_doctypes,
-		)
-
-		mcp_user = f"mcp.{frappe.generate_hash(length=10)}@example.com"
-		frappe.get_doc(
-			doctype="User",
-			email=mcp_user,
-			first_name="MCP Transport",
-			send_welcome_email=0,
-			roles=[{"role": "MCP Desk Tester"}],
-		).insert(ignore_permissions=True)
-		keys = generate_keys(mcp_user)
-		cls._mcp_user = mcp_user
-		cls._mcp_authorization = f"token {keys['api_key']}:{keys['api_secret']}"
-		frappe.db.commit()  # nosemgrep
-
-	@classmethod
-	def tearDownClass(cls) -> None:
-		try:
-			frappe.set_user("Administrator")
-			teardown_transactional()
-		finally:
-			try:
-				cls._restore_role_permissions_from(
-					cls._class_perm_restore_actions,
-					cls._class_tracked_custom_perm_doctypes,
-				)
-			finally:
-				try:
-					cls._delete_user_with_retry(cls._mcp_user)
-					cls._mcp_user = None
-					cls._mcp_authorization = None
-					frappe.db.commit()  # nosemgrep
-				finally:
-					super().tearDownClass()
 
 	def _grant_role_permissions(self, role: str) -> None:
 		"""Grant role permissions via Frappe permission API without shadowing standard DocPerms."""
@@ -244,7 +141,7 @@ class TestMcpProtocol(McpTestCase):
 		)
 
 	def _restore_role_permissions(self) -> None:
-		"""Restore Custom DocPerm rows modified during the test."""
+		"""Clear DocType caches after per-test rollback."""
 		actions = getattr(self, "_perm_restore_actions", None) or []
 		if actions:
 			self._restore_role_permissions_from(
@@ -253,25 +150,55 @@ class TestMcpProtocol(McpTestCase):
 			)
 
 	def create_user(self, first_name):
-		if first_name == "MCP Transport" and getattr(self.__class__, "_mcp_user", None):
-			return self.__class__._mcp_user, self.__class__._mcp_authorization
-		return super().create_user(first_name)
+		"""Provision an in-transaction MCP user with canonical ISM Manager permissions."""
+		mcp_user = f"mcp.{frappe.generate_hash(length=10).lower()}@example.com"
+		user_doc = frappe.get_doc(
+			doctype="User",
+			email=mcp_user,
+			first_name=first_name,
+			last_name="Tester",
+			enabled=1,
+			user_type="System User",
+			send_welcome_email=0,
+			roles=[
+				{"role": "ISM Manager"},
+				{"role": "Sales User"},
+				{"role": "Maintenance User"},
+				{"role": "Stock User"},
+				{"role": "Accounts User"},
+			],
+		)
+		user_doc.flags.ignore_password_policy = True
+		user_doc.insert(ignore_permissions=True)
+		keys = generate_keys(mcp_user)
+		auth_header = f"token {keys['api_key']}:{keys['api_secret']}"
+		return mcp_user, auth_header
+
+	def delete_user(self, user):
+		"""No-op delete when running inside per-test transaction rollback."""
+		return None
 
 	def setUp(self):
+		frappe.db.rollback()
+		self._tracked_docs = []
 		self._perm_restore_actions = []
 		self._tracked_custom_perm_doctypes = set()
 		super().setUp()
 		frappe.set_user("Administrator")
-
-	def delete_user(self, user):
-		"""Resilient delete_user override with retry to prevent MariaDB tabDocShare deadlocks."""
-		self._delete_user_with_retry(user)
+		self.manifest = self.get_manifest()
+		self.customer = self.manifest.resolve("customers.retail_1")
+		self.vehicle_vin = self.manifest.resolve("vehicles.veh_model3_liam")
 
 	def tearDown(self):
 		try:
-			self._restore_role_permissions()
-		finally:
+			frappe.set_user("Administrator")
 			super().tearDown()
+		finally:
+			try:
+				self._restore_role_permissions()
+			finally:
+				self.cleanup_tracked_docs()
+				frappe.db.rollback()
 
 	def invoke(self, *, tool="call_method", auth_header=None, **arguments):
 		"""Helper to dispatch JSON-RPC 2.0 tools/call to /api/v2/mcp."""
@@ -334,8 +261,8 @@ class TestMcpProtocol(McpTestCase):
 		res = self.result(
 			method="ism.api.agent.create_quote",
 			args={
-				"customer": CUSTOMER,
-				"vehicle": VEHICLE_VIN,
+				"customer": self.customer,
+				"vehicle": self.vehicle_vin,
 				"odometer_in": 45000,
 				"concern": "Loud clicking from front suspension over bumps",
 			},
@@ -360,8 +287,8 @@ class TestMcpProtocol(McpTestCase):
 		res_summary = self.result(
 			method="ism.api.agent.create_quote",
 			args={
-				"customer": CUSTOMER,
-				"vehicle": VEHICLE_VIN,
+				"customer": self.customer,
+				"vehicle": self.vehicle_vin,
 				"odometer_in": 45000,
 				"concern": "Summary opt-in check",
 				"include_summary": True,
@@ -373,7 +300,7 @@ class TestMcpProtocol(McpTestCase):
 		"""Verify ism.api.agent.amend_quote via MCP call_method."""
 		res1 = self.result(
 			method="ism.api.agent.create_quote",
-			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "odometer_in": 45000, "concern": "Diagnostic needed"},
+			args={"customer": self.customer, "vehicle": self.vehicle_vin, "odometer_in": 45000, "concern": "Diagnostic needed"},
 		)
 		ro_name = res1["result"]["data"]["name"]
 
@@ -422,7 +349,7 @@ class TestMcpProtocol(McpTestCase):
 		"""Verify ism.api.agent.send_quote_for_approval via MCP call_method."""
 		res1 = self.result(
 			method="ism.api.agent.create_quote",
-			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "odometer_in": 45000, "concern": "Approval test"},
+			args={"customer": self.customer, "vehicle": self.vehicle_vin, "odometer_in": 45000, "concern": "Approval test"},
 		)
 		ro_name = res1["result"]["data"]["name"]
 
@@ -442,7 +369,7 @@ class TestMcpProtocol(McpTestCase):
 		"""Verify update_job_status blocks work when authorization is not granted."""
 		res1 = self.result(
 			method="ism.api.agent.create_quote",
-			args={"customer": CUSTOMER, "vehicle": VEHICLE_VIN, "odometer_in": 45000, "concern": "Guard test"},
+			args={"customer": self.customer, "vehicle": self.vehicle_vin, "odometer_in": 45000, "concern": "Guard test"},
 		)
 		ro_name = res1["result"]["data"]["name"]
 
@@ -462,7 +389,6 @@ class TestMcpProtocol(McpTestCase):
 
 	def test_mcp_rbac_dedicated_service_advisor_user(self):
 		"""Verify dedicated Service Advisor user has execution permissions for Agent Facade."""
-		# 1. Ensure Service Advisor role exists with Desk Access
 		if not frappe.db.exists("Role", "Service Advisor"):
 			frappe.get_doc(
 				doctype="Role",
@@ -470,7 +396,6 @@ class TestMcpProtocol(McpTestCase):
 				desk_access=1,
 			).insert(ignore_permissions=True)
 
-		# 2. Grant permissions on required DocTypes to Service Advisor safely
 		self._grant_role_permissions("Service Advisor")
 
 		# Standard DocPerms for System Manager and ISM Manager must remain intact on ISM Settings
@@ -478,30 +403,29 @@ class TestMcpProtocol(McpTestCase):
 			self.assertTrue(frappe.db.exists("Custom DocPerm", {"parent": "ISM Settings", "role": "System Manager"}))
 			self.assertTrue(frappe.db.exists("Custom DocPerm", {"parent": "ISM Settings", "role": "ISM Manager"}))
 
-		# 3. Create dedicated agent user
 		user_email = f"shop_agent_{frappe.generate_hash(length=6).lower()}@example.com"
-		frappe.get_doc(
+		user_doc = frappe.get_doc(
 			doctype="User",
 			email=user_email,
 			first_name="Shop",
 			last_name="Agent",
 			send_welcome_email=0,
 			roles=[{"role": "Service Advisor"}],
-		).insert(ignore_permissions=True)
-		self.addCleanup(self.delete_user, user_email)
+		)
+		user_doc.flags.ignore_password_policy = True
+		user_doc.insert(ignore_permissions=True)
 
 		keys = generate_keys(user_email)
 		auth_header = f"token {keys['api_key']}:{keys['api_secret']}"
-		frappe.db.commit()
 
-		# 4. Service Advisor can call create_quote via MCP
+		# Service Advisor can call create_quote via MCP
 		response = self.invoke(
 			tool="call_method",
 			auth_header=auth_header,
 			method="ism.api.agent.create_quote",
 			args={
-				"customer": CUSTOMER,
-				"vehicle": VEHICLE_VIN,
+				"customer": self.customer,
+				"vehicle": self.vehicle_vin,
 				"odometer_in": 45000,
 				"concern": "Created by dedicated shop agent user",
 			},
@@ -512,7 +436,7 @@ class TestMcpProtocol(McpTestCase):
 		data = res.get("structuredContent", {}).get("result", {})
 		self.assertTrue(data.get("success"))
 
-		# 5. Service Advisor is strictly blocked from System Manager operations (e.g. System Settings modification)
+		# Service Advisor is strictly blocked from System Manager operations (e.g. System Settings modification)
 		forbidden_response = self.invoke(
 			tool="create_document",
 			auth_header=auth_header,
@@ -521,27 +445,11 @@ class TestMcpProtocol(McpTestCase):
 		)
 		self.assertEqual(forbidden_response.status_code, 200)
 		f_res = forbidden_response.json.get("result", {})
-		# Must result in an error
 		self.assertTrue(f_res.get("isError", False), "Service Advisor should not be allowed to modify System Settings")
 
 	def test_mcp_chunk2_tools_end_to_end(self):
 		"""Verify Chunk 2 tools (deferred services, opposite side, toggle completion, supplement, park, action items) via MCP."""
-		veh_doc = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
-		_sys_fields = {"name", "owner", "creation", "modified", "modified_by", "parent", "parentfield", "parenttype", "idx", "docstatus", "doctype"}
-		orig_deferred = [
-			{k: v for k, v in row.as_dict().items() if k not in _sys_fields}
-			for row in (veh_doc.deferred_services or [])
-		]
-
-		def _restore_vehicle_deferred_services():
-			frappe.set_user("Administrator")
-			frappe.db.rollback()
-			veh = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
-			veh.set("deferred_services", orig_deferred)
-			veh.save(ignore_permissions=True)
-			frappe.db.commit()  # nosemgrep
-
-		self.addCleanup(_restore_vehicle_deferred_services)
+		veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle_vin)
 		veh_doc.append(
 			"deferred_services",
 			{
@@ -552,14 +460,13 @@ class TestMcpProtocol(McpTestCase):
 			},
 		)
 		veh_doc.save(ignore_permissions=True)
-		frappe.db.commit()  # nosemgrep
 
 		# Create quote and verify deferred services are surfaced automatically
 		res_q = self.result(
 			method="ism.api.agent.create_quote",
 			args={
-				"customer_name": CUSTOMER,
-				"vehicle_identifier": VEHICLE_VIN,
+				"customer_name": self.customer,
+				"vehicle_identifier": self.vehicle_vin,
 				"odometer_in": 45000,
 				"services": [{"service_title": "Front Left Strut Replacement", "labor_hours": 2.0, "labor_rate": 140.0}],
 			},
@@ -596,7 +503,6 @@ class TestMcpProtocol(McpTestCase):
 		ro_doc.approval_status = "Approved"
 		ro_doc.status = "Authorized - In Progress"
 		ro_doc.save(ignore_permissions=True)
-		frappe.db.commit()  # nosemgrep
 
 		# Toggle completion, add supplement, park bay
 		res_tog = self.result(
@@ -630,13 +536,6 @@ class TestMcpProtocol(McpTestCase):
 		)["result"]
 		self.assertTrue(res_sai["success"])
 		item_name = res_sai["data"]["name"]
-		self.addCleanup(
-			lambda: (
-				frappe.set_user("Administrator"),
-				frappe.delete_doc_if_exists("Shop Action Item", item_name, force=True, ignore_permissions=True),
-				frappe.db.commit(),
-			)
-		)
 
 		res_list = self.result(method="ism.api.agent.list_shop_action_items", args={"status": "Open"})["result"]
 		self.assertTrue(any(it["name"] == item_name for it in res_list["data"]["items"]))

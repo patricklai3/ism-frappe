@@ -54,43 +54,42 @@ from ism.api.agent import (
 )
 from ism.api.scheduling import resolve_service_bay_identifier
 from ism.ism.doctype.repair_order.repair_order import _get_default_labor_rate
-from ism.tests.base import ISMTestCase
-from ism.tests.test_fixtures import CUSTOMER, PREFIX, VEHICLE_VIN, ensure_ism_settings, setup_all, teardown_transactional
+from ism.scheduling.time_utils import invalidate_shop_settings_cache
+from ism.tests.base import ISMTestCase, TEST_PREFIX
 
 
 class TestAgentFacade(ISMTestCase):
 	"""Comprehensive test suite for the Curated Agent Facade API layer."""
 
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls.emp_map = setup_all()
-
-	@classmethod
-	def tearDownClass(cls):
-		teardown_transactional()
-		super().tearDownClass()
-
 	def setUp(self):
 		super().setUp()
-		ensure_ism_settings(holiday_list=None)
-		self.emp_map = self.__class__.emp_map
+		self.manifest = self.get_manifest()
+		self.customer = self.manifest.resolve("customers.retail_1")
+		self.vehicle_vin = self.manifest.resolve("vehicles.veh_model3_liam")
+		frappe.db.set_single_value("ISM Settings", "holiday_list", None)
+		invalidate_shop_settings_cache()
+
+	def tearDown(self):
+		try:
+			super().tearDown()
+		finally:
+			invalidate_shop_settings_cache()
 
 	def _track_quote_ro(self, res):
 		ro_name = res["data"]["name"]
 		self.track("Repair Order", ro_name)
 		ro_meta = frappe.db.get_value("Repair Order", ro_name, ["customer", "vehicle"], as_dict=True)
 		if ro_meta:
-			if ro_meta.vehicle and ro_meta.vehicle != VEHICLE_VIN:
+			if ro_meta.vehicle and ro_meta.vehicle != self.vehicle_vin:
 				self.track("Repair Vehicle", ro_meta.vehicle)
-			if ro_meta.customer and ro_meta.customer != CUSTOMER:
+			if ro_meta.customer and ro_meta.customer != self.customer:
 				self.track("Customer", ro_meta.customer)
 		return ro_name
 
 	def test_create_quote_basic_flow(self):
 		"""Verify create_quote creates a Draft Estimate Repair Order with exact 13% tax math and summary card."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Agent Cust 1",
+			customer_name=f"{TEST_PREFIX}Agent Cust 1",
 			vehicle_identifier="5YJ3E1EBXNF999001",
 			odometer_in=41200,
 			services=[
@@ -128,7 +127,7 @@ class TestAgentFacade(ISMTestCase):
 
 		# Verify opt-in summary_card works when requested
 		res_summary = create_quote(
-			customer_name=f"{PREFIX}Agent Cust 1b",
+			customer_name=f"{TEST_PREFIX}Agent Cust 1b",
 			vehicle_identifier="5YJ3E1EBXNF999009",
 			odometer_in=41300,
 			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
@@ -141,7 +140,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_create_quote_default_inspection_fallback(self):
 		"""Verify create_quote provides a default inspection service when services list is empty."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Agent Cust 2",
+			customer_name=f"{TEST_PREFIX}Agent Cust 2",
 			vehicle_identifier="5YJ3E1EBXNF999002",
 			odometer_in=41400,
 			services=[],
@@ -157,7 +156,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_amend_quote_safely_modifies_lines(self):
 		"""Verify amend_quote can add and remove service rows on an unapproved Repair Order."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Agent Cust 3",
+			customer_name=f"{TEST_PREFIX}Agent Cust 3",
 			vehicle_identifier="5YJ3E1EBXNF999003",
 			odometer_in=41500,
 			services=[
@@ -186,7 +185,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_amend_quote_blocked_on_approved_order(self):
 		"""Verify amend_quote strictly rejects modifications if the quote has already been approved."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Agent Cust 4",
+			customer_name=f"{TEST_PREFIX}Agent Cust 4",
 			vehicle_identifier="5YJ3E1EBXNF999004",
 			odometer_in=41600,
 			services=[{"service_title": "Service A", "labor_hours": 1.0}],
@@ -210,8 +209,8 @@ class TestAgentFacade(ISMTestCase):
 	def test_book_appointment_and_realtime_broadcast(self):
 		"""Verify book_appointment allocates a Schedule Entry and emits a realtime event."""
 		res = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=41700,
 			services=[{"service_title": "Service Book", "labor_hours": 1.0}],
 		)
@@ -223,7 +222,7 @@ class TestAgentFacade(ISMTestCase):
 				repair_order=ro_name,
 				scheduled_date=today(),
 				start_time="09:00:00",
-				service_bay=f"{PREFIX}Bay 1",
+				service_bay=self.manifest.resolve("bays.main_lift"),
 			)
 			self.assertTrue(book_res["success"])
 			se_name = book_res["data"]["name"]
@@ -236,9 +235,11 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_send_quote_for_approval_generates_token(self):
 		"""Verify send_quote_for_approval generates a secure token and enforces email presence."""
+		no_email_cust = self.create_test_customer(f"{TEST_PREFIX}NoEmailCust")
+		no_email_veh = self.create_test_vehicle(customer=no_email_cust.name)
 		res = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=no_email_cust.name,
+			vehicle_identifier=no_email_veh.name,
 			odometer_in=41800,
 			services=[{"service_title": "Service Auth", "labor_hours": 1.0}],
 		)
@@ -256,15 +257,15 @@ class TestAgentFacade(ISMTestCase):
 	def test_import_supplier_catalog(self):
 		"""Verify bulk importing parts via CSV content links supplier and formats compact metrics."""
 		csv_data = "Part Number,Part Description,Price\nAGY-PAD-001,Front Ceramic Pads,85.00\nAGY-ROT-002,Vented Brake Rotor,120.00"
-		res = import_supplier_catalog(raw_text=csv_data, supplier=f"{PREFIX}Supplier", include_summary=True)
+		res = import_supplier_catalog(raw_text=csv_data, supplier=f"{TEST_PREFIX}Supplier", include_summary=True)
 		self.assertTrue(res["success"])
-		self.track("Supplier", f"{PREFIX}Supplier")
+		self.track("Supplier", f"{TEST_PREFIX}Supplier")
 		for item in res["data"].get("created", []):
 			item_code = item.get("item_code") if isinstance(item, dict) else item
 			if item_code:
 				self.track("Item", item_code)
 		self.assertEqual(res["data"]["total_created"], 2)
-		self.assertEqual(res["data"]["supplier"], f"{PREFIX}Supplier")
+		self.assertEqual(res["data"]["supplier"], f"{TEST_PREFIX}Supplier")
 		self.assertIn("summary_card", res)
 		self.assertIn("Created Items", res["summary_card"])
 
@@ -309,8 +310,8 @@ class TestAgentFacade(ISMTestCase):
 	def test_update_job_status_authorization_lock(self):
 		"""Verify update_job_status enforces auth lock and uses manual_parts_hold on hold."""
 		res = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=10000,
 			services=[{"service_title": "Lock Test", "labor_hours": 1.0}],
 		)
@@ -346,7 +347,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_create_quote_plate_vehicle_customer_contact_and_default_rate(self):
 		"""Verify license-plate vehicle creation, customer contact persistence, and default labor rate."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Plate Cust",
+			customer_name=f"{TEST_PREFIX}Plate Cust",
 			vehicle_identifier="ABCD-789",
 			customer_phone="416-555-0199",
 			customer_email="platecust@example.com",
@@ -368,8 +369,8 @@ class TestAgentFacade(ISMTestCase):
 	def test_extended_facade_endpoints(self):
 		"""Verify check_parts_stock, submit_procurement_orders (submit default + draft override), tech overview, and unscheduled services."""
 		res = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42000,
 			services=[{"service_title": "Stock & Tech Check", "labor_hours": 1.0}],
 		)
@@ -417,7 +418,7 @@ class TestAgentFacade(ISMTestCase):
 		"""End-to-end smoke test covering Chunk 1 compact envelopes, wrappers, and hold isolation."""
 		# 1. Compact intake with license plate, customer contact, and server default labor rate
 		quote_res = create_quote(
-			customer_name=f"{PREFIX}Workflow Cust",
+			customer_name=f"{TEST_PREFIX}Workflow Cust",
 			vehicle_identifier="WORK-123",
 			customer_phone="416-555-0142",
 			customer_email="workflow@example.com",
@@ -488,18 +489,18 @@ class TestAgentFacade(ISMTestCase):
 		"""Verify Reman normalization, deficit calculation, slot IDs, PO receiving, and checkout."""
 		cat = import_supplier_catalog(
 			raw_text="ACC-CAL-01 | Rear Reman Caliper | OEM | Reman | 320.00 | 210.00 | 0 | A | 1188611-00-R",
-			supplier=f"{PREFIX}Parts Co",
+			supplier=f"{TEST_PREFIX}Parts Co",
 			default_source="OEM",
 			default_condition="Reman",
 		)
-		self.track("Supplier", f"{PREFIX}Parts Co")
+		self.track("Supplier", f"{TEST_PREFIX}Parts Co")
 		created_item = cat["data"]["created"][0]
 		self.track("Item", created_item["item_code"])
 		self.assertEqual(created_item["part_condition"], "Reconditioned")
 		self.assertEqual(created_item["item_code"], "OEM-ACC-CAL-01-RCN")
 
 		q = create_quote(
-			customer_name=f"{PREFIX}Fast Flow Cust",
+			customer_name=f"{TEST_PREFIX}Fast Flow Cust",
 			vehicle_identifier="FAST-888",
 			services=[{
 				"service_title": "Caliper Replace",
@@ -535,13 +536,18 @@ class TestAgentFacade(ISMTestCase):
 		ro.approval_status = "Approved"
 		ro.save(ignore_permissions=True)
 
-		book_res = book_appointment(repair_order=ro_name, scheduled_date=today(), start_time="10:00:00", service_bay=f"{PREFIX}Bay 1")
+		book_res = book_appointment(
+			repair_order=ro_name,
+			scheduled_date=today(),
+			start_time="10:00:00",
+			service_bay=self.manifest.resolve("bays.main_lift"),
+		)
 		se_name = book_res["data"]["name"]
 		self.track("Schedule Entry", se_name)
 
 		po_res = submit_procurement_orders(
 			repair_order=ro_name,
-			parts_data=[{"item_code": "OEM-ACC-CAL-01-RCN", "qty": 1, "supplier": f"{PREFIX}Parts Co"}],
+			parts_data=[{"item_code": "OEM-ACC-CAL-01-RCN", "qty": 1, "supplier": f"{TEST_PREFIX}Parts Co"}],
 			submit=False,
 		)
 		po_name = po_res["data"]["purchase_orders"][0]
@@ -578,17 +584,7 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_chunk2_floor_supplements_deferred_and_action_items(self):
 		"""Verify deferred service discovery/intake, opposite-side duplication, supplements, service completion, bay park, and shop action items."""
-		veh_doc = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
-		_skip = {"name", "creation", "modified", "modified_by", "owner", "idx", "docstatus", "parent", "parentfield", "parenttype"}
-		orig_deferred = [{k: v for k, v in r.as_dict().items() if k not in _skip} for r in (veh_doc.deferred_services or [])]
-
-		def _restore_deferred():
-			v = frappe.get_doc("Repair Vehicle", VEHICLE_VIN)
-			v.set("deferred_services", orig_deferred)
-			v.save(ignore_permissions=True)
-			frappe.db.commit()
-
-		self.addCleanup(_restore_deferred)
+		veh_doc = frappe.get_doc("Repair Vehicle", self.vehicle_vin)
 		veh_doc.append(
 			"deferred_services",
 			{
@@ -601,13 +597,13 @@ class TestAgentFacade(ISMTestCase):
 		veh_doc.save(ignore_permissions=True)
 
 		# 1. Deferred discovery standalone + surfaced automatically inside create_quote
-		def_res = get_deferred_services(vehicle=VEHICLE_VIN)
+		def_res = get_deferred_services(vehicle=self.vehicle_vin)
 		self.assertTrue(def_res["success"])
 		self.assertGreaterEqual(def_res["data"]["deferred_count"], 1)
 
 		q_res = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42200,
 			notes="Front suspension rattle",
 			services=[{"service_title": "Front Left Control Arm Replacement", "labor_hours": 1.5, "labor_rate": 140.0}],
@@ -656,7 +652,7 @@ class TestAgentFacade(ISMTestCase):
 
 		# 5. Shop Action Items lifecycle
 		created = create_shop_action_item(
-			title=f"{PREFIX} Rust-seized rear knuckle",
+			title=f"{TEST_PREFIX} Rust-seized rear knuckle",
 			category="Shop Floor Discrepancy",
 			priority="High",
 			reference_doctype="Repair Order",
@@ -679,8 +675,8 @@ class TestAgentFacade(ISMTestCase):
 		"""Verify Service Package expansion, SMS link fallback, start bay location, Repair entry_type, and batch toggle."""
 		part = frappe.get_doc({
 			"doctype": "Item",
-			"item_code": f"{PREFIX}LINK-PART-01",
-			"item_name": "Test Compliance Link",
+			"item_code": f"{TEST_PREFIX}LINK-PART-01",
+			"item_name": "Lateral Compliance Link",
 			"item_group": "Products",
 			"is_stock_item": 0,
 			"standard_rate": 190.0,
@@ -689,7 +685,7 @@ class TestAgentFacade(ISMTestCase):
 
 		pkg = frappe.get_doc({
 			"doctype": "Service Package",
-			"package_name": f"{PREFIX}Lateral Link LH (Remove and Replace)",
+			"package_name": f"{TEST_PREFIX}Lateral Link LH (Remove and Replace)",
 			"correction_code": "31-03-45-02",
 			"is_symmetrical": 1,
 			"standard_labor_hours": 0.9,
@@ -700,8 +696,8 @@ class TestAgentFacade(ISMTestCase):
 
 		# 1. Quote by package title expands FRT hours, correction code, position, and parts; explicit override wins
 		q = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42300,
 			services=[
 				pkg.package_name,
@@ -754,7 +750,7 @@ class TestAgentFacade(ISMTestCase):
 			repair_order=ro_name,
 			scheduled_date=today(),
 			start_time="11:00:00",
-			service_bay=f"{PREFIX}Bay 1",
+			service_bay=self.manifest.resolve("bays.main_lift"),
 		)
 		self.track("Schedule Entry", book_res["data"]["name"])
 		self.assertEqual(book_res["data"]["entry_type"], "Repair")
@@ -773,8 +769,8 @@ class TestAgentFacade(ISMTestCase):
 		"""Verify reschedule, status transitions (Confirmed/No Show), create RO from entry, compact slots, and estimate_duration."""
 		target_day = add_days(today(), 2)
 		q = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42400,
 			services=[{"service_title": "Suspension Noise Check", "labor_hours": 1.0}],
 		)
@@ -806,7 +802,7 @@ class TestAgentFacade(ISMTestCase):
 				repair_order=ro_name,
 				scheduled_date=target_day,
 				start_time="09:00:00",
-				service_bay=f"{PREFIX}Bay 1",
+				service_bay=self.manifest.resolve("bays.main_lift"),
 			)
 		calendar_calls = [c for c in mock_realtime.call_args_list if c.args and c.args[0] == "ism_calendar_update"]
 		self.assertEqual(len(calendar_calls), 1)
@@ -838,12 +834,12 @@ class TestAgentFacade(ISMTestCase):
 		pre_se = frappe.get_doc({
 			"doctype": "Schedule Entry",
 			"entry_type": "Diagnostic",
-			"customer": CUSTOMER,
-			"repair_vehicle": VEHICLE_VIN,
+			"customer": self.customer,
+			"repair_vehicle": self.vehicle_vin,
 			"scheduled_date": target_day,
 			"scheduled_time": "14:00:00",
 			"estimated_duration": 60,
-			"service_bay": f"{PREFIX}Bay 2",
+			"service_bay": self.manifest.resolve("bays.alignment"),
 			"notes": "Walk-in vibration check",
 			"status": "Scheduled",
 		}).insert(ignore_permissions=True)
@@ -883,8 +879,17 @@ class TestAgentFacade(ISMTestCase):
 		self.assertGreater(len(returned_times), 3)
 		self.assertEqual(returned_times[0], "10:00")
 		self.assertNotIn("08:00", returned_times)
-		test_bays = [b for b in midmorning["data"]["slots"][0]["available_bay_ids"] if b.startswith(PREFIX)]
-		self.assertEqual(test_bays, [f"{PREFIX}Bay 1", f"{PREFIX}Bay 2"])
+		available_bays = midmorning["data"]["slots"][0]["available_bay_ids"]
+		self.assertEqual(
+			available_bays,
+			[
+				self.manifest.resolve("bays.main_lift"),
+				self.manifest.resolve("bays.tire_quick"),
+				self.manifest.resolve("bays.alignment"),
+				self.manifest.resolve("bays.hv_diagnostics"),
+			],
+		)
+		self.assertNotIn(self.manifest.resolve("bays.offline"), available_bays)
 
 		# Automatic today cutoff skips elapsed slots in now_datetime()
 		with patch("ism.api.agent.now_datetime", return_value=datetime.strptime(f"{today()} 11:10:00", "%Y-%m-%d %H:%M:%S")):
@@ -898,7 +903,7 @@ class TestAgentFacade(ISMTestCase):
 		walkin = book_appointment(
 			scheduled_date=future_day,
 			start_time="10:00:00",
-			service_bay=f"{PREFIX}Bay 1",
+			service_bay=self.manifest.resolve("bays.main_lift"),
 			technician=tech_id,
 			entry_type="Diagnostic",
 			estimated_duration=30,
@@ -936,8 +941,8 @@ class TestAgentFacade(ISMTestCase):
 			self.assertAlmostEqual(_get_default_labor_rate(), 165.0, places=2)
 
 			q = create_quote(
-				customer_name=CUSTOMER,
-				vehicle_identifier=VEHICLE_VIN,
+				customer_name=self.customer,
+				vehicle_identifier=self.vehicle_vin,
 				odometer_in=42500,
 				services=[{"service_title": "Custom Rate Verification", "labor_hours": 1.0}],
 			)
@@ -951,7 +956,7 @@ class TestAgentFacade(ISMTestCase):
 		"""Verify structured items catalog ingestion, supplier linking, and component alternate lookup."""
 		pkg = frappe.get_doc({
 			"doctype": "Service Package",
-			"package_name": f"{PREFIX}Front Control Arm Package",
+			"package_name": f"{TEST_PREFIX}Front Control Arm Package",
 			"applicable_model": "Model 3",
 			"standard_labor_hours": 1.2,
 		}).insert(ignore_permissions=True)
@@ -986,12 +991,12 @@ class TestAgentFacade(ISMTestCase):
 		]
 		res = import_supplier_catalog(
 			items=json.dumps(structured_items),
-			supplier=f"{PREFIX}Structured Supplier",
+			supplier=f"{TEST_PREFIX}Structured Supplier",
 			service_package=pkg.name,
 			include_summary=True,
 		)
 		self.assertTrue(res["success"])
-		self.track("Supplier", f"{PREFIX}Structured Supplier")
+		self.track("Supplier", f"{TEST_PREFIX}Structured Supplier")
 		self.assertEqual(res["data"]["total_created"], 2)
 		self.assertEqual(res["data"]["total_errors"], 0)
 		self.assertIn("summary_card", res)
@@ -1017,10 +1022,11 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_tesla_on_conflict_force_and_fetch_compatibility(self):
 		"""Verify fetch_tesla_manual vehicle forwarding and import_tesla_procedure on_conflict/force policies."""
-		# VEHICLE_VIN is a 2012 Model S ("5YJSA1E26CF000001")
+		model_s_customer = self.manifest.resolve("customers.retail_3")
+		model_s_vin = self.manifest.resolve("vehicles.veh_models_owen")
 		q = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=model_s_customer,
+			vehicle_identifier=model_s_vin,
 			odometer_in=42600,
 			services=[{"service_title": "Initial Inspection", "labor_hours": 0.5}],
 		)
@@ -1031,14 +1037,14 @@ class TestAgentFacade(ISMTestCase):
 			manual_res = fetch_tesla_manual(
 				"https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-TEST.html",
 				repair_order=ro_name,
-				vehicle=VEHICLE_VIN,
+				vehicle=model_s_vin,
 				include_summary=True,
 			)
 			self.assertTrue(manual_res["success"])
 			mock_fetch.assert_called_once_with(
 				"https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-TEST.html",
 				repair_order=ro_name,
-				vehicle=VEHICLE_VIN,
+				vehicle=model_s_vin,
 			)
 			self.assertIn("summary_card", manual_res)
 
@@ -1117,8 +1123,8 @@ class TestAgentFacade(ISMTestCase):
 		self.assertFalse(bad_vin["success"])
 		self.assertTrue(bad_vin.get("error"))
 
-		co_owner = self.create_test_customer(f"{PREFIX}CoOwner")
-		veh = self.create_test_vehicle(vin="5YJ3E1EBXNF888123", customer=CUSTOMER, license_plate="FAC-888")
+		co_owner = self.create_test_customer(f"{TEST_PREFIX}CoOwner")
+		veh = self.create_test_vehicle(vin="5YJ3E1EBXNF888123", customer=self.customer, license_plate="FAC-888")
 
 		linked = link_vehicle_customer(
 			vehicle=veh.name,
@@ -1128,7 +1134,7 @@ class TestAgentFacade(ISMTestCase):
 			include_summary=True,
 		)
 		self.assertTrue(linked["success"])
-		self.assertEqual(linked["data"]["primary_customer"], CUSTOMER)
+		self.assertEqual(linked["data"]["primary_customer"], self.customer)
 		owner_ids = {o["customer"] for o in linked["data"]["owners"]}
 		self.assertIn(co_owner.name, owner_ids)
 		self.assertIn("summary_card", linked)
@@ -1148,10 +1154,10 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_approval_hardening_and_checkin_inspection_facade(self):
 		"""Verify send_quote_for_approval SMS message_id/warning propagation and check-in inspection endpoints."""
-		cust = self.create_test_customer(f"{PREFIX}InspectCust", mobile_no="416-555-0188")
+		cust = self.create_test_customer(f"{TEST_PREFIX}InspectCust", mobile_no="416-555-0188")
 		q = create_quote(
 			customer_name=cust.name,
-			vehicle_identifier=VEHICLE_VIN,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42700,
 			services=[{"service_title": "Walkaround & Brake Check", "labor_hours": 1.0}],
 		)
@@ -1190,7 +1196,7 @@ class TestAgentFacade(ISMTestCase):
 
 		tpl = frappe.get_doc({
 			"doctype": "Inspection Template",
-			"template_name": f"{PREFIX}Facade Walkaround",
+			"template_name": f"{TEST_PREFIX}Facade Walkaround",
 			"is_active": 1,
 			"items": [
 				{"inspection_description": "Front Windshield & Glass", "category": "Exterior"},
@@ -1253,10 +1259,10 @@ class TestAgentFacade(ISMTestCase):
 			create_shop_action_item as create_action_item_doc,
 		)
 
-		cust = self.create_test_customer(f"{PREFIX}SecCust", mobile_no="416-555-0199")
+		cust = self.create_test_customer(f"{TEST_PREFIX}SecCust", mobile_no="416-555-0199")
 		q = create_quote(
 			customer_name=cust.name,
-			vehicle_identifier=VEHICLE_VIN,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42800,
 			services=[{"service_title": "Security Guard Brake Check", "labor_hours": 1.0}],
 		)
@@ -1273,7 +1279,7 @@ class TestAgentFacade(ISMTestCase):
 			frappe.set_user("Guest")
 
 			guest_calls = [
-				lambda: create_quote(customer_name=cust.name, vehicle_identifier=VEHICLE_VIN),
+				lambda: create_quote(customer_name=cust.name, vehicle_identifier=self.vehicle_vin),
 				lambda: amend_quote(repair_order=ro_name, notes="Guest edit"),
 				lambda: find_available_slots(target_date=today()),
 				lambda: book_appointment(repair_order=ro_name, scheduled_date=add_days(today(), 1), start_time="10:00:00"),
@@ -1302,10 +1308,10 @@ class TestAgentFacade(ISMTestCase):
 				lambda: update_appointment_status(schedule_entry="SE-NONE", status="Confirmed"),
 				lambda: create_ro_from_appointment(schedule_entry="SE-NONE"),
 				lambda: estimate_duration(repair_order=ro_name),
-				lambda: decode_vehicle_vin(vin=VEHICLE_VIN),
+				lambda: decode_vehicle_vin(vin=self.vehicle_vin),
 				lambda: search_vehicles(query="Model 3"),
-				lambda: get_vehicle_intelligence(vehicle=VEHICLE_VIN),
-				lambda: link_vehicle_customer(vehicle=VEHICLE_VIN, customer=cust.name),
+				lambda: get_vehicle_intelligence(vehicle=self.vehicle_vin),
+				lambda: link_vehicle_customer(vehicle=self.vehicle_vin, customer=cust.name),
 				lambda: list_inspection_templates(),
 				lambda: get_inspection_template(),
 				lambda: apply_inspection_template(repair_order=ro_name),
@@ -1348,7 +1354,7 @@ class TestAgentFacade(ISMTestCase):
 		self.assertEqual(ro.approval_status, "Approved")
 
 		type_confusion_calls = [
-			lambda: create_quote(customer_name={"!=": ""}, vehicle_identifier=VEHICLE_VIN),
+			lambda: create_quote(customer_name={"!=": ""}, vehicle_identifier=self.vehicle_vin),
 			lambda: get_deferred_services(vehicle={"!=": ""}),
 			lambda: list_shop_action_items(status={"!=": ""}),
 			lambda: search_vehicles(customer={"!=": ""}),
@@ -1363,11 +1369,11 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_resource_resolution_relative_time_and_conflict_feedback(self):
 		"""Verify display-name bay/tech resolution, strict ISO dates/times, and structured conflict feedback."""
-		bay_1 = f"{PREFIX}Bay 1"
-		bay_2 = f"{PREFIX}Bay 2"
+		bay_1 = self.manifest.resolve("bays.main_lift")
+		bay_2 = self.manifest.resolve("bays.alignment")
 		tomorrow_date = add_days(today(), 1)
 
-		tech_id = self.emp_map["tech_active_1"]
+		tech_id = self.manifest.resolve("techs.marcus")
 		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name")
 		self.assertTrue(tech_id and tech_name)
 
@@ -1378,7 +1384,7 @@ class TestAgentFacade(ISMTestCase):
 				scheduled_date=tomorrow_date,
 				start_time="9am",
 				service_bay=bay_1,
-				provisional_customer_name=f"{PREFIX}InvalidTime",
+				provisional_customer_name=f"{TEST_PREFIX}InvalidTime",
 			)
 
 		slots_res = find_available_slots(
@@ -1398,8 +1404,8 @@ class TestAgentFacade(ISMTestCase):
 		self.assertIn(tech_id, first_slot["available_technician_ids"])
 
 		ro_res = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=42900,
 			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0}],
 		)
@@ -1422,7 +1428,7 @@ class TestAgentFacade(ISMTestCase):
 			scheduled_date=tomorrow_date,
 			start_time="09:00:00",
 			service_bay=bay_1,
-			provisional_customer_name=f"{PREFIX}WalkIn",
+			provisional_customer_name=f"{TEST_PREFIX}WalkIn",
 		)
 		self.assertFalse(book_conflict["success"])
 		self.assertEqual(book_conflict["data"]["status"], "conflict")
@@ -1436,7 +1442,7 @@ class TestAgentFacade(ISMTestCase):
 			scheduled_date=tomorrow_date,
 			start_time="14:30:00",
 			service_bay=bay_2,
-			provisional_customer_name=f"{PREFIX}WalkIn2",
+			provisional_customer_name=f"{TEST_PREFIX}WalkIn2",
 		)
 		self.assertTrue(book2["success"])
 		se2_name = book2["data"]["name"]
@@ -1456,7 +1462,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_intake_and_find_slots_composite(self):
 		"""Verify intake_and_find_slots creates a Draft Estimate RO and returns candidate slots in one call."""
 		res = intake_and_find_slots(
-			customer_name=f"{PREFIX}Composite Cust",
+			customer_name=f"{TEST_PREFIX}Composite Cust",
 			vehicle_identifier="5YJ3E1EBXNF999099",
 			odometer_in=43000,
 			services=[{"service_title": "Cabin Air Filter Replacement", "labor_hours": 1.0}],
@@ -1477,7 +1483,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_service_row_aliases_and_defaults(self):
 		"""Verify _build_service_row normalizes intuitive title/hours aliases in create_quote and amend_quote."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Alias Cust",
+			customer_name=f"{TEST_PREFIX}Alias Cust",
 			vehicle_identifier="5YJ3E1EBXNF999077",
 			odometer_in=43100,
 			services=[
@@ -1514,13 +1520,13 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_intake_and_find_slots_preserves_filters_and_tech_match(self):
 		"""Verify intake_and_find_slots preserves service_bay/technician and exposes matched_technician on slots."""
-		bay_1 = f"{PREFIX}Bay 1"
-		tech_id = self.emp_map["tech_active_1"]
+		bay_1 = self.manifest.resolve("bays.main_lift")
+		tech_id = self.manifest.resolve("techs.marcus")
 		tech_name = frappe.db.get_value("Employee", tech_id, "employee_name")
 		self.assertTrue(tech_id and tech_name)
 
 		res = intake_and_find_slots(
-			customer_name=f"{PREFIX}Composite Filter Cust",
+			customer_name=f"{TEST_PREFIX}Composite Filter Cust",
 			vehicle_identifier="5YJ3E1EBXNF999078",
 			odometer_in=43200,
 			services=[{"service_name": "Brake Fluid Flush", "hours": 1.0}],
@@ -1541,17 +1547,21 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_ambiguous_service_bay_error_includes_equipment_tags(self):
 		"""Verify resolve_service_bay_identifier lists matching active bays with their equipment tags."""
+		bay_1 = self.manifest.resolve("bays.main_lift")
+		bay_2 = self.manifest.resolve("bays.alignment")
+		bay_offline = self.manifest.resolve("bays.offline")
 		with self.assertRaises(frappe.ValidationError) as ctx:
-			resolve_service_bay_identifier(f"{PREFIX}Bay")
+			resolve_service_bay_identifier("Bay")
 		msg = str(ctx.exception)
 		self.assertIn("Ambiguous Service Bay", msg)
-		self.assertIn(f"{PREFIX}Bay 1 [Lift]", msg)
-		self.assertIn(f"{PREFIX}Bay 2 [Alignment Rack, Lift]", msg)
-		self.assertNotIn(f"{PREFIX}Bay 3", msg)
+		self.assertIn(f"{bay_1} [Lift]", msg)
+		self.assertIn(f"{bay_2} [ADAS Calibration Target, Alignment Rack, Lift]", msg)
+		self.assertNotIn(bay_offline, msg)
 
 	def test_book_appointment_ambiguous_bay_annotates_availability(self):
 		"""Verify book_appointment annotates Ambiguous Service Bay options with [Available]/[Busy]."""
-		bay_1 = f"{PREFIX}Bay 1"
+		bay_1 = self.manifest.resolve("bays.main_lift")
+		bay_2 = self.manifest.resolve("bays.alignment")
 		tomorrow_date = add_days(today(), 1)
 		booked = book_appointment(
 			scheduled_date=tomorrow_date,
@@ -1559,7 +1569,7 @@ class TestAgentFacade(ISMTestCase):
 			service_bay=bay_1,
 			entry_type="Diagnostic",
 			estimated_duration=60,
-			provisional_customer_name=f"{PREFIX}WalkIn Busy",
+			provisional_customer_name=f"{TEST_PREFIX}WalkIn Busy",
 		)
 		self.assertTrue(booked["success"])
 		self.track("Schedule Entry", booked["data"]["name"])
@@ -1568,30 +1578,30 @@ class TestAgentFacade(ISMTestCase):
 			book_appointment(
 				scheduled_date=tomorrow_date,
 				start_time="10:00:00",
-				service_bay=f"{PREFIX}Bay",
+				service_bay="Bay",
 				entry_type="Diagnostic",
-				provisional_customer_name=f"{PREFIX}WalkIn Ambiguous",
+				provisional_customer_name=f"{TEST_PREFIX}WalkIn Ambiguous",
 			)
 		msg = str(ctx.exception)
 		self.assertIn("Ambiguous Service Bay", msg)
-		self.assertIn(f"{PREFIX}Bay 1 [Lift] [Busy]", msg)
-		self.assertIn(f"{PREFIX}Bay 2 [Alignment Rack, Lift] [Available]", msg)
+		self.assertIn(f"{bay_1} [Lift] [Busy]", msg)
+		self.assertIn(f"{bay_2} [ADAS Calibration Target, Alignment Rack, Lift] [Available]", msg)
 
 		# Missing or unparseable date/time falls back cleanly to standard Ambiguous Service Bay error
 		with self.assertRaises(frappe.ValidationError) as empty_ctx:
 			book_appointment(
 				scheduled_date="",
 				start_time="",
-				service_bay=f"{PREFIX}Bay",
+				service_bay="Bay",
 				entry_type="Diagnostic",
 			)
 		empty_msg = str(empty_ctx.exception)
 		self.assertIn("Ambiguous Service Bay", empty_msg)
-		self.assertIn(f"{PREFIX}Bay 1 [Lift]", empty_msg)
+		self.assertIn(f"{bay_1} [Lift]", empty_msg)
 
 		with self.assertRaises(frappe.ValidationError) as fallback_ctx:
 			_resolve_bay_for_booking(
-				f"{PREFIX}Bay",
+				"Bay",
 				scheduled_date="not-a-date",
 				start_time="not-a-time",
 				estimated_duration=None,
@@ -1599,35 +1609,35 @@ class TestAgentFacade(ISMTestCase):
 			)
 		fallback_msg = str(fallback_ctx.exception)
 		self.assertIn("Ambiguous Service Bay", fallback_msg)
-		self.assertIn(f"{PREFIX}Bay 1 [Lift]", fallback_msg)
+		self.assertIn(f"{bay_1} [Lift]", fallback_msg)
 
 	def test_required_field_enforcement_across_workflows(self):
 		"""Verify odometer_in, scope, odometer_out, and payment_method cannot be silently defaulted."""
 		with self.assertRaises(frappe.MandatoryError):
 			create_quote(
-				customer_name=CUSTOMER,
-				vehicle_identifier=VEHICLE_VIN,
+				customer_name=self.customer,
+				vehicle_identifier=self.vehicle_vin,
 				services=[{"service_title": "Suspension Diagnostic", "labor_hours": 1.0}],
 			)
 
 		with self.assertRaises(frappe.MandatoryError):
 			create_quote(
-				customer_name=CUSTOMER,
-				vehicle_identifier=VEHICLE_VIN,
+				customer_name=self.customer,
+				vehicle_identifier=self.vehicle_vin,
 				odometer_in=45000,
 			)
 
 		with self.assertRaises(frappe.ValidationError):
 			create_quote(
-				customer_name=CUSTOMER,
-				vehicle_identifier=VEHICLE_VIN,
+				customer_name=self.customer,
+				vehicle_identifier=self.vehicle_vin,
 				odometer_in=-5,
 				notes="Negative odometer should fail",
 			)
 
 		q = create_quote(
-			customer_name=CUSTOMER,
-			vehicle_identifier=VEHICLE_VIN,
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
 			odometer_in=45000,
 			services=[{"service_title": "Lateral Link Diagnostic", "labor_hours": 1.0}],
 		)
@@ -1653,12 +1663,12 @@ class TestAgentFacade(ISMTestCase):
 		pre_se = frappe.get_doc({
 			"doctype": "Schedule Entry",
 			"entry_type": "Diagnostic",
-			"customer": CUSTOMER,
-			"repair_vehicle": VEHICLE_VIN,
+			"customer": self.customer,
+			"repair_vehicle": self.vehicle_vin,
 			"scheduled_date": add_days(today(), 3),
 			"scheduled_time": "10:00:00",
 			"estimated_duration": 60,
-			"service_bay": f"{PREFIX}Bay 1",
+			"service_bay": self.manifest.resolve("bays.main_lift"),
 			"notes": "Missing odometer intake check",
 			"status": "Scheduled",
 		}).insert(ignore_permissions=True)
@@ -1672,15 +1682,15 @@ class TestAgentFacade(ISMTestCase):
 		from frappe.utils import flt
 		from ism.api.parts import quick_create_part
 
-		sup = f"{PREFIX}InvSup_{frappe.generate_hash(length=5)}"
+		sup = f"{TEST_PREFIX}InvSup_{frappe.generate_hash(length=5)}"
 		p_a = quick_create_part(
-			part_number=f"{PREFIX}INV_A",
+			part_number=f"{TEST_PREFIX}INV_A",
 			part_name="Lower Control Arm Frontward LH",
 			unit_rate=220.0,
 			valuation_rate=150.0,
 		)
 		p_b = quick_create_part(
-			part_number=f"{PREFIX}INV_B",
+			part_number=f"{TEST_PREFIX}INV_B",
 			part_name="Lower Control Arm Frontward RH",
 			unit_rate=240.0,
 			valuation_rate=160.0,
@@ -1844,8 +1854,8 @@ class TestAgentFacade(ISMTestCase):
 				and frappe.delete_doc("User", u, force=True, ignore_permissions=True)
 			)
 
-		allowed_cust = self.create_test_customer(f"{PREFIX}SAI Allowed Cust")
-		blocked_cust = self.create_test_customer(f"{PREFIX}SAI Blocked Cust")
+		allowed_cust = self.create_test_customer(f"{TEST_PREFIX}SAI Allowed Cust")
+		blocked_cust = self.create_test_customer(f"{TEST_PREFIX}SAI Blocked Cust")
 		blocked_veh = self.create_test_vehicle(customer=blocked_cust.name)
 		blocked_ro = self.create_test_repair_order(customer=blocked_cust.name, vehicle=blocked_veh.name)
 
@@ -1861,7 +1871,7 @@ class TestAgentFacade(ISMTestCase):
 			and frappe.delete_doc("User Permission", p, force=True, ignore_permissions=True)
 		)
 
-		seed_res = create_shop_action_item(title=f"{PREFIX}Seed SAI Item")
+		seed_res = create_shop_action_item(title=f"{TEST_PREFIX}Seed SAI Item")
 		self.assertTrue(seed_res["success"])
 		seed_name = seed_res["data"]["name"]
 		self.track("Shop Action Item", seed_name)
@@ -1880,7 +1890,7 @@ class TestAgentFacade(ISMTestCase):
 					fn()
 
 			frappe.set_user(maint_email)
-			created = create_shop_action_item(title=f"{PREFIX}Maint SAI Item")
+			created = create_shop_action_item(title=f"{TEST_PREFIX}Maint SAI Item")
 			self.assertTrue(created["success"])
 			sai_name = created["data"]["name"]
 			self.track("Shop Action Item", sai_name)
@@ -1893,18 +1903,18 @@ class TestAgentFacade(ISMTestCase):
 			self.assertEqual(resolved["data"]["status"], "Resolved")
 
 			with self.assertRaises(frappe.PermissionError):
-				create_action_item_doc(title=f"{PREFIX}Spoof Reporter", reported_by="Administrator")
+				create_action_item_doc(title=f"{TEST_PREFIX}Spoof Reporter", reported_by="Administrator")
 
 			with self.assertRaises(frappe.PermissionError):
 				create_shop_action_item(
-					title=f"{PREFIX}Unauthorized Ref",
+					title=f"{TEST_PREFIX}Unauthorized Ref",
 					reference_doctype="Repair Order",
 					reference_name=blocked_ro.name,
 				)
 
 			with self.assertRaises(frappe.PermissionError):
 				create_action_item_doc(
-					title=f"{PREFIX}Unauthorized Ref Doc",
+					title=f"{TEST_PREFIX}Unauthorized Ref Doc",
 					reference_doctype="Repair Order",
 					reference_name=blocked_ro.name,
 				)
@@ -1913,18 +1923,19 @@ class TestAgentFacade(ISMTestCase):
 
 	def test_reschedule_appointment_clear_bay(self):
 		"""Verify reschedule_appointment(..., clear_bay=True) clears the assigned service bay."""
+		bay_1 = self.manifest.resolve("bays.main_lift")
 		booked = book_appointment(
 			scheduled_date=add_days(today(), 1),
 			start_time="15:00:00",
-			service_bay=f"{PREFIX}Bay 1",
+			service_bay=bay_1,
 			entry_type="Diagnostic",
 			estimated_duration=60,
-			provisional_customer_name=f"{PREFIX}Clear Bay WalkIn",
+			provisional_customer_name=f"{TEST_PREFIX}Clear Bay WalkIn",
 		)
 		self.assertTrue(booked["success"])
 		se_name = booked["data"]["name"]
 		self.track("Schedule Entry", se_name)
-		self.assertEqual(booked["data"]["service_bay"], f"{PREFIX}Bay 1")
+		self.assertEqual(booked["data"]["service_bay"], bay_1)
 
 		cleared = reschedule_appointment(schedule_entry=se_name, clear_bay=True)
 		self.assertTrue(cleared["success"])
@@ -1934,7 +1945,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_amend_quote_in_place_update_services_and_fees(self):
 		"""Verify amend_quote supports in-place row updates, order fees/discounts, and row guardrails."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Amend InPlace Cust",
+			customer_name=f"{TEST_PREFIX}Amend InPlace Cust",
 			vehicle_identifier="5YJ3E1EBXNF999111",
 			odometer_in=42000,
 			services=[
@@ -2010,7 +2021,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_record_ro_deposit_facade_and_validation(self):
 		"""Verify record_ro_deposit validates inputs, delegates to RepairOrder.record_deposit, and returns envelope."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Deposit Cust",
+			customer_name=f"{TEST_PREFIX}Deposit Cust",
 			vehicle_identifier="5YJ3E1EBXNF999112",
 			odometer_in=43000,
 			services=[{"service_title": "Battery Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
@@ -2047,7 +2058,7 @@ class TestAgentFacade(ISMTestCase):
 	def test_checkout_repair_order_split_payments_facade(self):
 		"""Verify checkout_repair_order validates and forwards split-tender payments."""
 		res = create_quote(
-			customer_name=f"{PREFIX}Split Checkout Cust",
+			customer_name=f"{TEST_PREFIX}Split Checkout Cust",
 			vehicle_identifier="5YJ3E1EBXNF999113",
 			odometer_in=44000,
 			services=[{"service_title": "Tire Rotation", "labor_hours": 0.5, "labor_rate": 140.0}],

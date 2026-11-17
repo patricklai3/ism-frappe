@@ -188,76 +188,63 @@ class TestPartsManagement(ISMTestCase):
 
 	def test_sales_invoice_compliance_description(self):
 		"""Verify Sales Invoice generated from Repair Order includes legal compliance tag in description."""
-		customer = self.create_test_customer()
-		vehicle = self.create_test_vehicle(vin="5YJ3E1EBXNF999999", customer=customer.name)
+		manifest = self.get_manifest()
+		customer = manifest.resolve("customers.retail_1")
+		vehicle = manifest.resolve("vehicles.veh_model3_liam")
+		p_code = manifest.resolve("items.ptc_cabin_heater_recon")
+		item_doc = frappe.get_doc("Item", p_code)
+		company = manifest.company
 
-		p_code = quick_create_part(
-			part_number=f"{TEST_PREFIX}LEG_PART",
-			part_name="Brake Caliper",
-			part_source="OEM",
-			part_condition="Reconditioned",
-			unit_rate=320.0,
-			warranty_period="24 Months / 40,000 km",
-		)["item_code"]
-		self.track(frappe.get_doc("Item", p_code))
-
-		company = frappe.defaults.get_user_default("Company") or "I"
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
-			"customer": customer.name,
-			"vehicle": vehicle.name,
+			"customer": customer,
+			"vehicle": vehicle,
 			"company": company,
 			"odometer_in": 50000,
 			"status": "Authorized - In Progress",
 			"services": [
 				{
-					"service_title": "Brake Caliper Overhaul",
+					"service_title": "HV Cabin Coolant Heater Replacement",
 					"labor_hours": 2.0,
-					"labor_rate": 120.0,
-					"labor_amount": 240.0,
+					"labor_rate": 140.0,
+					"labor_amount": 280.0,
 					"status": "Approved",
 					"parts": json.dumps([
 						{
-							"component_slot": "Brake Caliper",
+							"component_slot": "Cabin Heater",
 							"item_code": p_code,
-							"item_name": "Brake Caliper",
-							"part_source": "OEM",
-							"part_condition": "Reconditioned",
-							"warranty_period": "24 Months / 40,000 km",
+							"item_name": item_doc.item_name,
+							"part_source": item_doc.part_source,
+							"part_condition": item_doc.part_condition,
+							"warranty_period": item_doc.warranty_period,
 							"qty": 1.0,
-							"rate": 320.0,
-							"amount": 320.0,
+							"rate": 760.0,
+							"amount": 760.0,
+							"warehouse": manifest.resolve("warehouses.main_stores"),
 						}
 					]),
-					"parts_total": 320.0,
-					"total_amount": 560.0,
+					"parts_total": 760.0,
+					"total_amount": 1040.0,
 				}
 			],
 		}).insert(ignore_permissions=True)
 		self.track(ro)
 
-		# Temporarily allow negative stock for test environment
-		orig_neg = frappe.db.get_single_value("Stock Settings", "allow_negative_stock")
-		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
-		try:
-			# Call process_payment_and_release to generate Sales Invoice
-			res = ro.process_payment_and_release(
-				payment_method="Debit / Interac",
-				paid_amount=560.0 * 1.13,
-				odometer_out=50005,
-			)
+		res = ro.process_payment_and_release(
+			payment_method="Debit / Interac",
+			paid_amount=1040.0 * 1.13,
+			odometer_out=50005,
+		)
 
-			si_name = res.get("sales_invoice")
-			self.assertTrue(si_name)
-			self.track(frappe.get_doc("Sales Invoice", si_name))
+		si_name = res.get("sales_invoice")
+		self.assertTrue(si_name)
+		self.track(frappe.get_doc("Sales Invoice", si_name))
 
-			si = frappe.get_doc("Sales Invoice", si_name)
-			part_row = next((it for it in si.items if it.item_code == p_code), None)
-			self.assertIsNotNone(part_row)
-			self.assertIn("[OEM - Reconditioned", part_row.description)
-			self.assertIn("24 Months / 40,000 km", part_row.description)
-		finally:
-			frappe.db.set_single_value("Stock Settings", "allow_negative_stock", orig_neg)
+		si = frappe.get_doc("Sales Invoice", si_name)
+		part_row = next((it for it in si.items if it.item_code == p_code), None)
+		self.assertIsNotNone(part_row)
+		self.assertIn("[OEM - Reconditioned", part_row.description)
+		self.assertIn(item_doc.warranty_period, part_row.description)
 
 	def test_get_default_warehouse_company_filtering(self):
 		"""Verify get_default_warehouse respects the specified company."""
@@ -1021,8 +1008,8 @@ class TestPartsManagement(ISMTestCase):
 					"item_code": p_code,
 					"qty": 2.0,
 					"rate": 60.0,
-					"expense_account": frappe.db.get_value("Company", company, "default_expense_account") or "Cost of Goods Sold - L",
-					"cost_center": frappe.db.get_value("Company", company, "cost_center") or "Main - L",
+					"expense_account": frappe.db.get_value("Company", company, "default_expense_account") or "Cost of Goods Sold - LEV",
+					"cost_center": frappe.db.get_value("Company", company, "cost_center") or "Main - LEV",
 				}
 			],
 		}).insert(ignore_permissions=True)
