@@ -612,7 +612,7 @@ def _apply_service_row_updates(ro: Any, update_services: Any) -> None:
 				)
 			row = ro_services[idx_1based - 1]
 
-		if getattr(row, "approval_status", None) == "Approved":
+		if getattr(row, "approval_status", None) == "Approved" or getattr(row, "status", None) == "Approved":
 			label = getattr(row, "service_title", None) or getattr(row, "name", None) or ""
 			frappe.throw(
 				_(
@@ -683,7 +683,20 @@ def amend_quote(
 ) -> Dict[str, Any]:
 	"""Safely amend lines on an unapproved Repair Order in Draft Estimate state."""
 	ro = _get_ro_doc(repair_order, ptype="write")
-	if ro.approval_status in ["Approved", "Partially Approved"] or ro.docstatus != 0:
+	parsed_remove_raw = parse_json_arg(remove_service_indices, [], label="remove_service_indices")
+	validated_remove: List[int] = []
+	if parsed_remove_raw not in (None, [], ""):
+		if not isinstance(parsed_remove_raw, list):
+			frappe.throw(_("remove_service_indices must be a list of integers."), frappe.ValidationError)
+		for entry in parsed_remove_raw:
+			validated_remove.append(require_int(entry, "Service Index", min_val=0))
+
+	has_updates = update_services not in (None, [], "")
+	if (
+		ro.docstatus != 0
+		or ro.approval_status == "Approved"
+		or (ro.approval_status == "Partially Approved" and (not has_updates or bool(validated_remove)))
+	):
 		frappe.throw(
 			_("Cannot amend an approved or submitted Repair Order. Customer re-authorization is legally required."),
 			frappe.ValidationError,
@@ -693,14 +706,6 @@ def amend_quote(
 
 	parsed_add = _coerce_service_list(add_services, label="add_services")
 	notes_str = optional_str(notes, "Notes")
-
-	parsed_remove_raw = parse_json_arg(remove_service_indices, [], label="remove_service_indices")
-	validated_remove: List[int] = []
-	if parsed_remove_raw not in (None, [], ""):
-		if not isinstance(parsed_remove_raw, list):
-			frappe.throw(_("remove_service_indices must be a list of integers."), frappe.ValidationError)
-		for entry in parsed_remove_raw:
-			validated_remove.append(require_int(entry, "Service Index", min_val=0))
 
 	if validated_remove:
 		for idx in sorted(set(validated_remove), reverse=True):
@@ -963,6 +968,12 @@ def record_ro_deposit(
 	if pe_name:
 		urls["payment_entry"] = f"{base_url}/app/payment-entry/{quote(str(pe_name), safe='')}"
 
+	resolved_deposit_amt = flt(
+		getattr(ro, "deposit_amount", None)
+		or (deposit_res.get("deposit_amount") if isinstance(deposit_res, dict) else 0.0),
+		2,
+	)
+
 	data: Dict[str, Any] = {
 		"repair_order": ro.name,
 		"status": ro.status,
@@ -970,7 +981,7 @@ def record_ro_deposit(
 		"amount": flt(deposit_amt, 2),
 		"payment_method": method,
 		"reference_no": ref_no,
-		"deposit_amount": flt(getattr(ro, "deposit_amount", 0.0), 2),
+		"deposit_amount": resolved_deposit_amt,
 		"paid_amount": flt(getattr(ro, "paid_amount", 0.0), 2),
 		"grand_total": flt(getattr(ro, "grand_total", 0.0), 2),
 		"outstanding_amount": flt(getattr(ro, "outstanding_amount", 0.0), 2),
@@ -987,7 +998,7 @@ def record_ro_deposit(
 		summary_builder=lambda: (
 			f"### Deposit Recorded: `{ro.name}`\n"
 			f"- **Amount**: `${flt(deposit_amt, 2):,.2f}` ({method})\n"
-			f"- **Total Deposit**: `${flt(getattr(ro, 'deposit_amount', 0.0), 2):,.2f}` | "
+			f"- **Total Deposit**: `${resolved_deposit_amt:,.2f}` | "
 			f"**Outstanding**: `${flt(getattr(ro, 'outstanding_amount', 0.0), 2):,.2f}`"
 		),
 	)
@@ -1026,7 +1037,7 @@ def checkout_repair_order(
 	}
 	if parsed_payments is not None:
 		release_kwargs["payments"] = parsed_payments
-	ro.process_payment_and_release(**release_kwargs)
+	release_res = ro.process_payment_and_release(**release_kwargs)
 	ro.reload()
 
 	pe_name = None
@@ -1036,6 +1047,8 @@ def checkout_repair_order(
 			{"reference_doctype": "Sales Invoice", "reference_name": ro.sales_invoice, "docstatus": 1},
 			"parent",
 		)
+	if isinstance(release_res, dict):
+		pe_name = pe_name or release_res.get("payment_entry")
 
 	base_url = get_url()
 	urls = build_ro_urls(ro.name)
@@ -1044,22 +1057,29 @@ def checkout_repair_order(
 	if pe_name:
 		urls["payment_entry"] = f"{base_url}/app/payment-entry/{quote(str(pe_name), safe='')}"
 
+	data: Dict[str, Any] = {
+		"repair_order": ro.name,
+		"status": ro.status,
+		"payment_status": ro.payment_status,
+		"sales_invoice": ro.sales_invoice,
+		"payment_entry": pe_name,
+		"grand_total": flt(ro.grand_total, 2),
+		"paid_amount": flt(getattr(ro, "paid_amount", 0.0), 2),
+		"outstanding_amount": flt(ro.outstanding_amount, 2),
+		"vehicle_released": cint(ro.vehicle_released),
+		"odometer_out": ro.odometer_out,
+		"checkout_date": ro.checkout_date,
+	}
+	if isinstance(release_res, dict):
+		if "payment_entries" in release_res and release_res["payment_entries"] is not None:
+			data["payment_entries"] = release_res["payment_entries"]
+		if "deposit_allocated" in release_res and release_res["deposit_allocated"] is not None:
+			data["deposit_allocated"] = flt(release_res["deposit_allocated"], 2)
+
 	return build_agent_envelope(
 		success=True,
 		urls=urls,
-		data={
-			"repair_order": ro.name,
-			"status": ro.status,
-			"payment_status": ro.payment_status,
-			"sales_invoice": ro.sales_invoice,
-			"payment_entry": pe_name,
-			"grand_total": flt(ro.grand_total, 2),
-			"paid_amount": flt(getattr(ro, "paid_amount", 0.0), 2),
-			"outstanding_amount": flt(ro.outstanding_amount, 2),
-			"vehicle_released": cint(ro.vehicle_released),
-			"odometer_out": ro.odometer_out,
-			"checkout_date": ro.checkout_date,
-		},
+		data=data,
 		message=_("Checked out and released {0} (Invoice {1}).").format(ro.name, ro.sales_invoice or "N/A"),
 		include_summary=include_summary,
 		summary_builder=lambda: (

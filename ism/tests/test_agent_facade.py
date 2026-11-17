@@ -1985,12 +1985,26 @@ class TestAgentFacade(ISMTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			amend_quote(repair_order=ro_name, discount_amount=-5.0)
 
-		# Guardrail: reject in-place edit on row with approval_status == "Approved"
+		# Guardrail: reject in-place edit on row with approval_status == "Approved" or status == "Approved"
 		ro_approved_row = frappe.get_doc("Repair Order", ro_name)
 		ro_approved_row.services[0].approval_status = "Approved"
 		with patch("ism.api.agent_quotes._get_ro_doc", return_value=ro_approved_row):
 			with self.assertRaises(frappe.ValidationError):
 				amend_quote(repair_order=ro_name, update_services=[{"service_row_id": row_1_name, "labor_hours": 3.0}])
+
+		# Also test row.status == "Approved" on Partially Approved RO (row 2 unapproved can be updated)
+		frappe.db.set_value("Repair Order Service", row_1_name, "status", "Approved")
+		frappe.db.set_value("Repair Order", ro_name, "approval_status", "Partially Approved")
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=[{"service_row_id": row_1_name, "labor_hours": 3.0}])
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, remove_service_indices=[1])
+		part_upd = amend_quote(
+			repair_order=ro_name,
+			update_services=[{"service_row_id": row_2_name, "labor_hours": 1.25}],
+		)
+		self.assertTrue(part_upd["success"])
+		self.assertEqual(frappe.get_doc("Repair Order", ro_name).services[1].labor_hours, 1.25)
 
 	def test_record_ro_deposit_facade_and_validation(self):
 		"""Verify record_ro_deposit validates inputs, delegates to RepairOrder.record_deposit, and returns envelope."""
@@ -2010,7 +2024,7 @@ class TestAgentFacade(ISMTestCase):
 		with patch(
 			"ism.ism.doctype.repair_order.repair_order.RepairOrder.record_deposit",
 			create=True,
-			return_value={"payment_entry": "ACC-PAY-TEST-001"},
+			return_value={"payment_entry": "ACC-PAY-TEST-001", "deposit_amount": 100.0},
 		) as mock_dep:
 			dep_res = record_ro_deposit(
 				repair_order=ro_name,
@@ -2023,6 +2037,7 @@ class TestAgentFacade(ISMTestCase):
 		self.assertTrue(dep_res["success"])
 		self.assertEqual(dep_res["data"]["repair_order"], ro_name)
 		self.assertEqual(dep_res["data"]["amount"], 100.0)
+		self.assertEqual(dep_res["data"]["deposit_amount"], 100.0)
 		self.assertEqual(dep_res["data"]["payment_method"], "Visa")
 		self.assertEqual(dep_res["data"]["reference_no"], "AUTH-123")
 		self.assertEqual(dep_res["data"]["payment_entry"], "ACC-PAY-TEST-001")
@@ -2054,7 +2069,11 @@ class TestAgentFacade(ISMTestCase):
 		]
 		with patch(
 			"ism.ism.doctype.repair_order.repair_order.RepairOrder.process_payment_and_release",
-			return_value=None,
+			return_value={
+				"payment_entry": "ACC-PAY-SPLIT-1",
+				"payment_entries": ["ACC-PAY-SPLIT-1", "ACC-PAY-SPLIT-2"],
+				"deposit_allocated": 25.0,
+			},
 		) as mock_rel:
 			chk_res = checkout_repair_order(
 				repair_order=ro_name,
@@ -2063,6 +2082,9 @@ class TestAgentFacade(ISMTestCase):
 				confirm=True,
 			)
 		self.assertTrue(chk_res["success"])
+		self.assertEqual(chk_res["data"]["payment_entry"], "ACC-PAY-SPLIT-1")
+		self.assertEqual(chk_res["data"]["payment_entries"], ["ACC-PAY-SPLIT-1", "ACC-PAY-SPLIT-2"])
+		self.assertEqual(chk_res["data"]["deposit_allocated"], 25.0)
 		mock_rel.assert_called_once()
 		call_kwargs = mock_rel.call_args.kwargs
 		self.assertEqual(call_kwargs["odometer_out"], 44005)
