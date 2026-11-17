@@ -332,3 +332,33 @@ class TestSimulationFramework(ISMTestCase):
 				si_doc = frappe.get_doc("Sales Invoice", si_name)
 				self.assertEqual(si_doc.docstatus, 1)
 				self.assertGreaterEqual(flt(si_doc.outstanding_amount), -0.01)
+
+	def test_warm_db_sequential_profile_and_monte_carlo_resets(self):
+		"""Sequential profile and Monte Carlo builds on a warm DB cleanly reset prior Layer 3 state."""
+		m_eval_1 = build_profile("eval_standard", seed=42, anchor_date="2026-11-18", commit=False)
+		self.assertEqual(len(m_eval_1.metadata["historical_ros"]), 30)
+
+		m_crunch = build_profile("swarm_crunch_day", seed=42, anchor_date="2026-11-18", commit=False)
+		self.assertEqual(frappe.db.count("Leave Application", {"docstatus": 1}), 0)
+		self.assertEqual(frappe.db.get_value("Repair Order", m_crunch.resolve("ros.crunch_fifo_winner"), "status"), "Authorized - In Progress")
+		self.assertEqual(frappe.db.get_value("Repair Order", m_crunch.resolve("ros.crunch_fifo_loser"), "status"), "Waiting on Parts")
+
+		m_eval_2 = build_profile("eval_standard", seed=42, anchor_date="2026-11-18", commit=False)
+		self.assertEqual(len(m_eval_2.metadata["historical_ros"]), 30)
+		self.assertEqual(frappe.db.count("Schedule Entry"), 2)
+
+		m_mc1 = monte_carlo(seed=1, anchor_date="2026-11-18", n_arrivals=8, commit=False)
+		self.assertEqual(len(m_mc1.ros), 8)
+		m_mc2 = monte_carlo(seed=2, anchor_date="2026-11-18", n_arrivals=8, commit=False)
+		self.assertEqual(len(m_mc2.ros), 8)
+		self.assertEqual(frappe.db.count("Repair Order", {"name": ["not in", m_eval_2.metadata["historical_ros"]]}), 8)
+
+		m_clean = build_profile("clean_master", seed=42, anchor_date="2026-11-18", commit=False)
+		self.assertEqual(m_clean.profile, "clean_master")
+		self.assertEqual(frappe.db.count("Repair Order"), 0)
+		self.assertEqual(frappe.db.count("Schedule Entry"), 0)
+		self.assertEqual(frappe.db.count("Leave Application"), 0)
+		self.assertEqual(
+			flt(frappe.db.get_value("Bin", {"item_code": m_clean.resolve("items.front_rotor_oem"), "warehouse": m_clean.resolve("warehouses.main_stores")}, "actual_qty")),
+			2.0,
+		)

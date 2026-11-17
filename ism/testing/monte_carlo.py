@@ -15,13 +15,14 @@ from frappe.utils import flt
 from ism.api.scheduling import get_available_bays
 from ism.api.technician_availability import get_technician_pool_availability
 from ism.ism.doctype.shop_action_item.shop_action_item import create_shop_action_item
-from ism.testing.builder import SimContext
+from ism.testing.builder import SimContext, _normalize_anchor_date
 from ism.testing.catalog import PACKAGE_EQUIPMENT_TAGS
 from ism.testing.manifest import SimManifest
 from ism.testing.profiles import (
 	_ensure_layer1_manifest,
 	_ensure_submitted_leave,
 	_parse_commit_flag,
+	_reset_layer3_world,
 )
 
 _ACTIVE_TECH_HANDLES: tuple[str, ...] = ("marcus", "elena", "devon", "noah")
@@ -314,7 +315,9 @@ def monte_carlo(
 	"""Generate a deterministic seeded simulation world exercising ISM edge conditions."""
 	resolved_seed = int(seed)
 	rng = random.Random(resolved_seed)
-	base_manifest = _ensure_layer1_manifest(anchor_date=anchor_date, force_seed=False)
+	resolved_anchor = _normalize_anchor_date(anchor_date).isoformat()
+	base_manifest = _ensure_layer1_manifest(anchor_date=resolved_anchor, force_seed=False)
+	_reset_layer3_world(base_manifest, resolved_anchor, keep_historical=True)
 	base_manifest.profile = "monte_carlo"
 	ctx = SimContext(seed=resolved_seed, anchor_date=base_manifest.anchor_date, manifest=base_manifest)
 	m = ctx.manifest
