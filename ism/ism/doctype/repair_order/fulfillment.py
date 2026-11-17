@@ -12,6 +12,7 @@ from frappe.utils import cint, flt, now_datetime, time_diff_in_hours, today
 from ism.api._validation import escape_like
 from ism.api.parts import _resolve_default_warehouse as get_default_warehouse
 from ism.api.parts import get_items_available_stock_batch
+from ism.api.sms import dispatch_sms
 
 
 def link_ro_vehicle_to_customer(ro) -> None:
@@ -232,6 +233,7 @@ def pick_up_ro_vehicle(ro) -> Dict[str, Any]:
 def park_ro_vehicle(ro) -> Dict[str, Any]:
 	"""Technician parks vehicle back in lot."""
 	ro.check_permission("write")
+	prev_status = ro.status
 	ro.parked_at = now_datetime()
 	ro.parked_by = frappe.session.user
 	if ro.picked_up_at:
@@ -251,12 +253,15 @@ def park_ro_vehicle(ro) -> Dict[str, Any]:
 			ro.status = "Authorized - In Progress"
 
 	ro.save()
+	if prev_status != "Work Completed" and ro.status == "Work Completed":
+		_maybe_send_ready_for_pickup_sms(ro)
 	return {"status": "success", "vehicle_location": ro.vehicle_location, "total_bay_hours": ro.total_bay_hours}
 
 
 def toggle_ro_service_completion(ro, service_row_id=None, is_completed=None, **kwargs) -> Dict[str, Any]:
 	"""Toggle individual service completion with timestamping."""
 	ro.check_permission("write")
+	prev_status = ro.status
 	if isinstance(service_row_id, dict):
 		is_completed = service_row_id.get("is_completed", is_completed)
 		service_row_id = service_row_id.get("service_row_id") or service_row_id.get("job_id")
@@ -314,6 +319,8 @@ def toggle_ro_service_completion(ro, service_row_id=None, is_completed=None, **k
 			ro.vehicle_location = "In Bay / Being Serviced" if ro.picked_up_at else "In Customer Lot"
 
 	ro.save()
+	if prev_status != "Work Completed" and ro.status == "Work Completed":
+		_maybe_send_ready_for_pickup_sms(ro)
 	return {"status": "success", "progress_percent": ro.progress_percent}
 
 
@@ -519,6 +526,93 @@ def _ro_uses_any_item(ro_name: str, item_code_set: set[str]) -> bool:
 	return False
 
 
+def _maybe_send_ready_for_pickup_sms(ro) -> None:
+	"""Dispatch optional Vehicle Ready for Pickup SMS when enabled in ISM Settings."""
+	try:
+		settings = frappe.get_single("ISM Settings")
+		if not cint(getattr(settings, "enable_ready_for_pickup_sms", 0)):
+			return
+
+		raw_phone = frappe.db.get_value("Customer", ro.customer, "mobile_no") if ro.customer else None
+		if not raw_phone and getattr(ro, "contact_person", None):
+			raw_phone = frappe.db.get_value("Contact", ro.contact_person, "mobile_no") or frappe.db.get_value(
+				"Contact", ro.contact_person, "phone"
+			)
+		phone = raw_phone.strip() if isinstance(raw_phone, str) and raw_phone.strip() else None
+		if not phone:
+			return
+
+		vehicle_display = ro.vehicle or _("your vehicle")
+		if ro.vehicle:
+			v_info = frappe.db.get_value(
+				"Repair Vehicle", ro.vehicle, ["model", "license_plate"], as_dict=True
+			)
+			if v_info:
+				parts = [v_info.model, f"({v_info.license_plate})" if v_info.license_plate else ""]
+				vehicle_display = " ".join(p for p in parts if p).strip() or vehicle_display
+
+		customer_name = getattr(ro, "customer_name", None) or ro.customer or _("Customer")
+		sms_text = _("Hello {0}, your {1} (Repair Order {2}) is ready for pickup.").format(
+			customer_name, vehicle_display, ro.name
+		)
+		dispatch_sms(phone, sms_text)
+	except Exception:
+		frappe.log_error(
+			message=frappe.get_traceback(),
+			title=f"Ready for Pickup SMS Error ({getattr(ro, 'name', '')})",
+		)
+
+
+def _notify_ro_parts_ready(ro) -> None:
+	"""Emit realtime alert and create/update a Shop Action Item when stock unlocks an RO."""
+	frappe.publish_realtime(
+		"ism_ro_parts_ready",
+		{
+			"repair_order": ro.name,
+			"previous_status": "Waiting on Parts",
+			"status": ro.status,
+			"vehicle": ro.vehicle,
+			"customer": ro.customer,
+		},
+		after_commit=True,
+	)
+
+	title = _("Parts Ready for {0}").format(ro.name)
+	details = _(
+		"All required parts are now in stock for Repair Order {0}. "
+		"Status transitioned from Waiting on Parts to Authorized - In Progress."
+	).format(ro.name)
+
+	existing = frappe.get_all(
+		"Shop Action Item",
+		filters={
+			"reference_doctype": "Repair Order",
+			"reference_name": ro.name,
+			"category": "Inventory / Parts",
+			"status": ["in", ["Open", "In Progress"]],
+		},
+		order_by="modified desc",
+		limit_page_length=1,
+		pluck="name",
+	)
+	if existing:
+		item_doc = frappe.get_doc("Shop Action Item", existing[0])
+		item_doc.title = title
+		item_doc.priority = "High"
+		item_doc.details = details
+		item_doc.save(ignore_permissions=True)
+	else:
+		item_doc = frappe.new_doc("Shop Action Item")
+		item_doc.title = title
+		item_doc.category = "Inventory / Parts"
+		item_doc.priority = "High"
+		item_doc.status = "Open"
+		item_doc.reference_doctype = "Repair Order"
+		item_doc.reference_name = ro.name
+		item_doc.details = details
+		item_doc.insert(ignore_permissions=True)
+
+
 def _process_stock_update_event(item_codes: Optional[List[str]] = None) -> None:
 	"""Re-evaluate stock on Repair Orders in 'Waiting on Parts', optionally filtered by item codes."""
 	waiting_orders = frappe.get_all(
@@ -541,6 +635,7 @@ def _process_stock_update_event(item_codes: Optional[List[str]] = None) -> None:
 				ro.status = "Authorized - In Progress"
 				ro.flags.ignore_permissions = True
 				ro.save()
+				_notify_ro_parts_ready(ro)
 		except Exception:
 			frappe.log_error(
 				message=frappe.get_traceback(),

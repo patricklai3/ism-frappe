@@ -28,6 +28,27 @@ def get_or_create_default_tax_template(company=None):
 	return get_or_create_default_sales_tax_template(company)
 
 
+def _is_unset_scalar(val: Any) -> bool:
+	"""Return True when a field value is None or a blank string."""
+	return val is None or (isinstance(val, str) and val.strip() == "")
+
+
+def _is_customer_supplied_part(part_source: Any) -> bool:
+	"""Return True when part_source indicates customer-supplied material."""
+	return str(part_source or "").strip() == "Customer Supplied"
+
+
+def _get_shop_supplies_config() -> tuple[float, float]:
+	"""Return (shop_supplies_percentage, shop_supplies_cap) from ISM Settings safely."""
+	try:
+		settings = frappe.get_single("ISM Settings")
+	except Exception:
+		return 0.0, 0.0
+	pct = flt(getattr(settings, "shop_supplies_percentage", 0))
+	cap = flt(getattr(settings, "shop_supplies_cap", 0))
+	return max(0.0, pct), max(0.0, cap)
+
+
 def _expand_package_parts(
 	pkg: Any,
 	target_side: str,
@@ -43,16 +64,23 @@ def _expand_package_parts(
 			continue
 		item_doc = frappe.get_cached_doc("Item", row.item_code)
 		qty = flt(row.qty) or 1.0
-		row_rate = getattr(row, "rate", None)
-		if row_rate is None and fallback_to_standard_rate:
-			rate = flt(getattr(item_doc, "standard_rate", 0))
+		part_source = getattr(row, "part_source", None) or getattr(item_doc, "part_source", "") or ""
+		if _is_customer_supplied_part(part_source):
+			part_source = "Customer Supplied"
+			rate = 0.0
+			amt = 0.0
 		else:
-			rate = flt(row_rate)
-		amt = flt(qty * rate, 2)
+			row_rate = getattr(row, "rate", None)
+			if row_rate is None and fallback_to_standard_rate:
+				rate = flt(getattr(item_doc, "standard_rate", 0))
+			else:
+				rate = flt(row_rate)
+			amt = flt(qty * rate, 2)
 		parts_total += amt
 		parts_list.append({
 			"item_code": row.item_code,
 			"item_name": row.item_name or item_doc.item_name,
+			"part_source": part_source,
 			"qty": qty,
 			"uom": getattr(row, "uom", None) or item_doc.stock_uom or "Nos",
 			"rate": rate,
@@ -141,6 +169,97 @@ def _parse_parts_list(raw_parts: Any) -> List[Dict[str, Any]]:
 	return [p for p in parsed if isinstance(p, dict)]
 
 
+def _auto_expand_service_row(
+	s: Any,
+	company: Optional[str],
+	default_wh: Optional[str],
+	default_rate: float,
+) -> List[Dict[str, Any]]:
+	"""Auto-expand a newly added Service Package row without clobbering explicit overrides."""
+	if not frappe.db.exists("Service Package", s.service_package):
+		return _parse_parts_list(s.parts)
+
+	pkg = frappe.get_cached_doc("Service Package", s.service_package)
+	raw_pos = getattr(s, "service_position", None)
+	cur_side = raw_pos if raw_pos in ("LH", "RH") else None
+	raw_title = getattr(s, "service_title", None)
+	cur_title = raw_title if not _is_unset_scalar(raw_title) else None
+	raw_code = getattr(s, "correction_code", None)
+	cur_code = raw_code if not _is_unset_scalar(raw_code) else None
+
+	row_fields = build_service_package_row_fields(
+		pkg=pkg,
+		company=company,
+		cur_side=cur_side,
+		cur_title=cur_title,
+		cur_code=cur_code,
+		default_labor_rate=default_rate,
+		warehouse=default_wh,
+	)
+
+	if _is_unset_scalar(raw_title):
+		s.service_title = row_fields["service_title"]
+	if _is_unset_scalar(raw_code):
+		s.correction_code = row_fields["correction_code"]
+	if raw_pos in (None, "", "None"):
+		s.service_position = row_fields["service_position"]
+	if not cint(getattr(s, "is_flat_rate", 0)) and cint(row_fields.get("is_flat_rate", 0)):
+		s.is_flat_rate = 1
+	if _is_unset_scalar(getattr(s, "labor_hours", None)) or flt(getattr(s, "labor_hours", None)) == 1.0:
+		s.labor_hours = row_fields["labor_hours"]
+	if _is_unset_scalar(getattr(s, "labor_rate", None)) or flt(getattr(s, "labor_rate", None)) == 0.0:
+		s.labor_rate = row_fields["labor_rate"]
+	if cint(getattr(s, "is_flat_rate", 0)) and _is_unset_scalar(getattr(s, "labor_amount", None)):
+		s.labor_amount = row_fields["labor_amount"]
+	if not cint(getattr(s, "is_mobile_capable", 0)) and cint(row_fields.get("is_mobile_capable", 0)):
+		s.is_mobile_capable = 1
+	if _is_unset_scalar(getattr(s, "tesla_manual_url", None)) and row_fields.get("tesla_manual_url"):
+		s.tesla_manual_url = row_fields["tesla_manual_url"]
+
+	return _parse_parts_list(row_fields.get("parts"))
+
+
+def _normalize_service_parts(
+	parts: List[Dict[str, Any]],
+	valid_warehouses: set[str],
+	default_wh: Optional[str],
+) -> tuple[List[Dict[str, Any]], float]:
+	"""Normalize service parts JSON dicts and enforce $0.00 pricing for Customer Supplied parts."""
+	parts_total = 0.0
+	cleaned_parts: List[Dict[str, Any]] = []
+	for p in parts:
+		qty = flt(p.get("qty", 1.0)) or 1.0
+		raw_source = p.get("part_source", "")
+		if _is_customer_supplied_part(raw_source):
+			part_source = "Customer Supplied"
+			rate = 0.0
+			amt = 0.0
+		else:
+			part_source = raw_source or ""
+			rate = flt(p.get("rate", 0.0))
+			amt = flt(qty * rate, 2)
+		parts_total += amt
+		part_wh = p.get("warehouse")
+		valid_wh = part_wh if (part_wh and part_wh in valid_warehouses) else default_wh
+		code = p.get("item_code", "")
+		cleaned_parts.append({
+			"item_code": code,
+			"item_name": p.get("item_name", code),
+			"component_slot": p.get("component_slot") or p.get("item_name", code),
+			"part_source": part_source,
+			"part_condition": p.get("part_condition", ""),
+			"oem_part_number": p.get("oem_part_number", ""),
+			"warranty_period": p.get("warranty_period", ""),
+			"side": p.get("side", ""),
+			"qty": qty,
+			"uom": p.get("uom", "Nos"),
+			"rate": rate,
+			"amount": amt,
+			"warehouse": valid_wh,
+		})
+	return cleaned_parts, flt(parts_total, 2)
+
+
 def calculate_service_totals(ro) -> None:
 	"""Calculate labor amounts, parts totals, and service totals with batched Warehouse validation."""
 	total_billed_hours = 0.0
@@ -150,7 +269,12 @@ def calculate_service_totals(ro) -> None:
 	parsed_by_row: List[tuple[Any, List[Dict[str, Any]]]] = []
 	candidate_warehouses: set[str] = set()
 	for s in ro.services:
-		parts = _parse_parts_list(s.parts)
+		if getattr(s, "service_package", None) and _is_unset_scalar(getattr(s, "parts", None)):
+			if default_rate is None:
+				default_rate = _get_default_labor_rate()
+			parts = _auto_expand_service_row(s, ro.company, default_wh, default_rate)
+		else:
+			parts = _parse_parts_list(s.parts)
 		parsed_by_row.append((s, parts))
 		for p in parts:
 			wh = p.get("warehouse")
@@ -189,35 +313,14 @@ def calculate_service_totals(ro) -> None:
 				s.labor_rate = default_rate
 			s.labor_amount = flt(labor_hours * flt(s.labor_rate), 2)
 
-		parts_total = 0.0
-		cleaned_parts = []
-		for p in parts:
-			qty = flt(p.get("qty", 1.0)) or 1.0
-			rate = flt(p.get("rate", 0.0))
-			amt = flt(qty * rate, 2)
-			parts_total += amt
-			part_wh = p.get("warehouse")
-			valid_wh = part_wh if (part_wh and part_wh in valid_warehouses) else default_wh
-			code = p.get("item_code", "")
-			cleaned_parts.append({
-				"item_code": code,
-				"item_name": p.get("item_name", code),
-				"component_slot": p.get("component_slot") or p.get("item_name", code),
-				"part_source": p.get("part_source", ""),
-				"part_condition": p.get("part_condition", ""),
-				"oem_part_number": p.get("oem_part_number", ""),
-				"warranty_period": p.get("warranty_period", ""),
-				"side": p.get("side", ""),
-				"qty": qty,
-				"uom": p.get("uom", "Nos"),
-				"rate": rate,
-				"amount": amt,
-				"warehouse": valid_wh,
-			})
+		cleaned_parts, parts_total = _normalize_service_parts(parts, valid_warehouses, default_wh)
+		row_discount = flt(getattr(s, "discount_amount", 0))
+		if row_discount < 0:
+			frappe.throw(_("Service row discount amount cannot be negative."), frappe.ValidationError)
 
 		s.parts = json.dumps(cleaned_parts)
-		s.parts_total = flt(parts_total, 2)
-		s.total_amount = flt(s.labor_amount + s.parts_total, 2)
+		s.parts_total = parts_total
+		s.total_amount = max(0.0, flt(s.labor_amount + s.parts_total - row_discount, 2))
 
 		if s.status == "Approved":
 			total_billed_hours += labor_hours
@@ -226,14 +329,36 @@ def calculate_service_totals(ro) -> None:
 
 
 def calculate_taxes_and_totals(ro) -> None:
-	"""Calculate Repair Order net, tax, and grand totals without overwriting explicit tax_rate=0."""
+	"""Calculate Repair Order net, shop fees, discounts, tax, grand, and outstanding totals."""
 	has_approved = any(s.status == "Approved" for s in ro.services)
 	if has_approved:
-		net = sum(flt(s.total_amount) for s in ro.services if s.status == "Approved")
+		services_subtotal = sum(flt(s.total_amount) for s in ro.services if s.status == "Approved")
 	else:
-		net = sum(flt(s.total_amount) for s in ro.services if s.status != "Declined")
+		services_subtotal = sum(flt(s.total_amount) for s in ro.services if s.status != "Declined")
 
-	ro.net_total = flt(net, 2)
+	shop_pct, shop_cap = _get_shop_supplies_config()
+	if shop_pct > 0:
+		shop_supplies = flt(services_subtotal * (shop_pct / 100.0), 2)
+		if shop_cap > 0:
+			shop_supplies = min(shop_supplies, flt(shop_cap, 2))
+		ro.shop_supplies_amount = flt(shop_supplies, 2)
+	else:
+		shop_supplies = flt(getattr(ro, "shop_supplies_amount", 0), 2)
+		if shop_supplies < 0:
+			frappe.throw(_("Shop supplies amount cannot be negative."), frappe.ValidationError)
+		if hasattr(ro, "shop_supplies_amount"):
+			ro.shop_supplies_amount = shop_supplies
+
+	env_fee = flt(getattr(ro, "environmental_fee_amount", 0), 2)
+	if env_fee < 0:
+		frappe.throw(_("Environmental fee amount cannot be negative."), frappe.ValidationError)
+
+	order_discount = flt(getattr(ro, "discount_amount", 0), 2)
+	if order_discount < 0:
+		frappe.throw(_("Order discount amount cannot be negative."), frappe.ValidationError)
+
+	net = max(0.0, flt(services_subtotal + shop_supplies + env_fee - order_discount, 2))
+	ro.net_total = net
 
 	explicit_tax = ro.tax_rate is not None and str(ro.tax_rate).strip() != ""
 	explicit_zero_tax = explicit_tax and flt(ro.tax_rate) == 0.0
@@ -258,7 +383,7 @@ def calculate_taxes_and_totals(ro) -> None:
 
 	ro.total_taxes_and_charges = flt(net * (tax_rate / 100.0), 2)
 	ro.grand_total = flt(ro.net_total + ro.total_taxes_and_charges, 2)
-	ro.outstanding_amount = flt(ro.grand_total - flt(ro.paid_amount), 2)
+	ro.outstanding_amount = max(0.0, flt(ro.grand_total - flt(ro.paid_amount), 2))
 
 
 def _has_prior_authorization(ro) -> bool:
@@ -507,14 +632,22 @@ def add_supplement_to_ro(
 			if item_code and item_code in valid_items:
 				item_doc = frappe.get_cached_doc("Item", item_code)
 				qty = flt(p.get("qty", 1.0)) or 1.0
-				raw_rate = p.get("rate")
-				part_rate = flt(raw_rate) if raw_rate is not None else flt(item_doc.standard_rate or 0.0)
-				amt = flt(qty * part_rate, 2)
+				raw_source = p.get("part_source") or getattr(item_doc, "part_source", "") or ""
+				if _is_customer_supplied_part(raw_source):
+					part_source = "Customer Supplied"
+					part_rate = 0.0
+					amt = 0.0
+				else:
+					part_source = raw_source
+					raw_rate = p.get("rate")
+					part_rate = flt(raw_rate) if raw_rate is not None else flt(item_doc.standard_rate or 0.0)
+					amt = flt(qty * part_rate, 2)
 				parts_total += amt
 				part_wh = p.get("warehouse")
 				parts_list.append({
 					"item_code": item_code,
 					"item_name": item_doc.item_name,
+					"part_source": part_source,
 					"qty": qty,
 					"uom": getattr(item_doc, "stock_uom", "Nos"),
 					"rate": part_rate,
@@ -778,7 +911,12 @@ def fetch_service_package_details(service_package: str, side: Optional[str] = No
 		is_def = cint(getattr(row, "is_default", 1))
 		item_doc = frappe.get_cached_doc("Item", row.item_code)
 		qty = flt(row.qty) or 1.0
-		rate = flt(row.rate) if row.rate is not None else flt(item_doc.standard_rate)
+		part_source = getattr(row, "part_source", None) or getattr(item_doc, "part_source", "OEM") or "OEM"
+		if _is_customer_supplied_part(part_source):
+			part_source = "Customer Supplied"
+			rate = 0.0
+		else:
+			rate = flt(row.rate) if row.rate is not None else flt(item_doc.standard_rate)
 		stock_qty = flt(stock_map.get(row.item_code, {}).get("actual_qty", 0.0))
 
 		part_info = {
@@ -786,7 +924,7 @@ def fetch_service_package_details(service_package: str, side: Optional[str] = No
 			"component_slot": slot,
 			"item_code": row.item_code,
 			"item_name": row.item_name or item_doc.item_name,
-			"part_source": getattr(item_doc, "part_source", "OEM") or "OEM",
+			"part_source": part_source,
 			"part_condition": getattr(item_doc, "part_condition", "New") or "New",
 			"oem_part_number": getattr(item_doc, "oem_part_number", "") or "",
 			"revision": getattr(item_doc, "revision", "") or "",

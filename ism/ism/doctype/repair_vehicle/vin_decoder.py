@@ -156,6 +156,7 @@ DRIVE = {
 		"L": "Dual Motor — Hairpin Winding Performance",
 		"R": "Single Motor — Standard (3DU 600A)",
 		"S": "Single Motor — Standard (DUB 600A)",
+		"T": "Dual Motor — Performance (Juniper)",
 	},
 	"C": {
 		"D": "Dual Motor — AWD Standard",
@@ -253,7 +254,7 @@ _AWD_DRIVE_CODES = {
 	"S": frozenset(("5", "6")),
 	"3": frozenset(("B", "C", "K", "L", "T")),
 	"X": frozenset(("5", "6")),
-	"Y": frozenset(("E", "F", "K", "L")),
+	"Y": frozenset(("E", "F", "K", "L", "T")),
 	"C": frozenset(("D", "E")),
 }
 _LEGACY_S_BATTERY_TRIMS = {
@@ -278,7 +279,7 @@ _STANDARD_TRIMS = {
 	"Y": {
 		"D": "Standard Range", "E": "Long Range", "F": "Performance",
 		"J": "Standard Range", "K": "Long Range", "L": "Performance",
-		"R": "Standard Range", "S": "Standard Range",
+		"R": "Standard Range", "S": "Standard Range", "T": "Performance",
 	},
 	"C": {"D": "Dual Motor", "E": "Cyberbeast"},
 	"R": {"4": "Sport"},
@@ -328,6 +329,8 @@ def get_hardware_generation(model_code: str, seq: int, plant_code: str, year_cod
 		return {"t": "Possibly HW4" if year == 2023 else "Shipped with HW3"}
 
 	if model_code == "X":
+		if year >= 2024:
+			return {"t": "HW4"}
 		matched = _match_seq_threshold(seq, _MODEL_X_SEQ_HW)
 		if matched:
 			return {"t": matched}
@@ -335,6 +338,8 @@ def get_hardware_generation(model_code: str, seq: int, plant_code: str, year_cod
 		return {"t": label} if label else None
 
 	if model_code == "S":
+		if year >= 2024:
+			return {"t": "HW4"}
 		if year_code not in S_LEGACY_YEARS:
 			matched = _match_seq_threshold(seq, _MODEL_S_PAL_SEQ_HW)
 			return {"t": matched or "Shipped with HW3"}
