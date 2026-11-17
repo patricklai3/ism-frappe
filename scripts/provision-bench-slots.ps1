@@ -1,8 +1,9 @@
 param (
-    [int]$Slots = 4,
+    [int]$Slots = 5,
     [switch]$RefreshGolden = $false,
     [switch]$Recreate = $false,
     [switch]$Status = $false,
+    [int]$History = 0,
     [string]$Distro = ""
 )
 
@@ -32,17 +33,19 @@ function Test-PrimaryTrunkCheckout {
     return $true, "ok"
 }
 
-if (-not $Status) {
+$IsMutating = ($RefreshGolden -or $Recreate -or (-not $Status -and $History -le 0))
+if ($IsMutating) {
     $RepoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
     $Ok, $Why = Test-PrimaryTrunkCheckout -CheckPath $RepoRoot
     if (-not $Ok) {
-        Write-Error "Refusing mutating bench slot provisioning outside primary trunk ($Why). Only -Status is allowed from worktrees."
+        Write-Error "Refusing mutating bench slot provisioning outside primary trunk ($Why). Only -Status and -History are allowed from worktrees."
         exit 1
     }
 }
 
 function Ensure-LfNoBom {
     param ([string]$FilePath)
+    if (-not (Test-Path $FilePath)) { return }
     $bytes = [System.IO.File]::ReadAllBytes($FilePath)
     $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
     $hasCr = ($bytes -contains 0x0D)
@@ -54,22 +57,34 @@ function Ensure-LfNoBom {
     }
 }
 
+function ConvertTo-WslPath {
+    param ([string]$WinPath, [string]$DistroName)
+    $norm = $WinPath.Replace('\', '/')
+    if ($norm -match '^([A-Za-z]):/(.*)$') {
+        return "/mnt/$($Matches[1].ToLowerInvariant())/$($Matches[2].TrimEnd('/'))"
+    }
+    $resolved = (wsl -d $DistroName --exec wslpath -u "$norm").Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $resolved) {
+        Write-Error "Failed to convert '$norm' to WSL path."
+        exit 1
+    }
+    return $resolved
+}
+
 $DefaultDistro = if ($env:ISM_WSL_DISTRO) { $env:ISM_WSL_DISTRO } else { "Ubuntu" }
 $TargetDistro = if ($Distro) { $Distro } else { $DefaultDistro }
 
+$WinCommonPath = (Resolve-Path (Join-Path $PSScriptRoot "wsl\slot-common.sh")).Path
+Ensure-LfNoBom -FilePath $WinCommonPath
 $WinScriptRealPath = (Resolve-Path (Join-Path $PSScriptRoot "wsl\provision-slots.sh")).Path
 Ensure-LfNoBom -FilePath $WinScriptRealPath
-$WinScriptPath = $WinScriptRealPath.Replace('\', '/')
-$WslScriptPath = (wsl -d $TargetDistro --exec wslpath -u "$WinScriptPath").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $WslScriptPath) {
-    Write-Error "Failed to resolve WSL path for '$WinScriptPath'."
-    exit 1
-}
+$WslScriptPath = ConvertTo-WslPath -WinPath $WinScriptRealPath -DistroName $TargetDistro
 
 $ArgList = @("--slots", "$Slots")
 if ($RefreshGolden) { $ArgList += "--refresh-golden" }
 if ($Recreate) { $ArgList += "--recreate" }
 if ($Status) { $ArgList += "--status" }
+if ($History -gt 0) { $ArgList += @("--history", "$History") }
 
 wsl -d $TargetDistro --exec bash $WslScriptPath @ArgList
 exit $LASTEXITCODE

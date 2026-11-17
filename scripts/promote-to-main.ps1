@@ -99,7 +99,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not $SkipSmokeTest) {
     Write-Host "[promote-to-main] 5/5 Stage B: Running isolated smoke suite ($SmokeModule)..." -ForegroundColor Cyan
-    & "$PSScriptRoot\test-in-slot.ps1" -FreshDb -SkipMigrate -Module $SmokeModule -Distro $TargetDistro
+    & "$PSScriptRoot\test-in-slot.ps1" -Module $SmokeModule -Distro $TargetDistro
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
     Write-Host "[promote-to-main] 5/5 Stage B skipped (-SkipSmokeTest)." -ForegroundColor Yellow

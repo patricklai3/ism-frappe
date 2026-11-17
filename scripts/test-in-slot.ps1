@@ -1,15 +1,18 @@
 param (
-    [string]$Module = "",
+    [string[]]$Module = @(),
     [string]$DocType = "",
-    [string]$Test = "",
+    [string[]]$Test = @(),
     [string]$Execute = "",
     [ValidateSet("", "start", "stop", "foreground")]
     [string]$Serve = "",
     [int]$Slot = 0,
-    [int]$Slots = 4,
+    [int]$Slots = 5,
     [switch]$FreshDb = $false,
     [switch]$KeepDb = $false,
     [switch]$SkipMigrate = $false,
+    [switch]$ForceMigrate = $false,
+    [switch]$ForceSkipMigrate = $false,
+    [switch]$AllowParallelSlots = $false,
     [string]$Worktree = "",
     [string[]]$ExtraArgs = @(),
     [string]$Distro = ""
@@ -49,6 +52,7 @@ if (-not (Test-Path (Join-Path $IsmFrappeDir "pyproject.toml"))) {
 
 function Ensure-LfNoBom {
     param ([string]$FilePath)
+    if (-not (Test-Path $FilePath)) { return }
     $bytes = [System.IO.File]::ReadAllBytes($FilePath)
     $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
     $hasCr = ($bytes -contains 0x0D)
@@ -60,21 +64,40 @@ function Ensure-LfNoBom {
     }
 }
 
-$NormalizedSource = $IsmFrappeDir.Replace('\', '/')
-$WslSourceDir = (wsl -d $TargetDistro --exec wslpath -u "$NormalizedSource").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $WslSourceDir) {
-    Write-Error "Failed to convert '$NormalizedSource' to WSL path."
-    exit 1
+function ConvertTo-WslPath {
+    param ([string]$WinPath, [string]$DistroName)
+    $norm = $WinPath.Replace('\', '/')
+    if ($norm -match '^([A-Za-z]):/(.*)$') {
+        return "/mnt/$($Matches[1].ToLowerInvariant())/$($Matches[2].TrimEnd('/'))"
+    }
+    $resolved = (wsl -d $DistroName --exec wslpath -u "$norm").Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $resolved) {
+        Write-Error "Failed to convert '$norm' to WSL path."
+        exit 1
+    }
+    return $resolved
 }
 
+function Expand-CsvArgs {
+    param ([string[]]$Values)
+    $out = @()
+    foreach ($v in $Values) {
+        if (-not $v) { continue }
+        foreach ($part in ($v -split ',')) {
+            $trimmed = $part.Trim()
+            if ($trimmed) { $out += $trimmed }
+        }
+    }
+    return $out
+}
+
+$WslSourceDir = ConvertTo-WslPath -WinPath $IsmFrappeDir -DistroName $TargetDistro
+
+$WinCommonPath = (Resolve-Path (Join-Path $PSScriptRoot "wsl\slot-common.sh")).Path
+Ensure-LfNoBom -FilePath $WinCommonPath
 $WinRunnerRealPath = (Resolve-Path (Join-Path $PSScriptRoot "wsl\run-in-slot.sh")).Path
 Ensure-LfNoBom -FilePath $WinRunnerRealPath
-$WinRunnerPath = $WinRunnerRealPath.Replace('\', '/')
-$WslRunnerPath = (wsl -d $TargetDistro --exec wslpath -u "$WinRunnerPath").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $WslRunnerPath) {
-    Write-Error "Failed to convert '$WinRunnerPath' to WSL path."
-    exit 1
-}
+$WslRunnerPath = ConvertTo-WslPath -WinPath $WinRunnerRealPath -DistroName $TargetDistro
 
 $Mode = "test"
 if ($Serve) {
@@ -100,9 +123,17 @@ $ArgList = @(
 if ($FreshDb) { $ArgList += "--fresh-db" }
 if ($KeepDb) { $ArgList += "--keep-db" }
 if ($SkipMigrate) { $ArgList += "--skip-migrate" }
-if ($Module) { $ArgList += @("--module", $Module) }
+if ($ForceMigrate) { $ArgList += "--force-migrate" }
+if ($ForceSkipMigrate) { $ArgList += "--force-skip-migrate" }
+if ($AllowParallelSlots) { $ArgList += "--allow-parallel-slots" }
+
+foreach ($m in (Expand-CsvArgs -Values $Module)) {
+    $ArgList += @("--module", $m)
+}
 if ($DocType) { $ArgList += @("--doctype", $DocType) }
-if ($Test) { $ArgList += @("--test", $Test) }
+foreach ($t in (Expand-CsvArgs -Values $Test)) {
+    $ArgList += @("--test", $t)
+}
 if ($Execute) { $ArgList += @("--execute-fn", $Execute) }
 if ($Serve) { $ArgList += @("--serve-action", $Serve) }
 

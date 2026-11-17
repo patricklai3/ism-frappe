@@ -11,8 +11,8 @@ All scripts detect the repository root dynamically relative to their location. T
 - [push-deploy-subtree.ps1](push-deploy-subtree.ps1): Splits `ism-frappe/` from `HEAD` and pushes to the Frappe Cloud deploy remote (`staging` / `production`).
 - [watch-sync.ps1](watch-sync.ps1): Watches the repository for changes and pushes them to WSL2 automatically (PowerShell; guarded for primary `D:\ism` on `main`).
 - [watch-sync.mjs](watch-sync.mjs): Watches the repository for changes and pushes them to WSL2 automatically (Node.js; guarded for primary `D:\ism` on `main`).
-- [provision-bench-slots.ps1](provision-bench-slots.ps1): Provisions/refreshes the 4 isolated thin Frappe bench slots (`slot-1`..`slot-4`) and reports slot lease status (`-Status`).
-- [test-in-slot.ps1](test-in-slot.ps1): Leases a free bench slot via kernel `flock`, resets DB from `main_golden.sql.gz` on worktree changes, syncs that worktree, migrates, and runs tests/execute/serve in isolation.
+- [provision-bench-slots.ps1](provision-bench-slots.ps1): Provisions/refreshes the isolated thin Frappe bench slots (`slot-1`..`slot-5` default, up to `8` CLI slots) and reports live slot lease status (`-Status`) and telemetry (`-History <N>`).
+- [test-in-slot.ps1](test-in-slot.ps1): Leases a free bench slot via sticky/golden/LRU kernel `flock` (serializing same-worktree auto-slot runs by default), resets DB from `main_golden.sql.gz` on worktree changes, syncs that worktree, auto-skips `bench migrate` when the schema fingerprint matches, and runs batched tests/execute/serve in isolation.
 - [promote-to-main.ps1](promote-to-main.ps1): Trunk promotion workflow on `D:\ism` (`main`) — syncs `ism-frappe`, migrates `development.localhost`, runs Stage A read-only check, refreshes `main_golden.sql.gz`, and runs Stage B isolated smoke suite.
 - [start-remote-tunnel.ps1](start-remote-tunnel.ps1): Exposes dev site on port 8000 via Cloudflare Tunnel with custom domain or quick URL and mobile QR code.
 - [stop-remote-tunnel.ps1](stop-remote-tunnel.ps1): Stops active Cloudflare Tunnel processes.
@@ -73,22 +73,22 @@ You can configure defaults across all scripts using environment variables:
 
 ## Parallel Worktree Bench Slots
 
-Up to 4 Git worktrees or feature branches can sync, migrate, test, and preview concurrently without touching `development.localhost` (`:8000`, Redis `/0`):
+Up to 5 Git worktrees or feature branches (expandable to 8 CLI slots via `-Slots`) can sync, migrate, test, and preview concurrently without touching `development.localhost` (`:8000`, Redis `/0`):
 
-- **Provision slots (from `D:\ism` on `main`):**
+- **Provision slots & inspect telemetry (from `D:\ism` on `main`; `-Status` / `-History` allowed from any worktree):**
   ```powershell
   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\provision-bench-slots.ps1
-  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\provision-bench-slots.ps1 -Status
+  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\provision-bench-slots.ps1 -Status -History 20
   ```
 - **Run isolated tests / commands / preview from any worktree:**
   ```powershell
-  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -Module ism.tests.test_estimation_math
+  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -Module ism.tests.test_estimation_math,ism.tests.test_agent_facade
   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -DocType "Repair Order" -FreshDb
   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -Execute ism.scripts.verify_mcp_agent.run
-  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -Slot 1 -Serve start   # http://localhost:8001 .. 8004
+  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -Slot 1 -Serve start   # http://localhost:8001 .. 8005
   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -Slot 1 -Serve stop
   ```
-  Options: `-Module`, `-DocType`, `-Test`, `-Execute`, `-Serve start|stop|foreground`, `-Slot <1..4>`, `-FreshDb`, `-KeepDb`, `-SkipMigrate`, `-ExtraArgs`.
+  Options: `-Module` (array or comma-separated), `-DocType`, `-Test` (array or comma-separated), `-Execute`, `-Serve start|stop|foreground`, `-Slot <1..8>`, `-Slots <1..8>` (default `5`; `--serve` capped at `1..5`), `-FreshDb`, `-KeepDb`, `-SkipMigrate`, `-ForceMigrate`, `-ForceSkipMigrate`, `-AllowParallelSlots`, `-ExtraArgs`.
 - **Promote merged `main` from `D:\ism`:**
   ```powershell
   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\promote-to-main.ps1

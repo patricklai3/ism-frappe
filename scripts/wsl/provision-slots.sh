@@ -1,29 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WSL_DEV_ROOT="/home/real2/projects/.project/frappe_docker/development"
-WSL_PRIMARY_BENCH="$WSL_DEV_ROOT/frappe-bench"
-WSL_SLOTS_ROOT="$WSL_DEV_ROOT/bench-slots"
-CONTAINER_DEV_ROOT="/workspace/development"
-CONTAINER_PRIMARY_BENCH="$CONTAINER_DEV_ROOT/frappe-bench"
-CONTAINER_SLOTS_ROOT="$CONTAINER_DEV_ROOT/bench-slots"
-LOCK_DIR="/tmp/ism-bench-slots"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=slot-common.sh
+source "$SCRIPT_DIR/slot-common.sh"
 
-CONTAINER_FRAPPE="devcontainer-frappe-1"
-CONTAINER_DB="devcontainer-mariadb-1"
-CONTAINER_REDIS_CACHE="devcontainer-redis-cache-1"
-CONTAINER_REDIS_QUEUE="devcontainer-redis-queue-1"
-MARIADB_ROOT_PW="123"
-
-SLOT_COUNT=4
+SLOT_COUNT=5
 REFRESH_GOLDEN=0
 RECREATE=0
 STATUS_ONLY=0
+HISTORY_LIMIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slots)
-      SLOT_COUNT="${2:-4}"
+      SLOT_COUNT="${2:-5}"
       shift 2
       ;;
     --refresh-golden)
@@ -38,6 +29,15 @@ while [[ $# -gt 0 ]]; do
       STATUS_ONLY=1
       shift
       ;;
+    --history)
+      if [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]]; then
+        HISTORY_LIMIT="$2"
+        shift 2
+      else
+        HISTORY_LIMIT=20
+        shift
+      fi
+      ;;
     *)
       echo "[provision-slots] Unknown argument: $1" >&2
       exit 2
@@ -45,23 +45,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! [[ "$SLOT_COUNT" =~ ^[1-5]$ ]]; then
-  echo "[provision-slots] --slots must be between 1 and 5 (got '$SLOT_COUNT')." >&2
+if ! [[ "$SLOT_COUNT" =~ ^[1-8]$ ]]; then
+  echo "[provision-slots] --slots must be between 1 and 8 (got '$SLOT_COUNT')." >&2
   exit 2
 fi
 
 mkdir -p "$LOCK_DIR"
 
-read_meta_value() {
-  local meta_file="$1"
-  local key="$2"
-  if [[ -f "$meta_file" ]]; then
-    awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$meta_file"
-  fi
-}
-
 print_status() {
-  printf "%-7s %-11s %-7s %-42s %-22s %-10s %-26s\n" "SLOT" "PROVISIONED" "LOCK" "LAST_WORKTREE" "BRANCH" "HEAD" "SERVE"
+  printf "%-7s %-11s %-7s %-10s %-10s %-42s %-24s %-10s %-26s\n" \
+    "SLOT" "PROVISIONED" "LOCK" "DB_STATE" "SCHEMA_FP" "LAST_WORKTREE" "BRANCH" "HEAD" "SERVE"
   for k in $(seq 1 "$SLOT_COUNT"); do
     local slot_host_dir="$WSL_SLOTS_ROOT/slot-$k"
     local prov="missing"
@@ -76,13 +69,30 @@ print_status() {
     fi
 
     local meta_file="$LOCK_DIR/slot-$k.meta"
-    local last_wt last_branch last_head
+    local last_wt last_branch last_head db_state schema_fp
     last_wt="$(read_meta_value "$meta_file" "last_worktree")"
     last_branch="$(read_meta_value "$meta_file" "last_branch")"
     last_head="$(read_meta_value "$meta_file" "last_head")"
+    db_state="$(read_meta_value "$meta_file" "db_state")"
+    schema_fp="$(read_meta_value "$meta_file" "schema_fp")"
+
+    if [[ "$lock_state" == "busy" && -f "$LOCK_DIR/slot-$k.holder" ]]; then
+      local holder_line holder_wt holder_branch
+      holder_line="$(cat "$LOCK_DIR/slot-$k.holder" 2>/dev/null || true)"
+      IFS='|' read -r holder_wt holder_branch _ _ <<< "$holder_line"
+      [[ -n "$holder_wt" ]] && last_wt="$holder_wt"
+      [[ -n "$holder_branch" ]] && last_branch="$holder_branch"
+    fi
+
     [[ -z "$last_wt" ]] && last_wt="-"
     [[ -z "$last_branch" ]] && last_branch="-"
     [[ -z "$last_head" ]] && last_head="-"
+    [[ -z "$db_state" ]] && db_state="-"
+    if [[ -z "$schema_fp" ]]; then
+      schema_fp="-"
+    elif [[ "$schema_fp" != "migrating" && ${#schema_fp} -gt 8 ]]; then
+      schema_fp="${schema_fp:0:8}"
+    fi
     if [[ ${#last_head} -gt 8 ]]; then
       last_head="${last_head:0:8}"
     fi
@@ -97,12 +107,92 @@ print_status() {
       fi
     fi
 
-    printf "%-7s %-11s %-7s %-42s %-22s %-10s %-26s\n" "slot-$k" "$prov" "$lock_state" "$last_wt" "$last_branch" "$last_head" "$serve_info"
+    printf "%-7s %-11s %-7s %-10s %-10s %-42s %-24s %-10s %-26s\n" \
+      "slot-$k" "$prov" "$lock_state" "$db_state" "$schema_fp" "$last_wt" "$last_branch" "$last_head" "$serve_info"
   done
 }
 
-if [[ "$STATUS_ONLY" -eq 1 ]]; then
-  print_status
+print_history() {
+  local limit="$1"
+  if [[ ! -s "$HISTORY_FILE" ]]; then
+    echo "[provision-slots] No slot lease history recorded yet at $HISTORY_FILE."
+    return 0
+  fi
+
+  python3 - "$HISTORY_FILE" "$limit" <<'PY'
+import json
+import sys
+from collections import Counter
+
+history_path, limit_str = sys.argv[1], sys.argv[2]
+limit = max(1, int(limit_str))
+
+rows = []
+with open(history_path, "r", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+if not rows:
+    print("[provision-slots] History file is empty or unreadable.")
+    sys.exit(0)
+
+total = len(rows)
+tiers = Counter(r.get("tier", "?") for r in rows)
+restores = sum(1 for r in rows if r.get("need_reset"))
+migrates = sum(1 for r in rows if r.get("ran_migrate"))
+failures = sum(1 for r in rows if r.get("rc", 0) != 0)
+
+def avg(key):
+    vals = [r.get(key, 0) for r in rows if isinstance(r.get(key), (int, float))]
+    return (sum(vals) / len(vals)) if vals else 0.0
+
+print(
+    f"[slot-history] total={total} restores={restores} ({100*restores/total:.1f}%) "
+    f"migrates={migrates} ({100*migrates/total:.1f}%) failures={failures} "
+    f"tiers={dict(sorted(tiers.items()))}"
+)
+print(
+    f"[slot-history] avg_ms: wait={avg('wait_ms'):.0f} restore={avg('restore_ms'):.0f} "
+    f"sync={avg('sync_ms'):.0f} exec={avg('exec_ms'):.0f}"
+)
+print(
+    f"{'TIMESTAMP':<20} {'SLOT':<6} {'TIER':<9} {'RST':<4} {'MIG':<4} "
+    f"{'WAIT':>6} {'REST':>6} {'EXEC':>6} {'RC':>3} {'MODE':<8} {'BRANCH':<26} {'WORKTREE'}"
+)
+for r in rows[-limit:]:
+    ts = str(r.get("ts", ""))[:19]
+    slot = f"slot-{r.get('slot', '?')}"
+    tier = str(r.get("tier", "?"))[:9]
+    rst = "yes" if r.get("need_reset") else "no"
+    mig = "yes" if r.get("ran_migrate") else "no"
+    wait_s = f"{r.get('wait_ms', 0)/1000:.1f}s"
+    rest_s = f"{r.get('restore_ms', 0)/1000:.1f}s"
+    exec_s = f"{r.get('exec_ms', 0)/1000:.1f}s"
+    rc = r.get("rc", "?")
+    mode = str(r.get("mode", "?"))[:8]
+    branch = str(r.get("branch", "?"))[:26]
+    wt = str(r.get("worktree", "?")).rstrip("/").split("/")[-1]
+    print(
+        f"{ts:<20} {slot:<6} {tier:<9} {rst:<4} {mig:<4} "
+        f"{wait_s:>6} {rest_s:>6} {exec_s:>6} {str(rc):>3} {mode:<8} {branch:<26} {wt}"
+    )
+PY
+}
+
+if [[ "$STATUS_ONLY" -eq 1 || "$HISTORY_LIMIT" -gt 0 ]]; then
+  if [[ "$STATUS_ONLY" -eq 1 ]]; then
+    print_status
+  fi
+  if [[ "$HISTORY_LIMIT" -gt 0 ]]; then
+    [[ "$STATUS_ONLY" -eq 1 ]] && echo ""
+    print_history "$HISTORY_LIMIT"
+  fi
   exit 0
 fi
 
@@ -113,11 +203,19 @@ fi
 
 mkdir -p "$WSL_SLOTS_ROOT/golden"
 
-GOLDEN_FILE="$WSL_SLOTS_ROOT/golden/main_golden.sql.gz"
+ensure_golden_fp() {
+  local fp
+  fp="$(compute_schema_fp "$WSL_PRIMARY_BENCH/apps/ism")"
+  local tmp_fp="${GOLDEN_FP_FILE}.tmp.$$"
+  printf '%s\n' "$fp" > "$tmp_fp"
+  mv -f "$tmp_fp" "$GOLDEN_FP_FILE"
+  printf '%s' "$fp"
+}
+
 if [[ ! -s "$GOLDEN_FILE" || "$REFRESH_GOLDEN" -eq 1 || "$RECREATE" -eq 1 ]]; then
   PRIMARY_DB_NAME="$(python3 -c 'import json; print(json.load(open("/home/real2/projects/.project/frappe_docker/development/frappe-bench/sites/development.localhost/site_config.json")).get("db_name", "_c6b75eebb8edc84d"))')"
   echo "[provision-slots] Dumping primary DB '$PRIMARY_DB_NAME' -> $GOLDEN_FILE..."
-  TMP_GOLDEN="$GOLDEN_FILE.tmp"
+  TMP_GOLDEN="$GOLDEN_FILE.tmp.$$"
   docker exec "$CONTAINER_DB" mariadb-dump -uroot -p"$MARIADB_ROOT_PW" \
     --single-transaction --routines --triggers "$PRIMARY_DB_NAME" \
     | gzip -1 > "$TMP_GOLDEN"
@@ -126,8 +224,13 @@ if [[ ! -s "$GOLDEN_FILE" || "$REFRESH_GOLDEN" -eq 1 || "$RECREATE" -eq 1 ]]; th
     echo "[provision-slots] Golden dump produced an empty archive." >&2
     exit 1
   fi
-  mv "$TMP_GOLDEN" "$GOLDEN_FILE"
-  echo "[provision-slots] Golden DB snapshot updated ($(du -h "$GOLDEN_FILE" | cut -f1))."
+  mv -f "$TMP_GOLDEN" "$GOLDEN_FILE"
+  GOLDEN_FP="$(ensure_golden_fp)"
+  echo "[provision-slots] Golden DB snapshot updated ($(du -h "$GOLDEN_FILE" | cut -f1), schema_fp=${GOLDEN_FP:0:8})."
+elif [[ ! -s "$GOLDEN_FP_FILE" ]]; then
+  GOLDEN_FP="$(ensure_golden_fp)"
+else
+  GOLDEN_FP="$(tr -d '[:space:]' < "$GOLDEN_FP_FILE")"
 fi
 
 provision_slot_fs_and_venv() {
@@ -248,6 +351,7 @@ common.update({
     "socketio_port": 9000 + k,
     "webserver_port": 8000 + k,
 })
+
 with open(os.path.join(slot_dir, "sites", "common_site_config.json"), "w", encoding="utf-8") as f:
     json.dump(common, f, indent=1)
     f.write("\n")
@@ -281,25 +385,28 @@ seed_slot_db_and_migrate() {
   local slot_db="_ism_slot_${k}"
   local slot_pw="ism_slot_${k}_pw"
   local site_name="wt${k}.localhost"
+  local meta_file="$LOCK_DIR/slot-$k.meta"
 
   echo "[provision-slots] Seeding MariaDB '$slot_db' & Redis /$k for slot-$k..."
-  docker exec "$CONTAINER_DB" mariadb -uroot -p"$MARIADB_ROOT_PW" -e \
-    "DROP DATABASE IF EXISTS \`$slot_db\`; CREATE DATABASE \`$slot_db\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '$slot_db'@'%' IDENTIFIED BY '$slot_pw'; ALTER USER '$slot_db'@'%' IDENTIFIED BY '$slot_pw'; GRANT ALL PRIVILEGES ON \`$slot_db\`.* TO '$slot_db'@'%'; FLUSH PRIVILEGES;"
+  write_meta_file "$meta_file" "__GOLDEN__" "main" "golden" "restoring" ""
 
-  gunzip -c "$GOLDEN_FILE" | docker exec -i "$CONTAINER_DB" mariadb -uroot -p"$MARIADB_ROOT_PW" "$slot_db"
+  (
+    exec 202>"$LOCK_DIR/mariadb-restore.lock"
+    flock 202
+    docker exec "$CONTAINER_DB" mariadb -uroot -p"$MARIADB_ROOT_PW" -e \
+      "DROP DATABASE IF EXISTS \`$slot_db\`; CREATE DATABASE \`$slot_db\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '$slot_db'@'%' IDENTIFIED BY '$slot_pw'; ALTER USER '$slot_db'@'%' IDENTIFIED BY '$slot_pw'; GRANT ALL PRIVILEGES ON \`$slot_db\`.* TO '$slot_db'@'%'; FLUSH PRIVILEGES;"
+    { echo "SET SESSION sql_log_bin=0;"; gunzip -c "$GOLDEN_FILE"; } | docker exec -i "$CONTAINER_DB" mariadb -uroot -p"$MARIADB_ROOT_PW" "$slot_db"
+  )
+
   docker exec "$CONTAINER_REDIS_CACHE" redis-cli -n "$k" FLUSHDB >/dev/null
   docker exec "$CONTAINER_REDIS_QUEUE" redis-cli -n "$k" FLUSHDB >/dev/null
 
   docker exec -w "$CONTAINER_SLOTS_ROOT/slot-$k" "$CONTAINER_FRAPPE" bash -c \
     "export PATH=\"$CONTAINER_SLOTS_ROOT/slot-$k/env/bin:/home/frappe/.local/bin:/home/frappe/.nvm/versions/node/v24.13.0/bin:/home/frappe/.pyenv/shims:\$PATH\"; bench --site '$site_name' clear-cache && bench --site '$site_name' migrate"
 
-  cat > "$LOCK_DIR/slot-$k.meta" <<META
-last_worktree=__GOLDEN__
-last_branch=main
-last_head=golden
-db_state=golden
-updated_at=$(date -Iseconds)
-META
+  local slot_fp
+  slot_fp="$(compute_schema_fp "$WSL_SLOTS_ROOT/slot-$k/apps/ism")"
+  write_meta_file "$meta_file" "__GOLDEN__" "main" "golden" "golden" "$slot_fp"
 }
 
 for k in $(seq 1 "$SLOT_COUNT"); do
@@ -308,6 +415,7 @@ for k in $(seq 1 "$SLOT_COUNT"); do
     flock 200
 
     slot_host_dir="$WSL_SLOTS_ROOT/slot-$k"
+    meta_file="$LOCK_DIR/slot-$k.meta"
     needs_create=0
     if [[ "$RECREATE" -eq 1 || ! -d "$slot_host_dir/env" || ! -d "$slot_host_dir/sites/wt${k}.localhost/logs" || ! -f "$slot_host_dir/sites/wt${k}.localhost/site_config.json" ]]; then
       needs_create=1
@@ -323,6 +431,24 @@ for k in $(seq 1 "$SLOT_COUNT"); do
       seed_slot_db_and_migrate "$k"
       echo "[provision-slots] slot-$k ready (wt${k}.localhost, port 800${k}, redis /$k)."
     else
+      # Backfill schema_fp / updated_at_epoch on legacy golden/ready slots without rebuilding.
+      cur_db_state="$(read_meta_value "$meta_file" "db_state")"
+      cur_fp="$(read_meta_value "$meta_file" "schema_fp")"
+      cur_epoch="$(read_meta_value "$meta_file" "updated_at_epoch")"
+      if [[ -z "$cur_fp" || -z "$cur_epoch" ]] && [[ "$cur_db_state" == "golden" || "$cur_db_state" == "dirty" || "$cur_db_state" == "ready" ]]; then
+        cur_wt="$(read_meta_value "$meta_file" "last_worktree")"
+        cur_br="$(read_meta_value "$meta_file" "last_branch")"
+        cur_hd="$(read_meta_value "$meta_file" "last_head")"
+        [[ "$cur_db_state" == "dirty" ]] && cur_db_state="ready"
+        if [[ -z "$cur_fp" ]]; then
+          if [[ "$cur_db_state" == "golden" ]]; then
+            cur_fp="$GOLDEN_FP"
+          else
+            cur_fp="$(compute_schema_fp "$slot_host_dir/apps/ism")"
+          fi
+        fi
+        write_meta_file "$meta_file" "${cur_wt:-__GOLDEN__}" "${cur_br:-main}" "${cur_hd:-golden}" "$cur_db_state" "$cur_fp"
+      fi
       echo "[provision-slots] slot-$k already provisioned (pass --refresh-golden or --recreate to rebuild)."
     fi
   )

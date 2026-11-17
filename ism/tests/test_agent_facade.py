@@ -883,7 +883,8 @@ class TestAgentFacade(ISMTestCase):
 		self.assertGreater(len(returned_times), 3)
 		self.assertEqual(returned_times[0], "10:00")
 		self.assertNotIn("08:00", returned_times)
-		self.assertEqual(midmorning["data"]["slots"][0]["available_bay_ids"], [f"{PREFIX}Bay 1", f"{PREFIX}Bay 2"])
+		test_bays = [b for b in midmorning["data"]["slots"][0]["available_bay_ids"] if b.startswith(PREFIX)]
+		self.assertEqual(test_bays, [f"{PREFIX}Bay 1", f"{PREFIX}Bay 2"])
 
 		# Automatic today cutoff skips elapsed slots in now_datetime()
 		with patch("ism.api.agent.now_datetime", return_value=datetime.strptime(f"{today()} 11:10:00", "%Y-%m-%d %H:%M:%S")):
