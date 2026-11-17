@@ -19,6 +19,7 @@ from ism.testing.builder import SimContext, _normalize_anchor_date
 from ism.testing.catalog import PACKAGE_EQUIPMENT_TAGS
 from ism.testing.manifest import SimManifest
 from ism.testing.profiles import (
+	_clear_rq_queues,
 	_ensure_layer1_manifest,
 	_ensure_submitted_leave,
 	_parse_commit_flag,
@@ -555,6 +556,7 @@ def monte_carlo(
 
 	if _parse_commit_flag(commit):
 		frappe.db.commit()
+		_clear_rq_queues()
 	return m
 
 
