@@ -7,9 +7,12 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 
 
+_VALID_SOURCES = ("Manual", "Agent", "Rule Snooze")
+
+
 class ShopActionItem(Document):
 	def validate(self):
-		if self.status == "Resolved":
+		if self.status in ("Resolved", "Dismissed"):
 			if not self.resolved_by:
 				self.resolved_by = frappe.session.user
 			if not self.resolved_at:
@@ -17,6 +20,12 @@ class ShopActionItem(Document):
 		elif self.status in ["Open", "In Progress"]:
 			self.resolved_by = None
 			self.resolved_at = None
+
+		if self.source and self.source not in _VALID_SOURCES:
+			frappe.throw(
+				_("Invalid Action Item source: {0}.").format(self.source),
+				frappe.ValidationError,
+			)
 
 	@frappe.whitelist()
 	def resolve(self, resolution_notes=None):
@@ -42,6 +51,9 @@ def create_shop_action_item(
 	item_code=None,
 	details=None,
 	reported_by=None,
+	dedup_key=None,
+	source=None,
+	snoozed_until=None,
 	**kwargs,
 ):
 	frappe.has_permission("Shop Action Item", "create", throw=True)
@@ -56,9 +68,17 @@ def create_shop_action_item(
 		("Item Code", item_code),
 		("Details", details),
 		("Reported By", reported_by),
+		("Deduplication Key", dedup_key),
+		("Source", source),
 	):
 		if val is not None and not isinstance(val, str):
 			frappe.throw(_("{0} must be a string.").format(field_label), frappe.ValidationError)
+
+	clean_source = source.strip() if isinstance(source, str) and source.strip() else None
+	if clean_source and clean_source not in _VALID_SOURCES:
+		frappe.throw(_("Invalid Action Item source: {0}.").format(clean_source), frappe.ValidationError)
+
+	clean_dedup_key = dedup_key.strip() if isinstance(dedup_key, str) and dedup_key.strip() else None
 
 	ref_dt = reference_doctype.strip() if isinstance(reference_doctype, str) else ""
 	ref_name = reference_name.strip() if isinstance(reference_name, str) else ""
@@ -88,16 +108,48 @@ def create_shop_action_item(
 				)
 			resolved_reported_by = candidate_reporter
 
+	clean_title = title.strip()
+	clean_category = category.strip() if isinstance(category, str) and category.strip() else "Shop Floor Discrepancy"
+	clean_priority = priority.strip() if isinstance(priority, str) and priority.strip() else "High"
+	clean_item_code = item_code.strip() if isinstance(item_code, str) and item_code.strip() else None
+	clean_details = details.strip() if isinstance(details, str) and details.strip() else None
+
+	if clean_dedup_key:
+		existing_name = frappe.db.get_value(
+			"Shop Action Item",
+			{"dedup_key": clean_dedup_key, "status": ["in", ["Open", "In Progress"]]},
+			"name",
+		)
+		if existing_name:
+			doc = frappe.get_doc("Shop Action Item", existing_name)
+			doc.check_permission("write")
+			doc.title = clean_title
+			doc.category = clean_category
+			doc.priority = clean_priority
+			doc.reference_doctype = ref_dt or None
+			doc.reference_name = ref_name or None
+			doc.item_code = clean_item_code
+			doc.details = clean_details
+			if clean_source:
+				doc.source = clean_source
+			if snoozed_until is not None:
+				doc.snoozed_until = snoozed_until or None
+			doc.save()
+			return doc.name
+
 	doc = frappe.new_doc("Shop Action Item")
-	doc.title = title.strip()
-	doc.category = category.strip() if isinstance(category, str) and category.strip() else "Shop Floor Discrepancy"
-	doc.priority = priority.strip() if isinstance(priority, str) and priority.strip() else "High"
+	doc.title = clean_title
+	doc.category = clean_category
+	doc.priority = clean_priority
 	doc.status = "Open"
+	doc.source = clean_source or "Manual"
 	doc.reference_doctype = ref_dt or None
 	doc.reference_name = ref_name or None
-	doc.item_code = item_code.strip() if isinstance(item_code, str) and item_code.strip() else None
+	doc.item_code = clean_item_code
+	doc.dedup_key = clean_dedup_key
+	doc.snoozed_until = snoozed_until or None
 	doc.reported_by = resolved_reported_by
-	doc.details = details.strip() if isinstance(details, str) and details.strip() else None
+	doc.details = clean_details
 	doc.insert()
 	return doc.name
 

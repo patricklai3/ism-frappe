@@ -96,6 +96,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	_cleanup_sales_orders(test_customers, log, errors)
 	_cleanup_quotations(test_customers, log, errors)
 	_cleanup_schedule_entries(test_customers, test_ros, log, errors)
+	_cleanup_shop_health_snapshots(log, errors)
 	_cleanup_shop_action_items(test_customers, test_ros, log, errors)
 	_cleanup_repair_orders(test_ros, log, errors)
 	_cleanup_vehicle_checkins(test_customers, log, errors)
@@ -338,15 +339,24 @@ def _cleanup_schedule_entries(test_customers, test_ros, log, errors):
 			_delete_doc_safe("Schedule Entry", se.name, log, errors)
 
 
+def _cleanup_shop_health_snapshots(log, errors):
+	if not frappe.db.exists("DocType", "Shop Health Snapshot"):
+		return
+	for shs in frappe.get_all("Shop Health Snapshot", fields=["name", "metric_key", "verdict"]):
+		if _has_test_prefix(shs.get("metric_key")) or _has_test_prefix(shs.get("verdict")):
+			_delete_doc_safe("Shop Health Snapshot", shs.name, log, errors)
+
+
 def _cleanup_shop_action_items(test_customers, test_ros, log, errors):
 	if not frappe.db.exists("DocType", "Shop Action Item"):
 		return
 	fields = ["name"]
-	optional_cols = ["title", "repair_order", "customer", "vehicle"]
+	optional_cols = ["title", "dedup_key", "repair_order", "customer", "vehicle"]
 	available_cols = [c for c in optional_cols if frappe.db.has_column("Shop Action Item", c)]
 	for sai in frappe.get_all("Shop Action Item", fields=fields + available_cols):
 		if (
 			_has_test_prefix(sai.get("title"))
+			or _has_test_prefix(sai.get("dedup_key"))
 			or (sai.get("repair_order") and sai.get("repair_order") in test_ros)
 			or _is_test_customer_party(sai.get("customer"), test_customers)
 			or _is_test_vin(sai.get("vehicle"))

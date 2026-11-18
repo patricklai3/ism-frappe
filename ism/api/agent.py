@@ -23,6 +23,12 @@ from ism.api.agent_fleet import (
 	record_check_in_inspection as _record_check_in_inspection_impl,
 	resolve_shop_action_item as _resolve_shop_action_item_impl,
 	search_vehicles as _search_vehicles_impl,
+	sync_action_item_state as _sync_action_item_state_impl,
+)
+from ism.api.agent_monitoring import (
+	get_cockpit_snapshot as _get_cockpit_snapshot_impl,
+	get_pnl_digest_inputs as _get_pnl_digest_inputs_impl,
+	publish_health_snapshot as _publish_health_snapshot_impl,
 )
 from ism.api.agent_procurement import (
 	_attach_package_parts,
@@ -142,9 +148,11 @@ __all__ = [
 	"fetch_tesla_manual",
 	"find_available_slots",
 	"get_check_in_inspection",
+	"get_cockpit_snapshot",
 	"get_component_alternates",
 	"get_deferred_services",
 	"get_inspection_template",
+	"get_pnl_digest_inputs",
 	"get_shop_floor_status",
 	"get_tech_overview",
 	"get_unscheduled_services",
@@ -156,6 +164,7 @@ __all__ = [
 	"list_inspection_templates",
 	"list_shop_action_items",
 	"now_datetime",
+	"publish_health_snapshot",
 	"receive_purchase_order",
 	"record_check_in_inspection",
 	"record_ro_deposit",
@@ -164,6 +173,7 @@ __all__ = [
 	"search_vehicles",
 	"send_quote_for_approval",
 	"submit_procurement_orders",
+	"sync_action_item_state",
 	"toggle_service_completion",
 	"update_appointment_status",
 	"update_job_status",
@@ -709,6 +719,8 @@ def create_shop_action_item(
 	reference_name: Optional[str] = None,
 	item_code: Optional[str] = None,
 	details: Optional[str] = None,
+	dedup_key: Optional[str] = None,
+	source: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Create a Shop Action Item escalation for shop floor discrepancies, shortages, or safety flags."""
@@ -719,6 +731,81 @@ def create_shop_action_item(
 		reference_doctype=reference_doctype,
 		reference_name=reference_name,
 		item_code=item_code,
+		details=details,
+		dedup_key=dedup_key,
+		source=source,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def sync_action_item_state(
+	dedup_key: str,
+	action: str,
+	snooze_minutes: Optional[int] = None,
+	title: Optional[str] = None,
+	notes: Optional[str] = None,
+	reference_doctype: Optional[str] = None,
+	reference_name: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Snooze, dismiss, or reopen a deduplicated Shop Action Item across manager workstations."""
+	return _sync_action_item_state_impl(
+		dedup_key=dedup_key,
+		action=action,
+		snooze_minutes=snooze_minutes,
+		title=title,
+		notes=notes,
+		reference_doctype=reference_doctype,
+		reference_name=reference_name,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def get_cockpit_snapshot(
+	date: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Return batched live shop telemetry, dual-resource schedule, action overlays, and cached scores."""
+	return _get_cockpit_snapshot_impl(date=date, include_summary=include_summary)
+
+
+@frappe.whitelist()
+def get_pnl_digest_inputs(
+	from_date: Optional[str] = None,
+	to_date: Optional[str] = None,
+	company: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Return server-computed P&L, labor rate, parts margin, and unbilled WIP metrics for agent scoring."""
+	return _get_pnl_digest_inputs_impl(
+		from_date=from_date,
+		to_date=to_date,
+		company=company,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def publish_health_snapshot(
+	metric_key: str,
+	score: Any,
+	verdict: str,
+	grade: Optional[str] = None,
+	period_date: Optional[str] = None,
+	report_url: Optional[str] = None,
+	details: Optional[Union[Dict[str, Any], str]] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Publish a synced 0-100 Shop Health Snapshot for manager cockpits."""
+	return _publish_health_snapshot_impl(
+		metric_key=metric_key,
+		score=score,
+		verdict=verdict,
+		grade=grade,
+		period_date=period_date,
+		report_url=report_url,
 		details=details,
 		include_summary=include_summary,
 	)

@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.utils import get_url
+from frappe.utils import add_to_date, get_url, now_datetime
 
 from ism.api._validation import (
 	coerce_bool,
@@ -167,12 +167,18 @@ def list_shop_action_items(
 			"category",
 			"priority",
 			"status",
+			"source",
+			"dedup_key",
+			"snoozed_until",
 			"reference_doctype",
 			"reference_name",
 			"item_code",
+			"details",
 			"reported_by",
 			"resolved_by",
 			"resolved_at",
+			"creation",
+			"modified",
 		],
 		order_by="creation desc",
 		limit_page_length=safe_limit,
@@ -205,6 +211,8 @@ def create_shop_action_item(
 	reference_name: Optional[str] = None,
 	item_code: Optional[str] = None,
 	details: Optional[str] = None,
+	dedup_key: Optional[str] = None,
+	source: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Create a Shop Action Item escalation for shop floor discrepancies, shortages, or safety flags."""
@@ -216,6 +224,8 @@ def create_shop_action_item(
 	reference_name = optional_str(reference_name, "Reference Name")
 	item_code = optional_str(item_code, "Item Code")
 	details = optional_str(details, "Details")
+	dedup_key = optional_str(dedup_key, "Deduplication Key")
+	source = optional_str(source, "Source")
 	_validate_optional_reference(reference_doctype, reference_name)
 	if item_code:
 		if not frappe.db.exists("Item", item_code):
@@ -230,6 +240,8 @@ def create_shop_action_item(
 		reference_name=reference_name,
 		item_code=item_code,
 		details=details,
+		dedup_key=dedup_key,
+		source=source,
 	)
 	doc = frappe.get_doc("Shop Action Item", name)
 	doc.check_permission("read")
@@ -242,6 +254,8 @@ def create_shop_action_item(
 			"category": doc.category,
 			"priority": doc.priority,
 			"status": doc.status,
+			"source": doc.source,
+			"dedup_key": doc.dedup_key,
 			"reference_doctype": doc.reference_doctype,
 			"reference_name": doc.reference_name,
 			"item_code": doc.item_code,
@@ -252,6 +266,103 @@ def create_shop_action_item(
 			f"### Shop Action Item Created: `{doc.name}`\n"
 			f"- **Title**: {doc.title}\n"
 			f"- **Priority**: `{doc.priority}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def sync_action_item_state(
+	dedup_key: str,
+	action: str,
+	snooze_minutes: Optional[int] = None,
+	title: Optional[str] = None,
+	notes: Optional[str] = None,
+	reference_doctype: Optional[str] = None,
+	reference_name: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Snooze, dismiss, or reopen a deduplicated Shop Action Item across manager workstations."""
+	frappe.has_permission("Shop Action Item", "write", throw=True)
+	dedup_key = require_str(dedup_key, "dedup_key")
+	action_norm = require_str(action, "action").lower()
+	if action_norm not in ("snooze", "dismiss", "reopen"):
+		frappe.throw(
+			_("Action must be one of: snooze, dismiss, reopen."),
+			frappe.ValidationError,
+		)
+	safe_minutes = optional_int(snooze_minutes, "snooze_minutes", min_val=1, max_val=43200, default=60)
+	title = optional_str(title, "title")
+	notes = optional_str(notes, "notes")
+	reference_doctype = optional_str(reference_doctype, "Reference DocType")
+	reference_name = optional_str(reference_name, "Reference Name")
+	_validate_optional_reference(reference_doctype, reference_name)
+
+	existing = frappe.get_all(
+		"Shop Action Item",
+		filters={"dedup_key": dedup_key},
+		fields=["name"],
+		order_by="creation desc",
+		limit_page_length=1,
+	)
+	if existing:
+		doc = frappe.get_doc("Shop Action Item", existing[0]["name"])
+		doc.check_permission("write")
+	else:
+		frappe.has_permission("Shop Action Item", "create", throw=True)
+		doc = frappe.new_doc("Shop Action Item")
+		doc.dedup_key = dedup_key
+		doc.title = title or f"Synced rule {dedup_key}"
+		doc.category = "Analytics Threshold"
+		doc.priority = "Medium"
+		doc.source = "Rule Snooze"
+		doc.status = "Open"
+		doc.reference_doctype = reference_doctype
+		doc.reference_name = reference_name
+		doc.reported_by = frappe.session.user
+
+	if action_norm == "snooze":
+		if doc.status in ("Resolved", "Dismissed"):
+			doc.status = "Open"
+		doc.snoozed_until = add_to_date(now_datetime(), minutes=safe_minutes)
+		if notes:
+			doc.details = notes
+	elif action_norm == "dismiss":
+		doc.status = "Dismissed"
+		doc.snoozed_until = None
+		doc.resolution_notes = notes or "Dismissed in cockpit"
+		doc.resolved_by = frappe.session.user
+		doc.resolved_at = now_datetime()
+	else:
+		doc.status = "Open"
+		doc.snoozed_until = None
+		doc.resolved_by = None
+		doc.resolved_at = None
+
+	if doc.is_new():
+		doc.insert()
+	else:
+		doc.save()
+	doc.check_permission("read")
+
+	return build_agent_envelope(
+		success=True,
+		urls=_action_item_urls(doc.name, doc.reference_doctype, doc.reference_name),
+		data={
+			"name": doc.name,
+			"title": doc.title,
+			"status": doc.status,
+			"source": doc.source,
+			"dedup_key": doc.dedup_key,
+			"snoozed_until": str(doc.snoozed_until) if doc.snoozed_until else None,
+			"reference_doctype": doc.reference_doctype,
+			"reference_name": doc.reference_name,
+		},
+		message=_("Action item state '{0}' synced for {1}.").format(action_norm, doc.dedup_key),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Action Item State Synced: `{doc.name}`\n"
+			f"- **Dedup Key**: `{doc.dedup_key}`\n"
+			f"- **Status**: `{doc.status}`"
 		),
 	)
 

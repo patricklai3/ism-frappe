@@ -11,10 +11,13 @@
   "category",
   "priority",
   "status",
+  "source",
   "col_break_ref",
   "reference_doctype",
   "reference_name",
   "item_code",
+  "dedup_key",
+  "snoozed_until",
   "reported_by",
   "sec_notes",
   "details",
@@ -79,6 +82,14 @@
    "search_index": 1
   },
   {
+   "default": "Manual",
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Source",
+   "options": "Manual\nAgent\nRule Snooze"
+  },
+  {
    "fieldname": "col_break_ref",
    "fieldtype": "Column Break"
   },
@@ -104,6 +115,18 @@
    "in_standard_filter": 1,
    "label": "Item Code",
    "options": "Item"
+  },
+  {
+   "fieldname": "dedup_key",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Deduplication Key",
+   "search_index": 1
+  },
+  {
+   "fieldname": "snoozed_until",
+   "fieldtype": "Datetime",
+   "label": "Snoozed Until"
   },
   {
    "fieldname": "reported_by",
@@ -202,6 +225,24 @@
    "report": 1,
    "role": "Sales User",
    "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Technician",
    "write": 1
   }
  ],

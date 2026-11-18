@@ -38,6 +38,7 @@ _TEARDOWN_ORDER = {
 	"Purchase Order": 7,
 	"Request for Quotation": 8,
 	"Sales Order": 9,
+	"Shop Health Snapshot": 10,
 	"Shop Action Item": 11,
 	"Repair Order": 13,
 	"Leave Application": 14,

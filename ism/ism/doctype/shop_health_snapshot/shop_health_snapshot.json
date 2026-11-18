@@ -1,0 +1,155 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-11-17 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_snapshot",
+  "naming_series",
+  "metric_key",
+  "period_date",
+  "col_break_score",
+  "score",
+  "grade",
+  "evaluated_by",
+  "sec_verdict",
+  "verdict",
+  "report_url",
+  "details_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_snapshot",
+   "fieldtype": "Section Break",
+   "label": "Health Snapshot"
+  },
+  {
+   "default": "SHS-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "SHS-.YYYY.-.#####",
+   "reqd": 1
+  },
+  {
+   "fieldname": "metric_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Metric Key",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "period_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Period Date",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "col_break_score",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "score",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Score (0-100)",
+   "reqd": 1
+  },
+  {
+   "default": "Healthy",
+   "fieldname": "grade",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Grade",
+   "options": "Healthy\nWatch\nCritical",
+   "reqd": 1
+  },
+  {
+   "fieldname": "evaluated_by",
+   "fieldtype": "Link",
+   "label": "Evaluated By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_verdict",
+   "fieldtype": "Section Break",
+   "label": "Assessment & Details"
+  },
+  {
+   "fieldname": "verdict",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Verdict",
+   "reqd": 1
+  },
+  {
+   "fieldname": "report_url",
+   "fieldtype": "Data",
+   "label": "Report URL"
+  },
+  {
+   "fieldname": "details_json",
+   "fieldtype": "Code",
+   "label": "Details JSON",
+   "options": "JSON"
+  }
+ ],
+ "links": [],
+ "modified": "2026-11-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Shop Health Snapshot",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "ISM Technician"
+  }
+ ],
+ "row_format": "Dynamic",
+ "show_name_in_global_search": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
