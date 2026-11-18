@@ -289,7 +289,18 @@ class ScheduleEntry(Document):
 
 		# Serialize concurrent bay overlap checks with an indexed row lock on the Service Bay.
 		sb = frappe.qb.DocType("Service Bay")
-		frappe.qb.from_(sb).select(sb.name).where(sb.name == self.service_bay).for_update().run()
+		bay_rows = (
+			frappe.qb.from_(sb)
+			.select(sb.name, sb.is_active)
+			.where(sb.name == self.service_bay)
+			.for_update()
+			.run(as_dict=True)
+		)
+		if bay_rows and not cint(bay_rows[0].get("is_active")):
+			frappe.throw(
+				_("Service Bay '{0}' is inactive / offline and cannot be scheduled.").format(self.service_bay),
+				frappe.ValidationError,
+			)
 
 		from ism.api.scheduling import check_bay_availability
 

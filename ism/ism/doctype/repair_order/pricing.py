@@ -673,6 +673,47 @@ def add_supplement_to_ro(
 	return {"status": "success", "service_title": title}
 
 
+def _lookup_deferred_row_by_id(vehicle: Optional[str], row_id: str) -> Optional[tuple[str, float, Optional[str]]]:
+	"""Resolve a Vehicle Deferred Service or Declined Repair Order Service row name for a vehicle."""
+	if not vehicle or not row_id:
+		return None
+
+	vds_row = frappe.db.get_value(
+		"Vehicle Deferred Service",
+		{"name": row_id, "parent": vehicle, "parenttype": "Repair Vehicle"},
+		["job_title", "estimated_amount", "status"],
+		as_dict=True,
+	)
+	if vds_row and (vds_row.get("job_title") or "").strip():
+		return (
+			vds_row["job_title"].strip(),
+			flt(vds_row.get("estimated_amount")),
+			None,
+		)
+
+	ros = frappe.qb.DocType("Repair Order Service")
+	parent_ro = frappe.qb.DocType("Repair Order")
+	declined_rows = (
+		frappe.qb.from_(ros)
+		.inner_join(parent_ro)
+		.on((parent_ro.name == ros.parent) & (ros.parenttype == "Repair Order"))
+		.select(ros.service_title, ros.total_amount, ros.service_package)
+		.where(ros.name == row_id)
+		.where(ros.status == "Declined")
+		.where(parent_ro.vehicle == vehicle)
+		.limit(1)
+		.run(as_dict=True)
+	)
+	if declined_rows and (declined_rows[0].get("service_title") or "").strip():
+		row = declined_rows[0]
+		return (
+			row["service_title"].strip(),
+			flt(row.get("total_amount")),
+			row.get("service_package") or None,
+		)
+	return None
+
+
 def add_deferred_services_to_ro(ro, deferred_items=None, **kwargs) -> Dict[str, Any]:
 	"""Add one or more previously deferred services to this Repair Order."""
 	ro.check_permission("write")
@@ -697,22 +738,35 @@ def add_deferred_services_to_ro(ro, deferred_items=None, **kwargs) -> Dict[str, 
 	default_rate = _get_default_labor_rate()
 	existing_titles = {s.service_title.strip().lower() for s in ro.services if s.service_title}
 
-	parsed_requests: List[tuple[str, float]] = []
+	parsed_requests: List[tuple[str, float, Optional[str]]] = []
 	candidate_titles: List[str] = []
 	for item in deferred_items:
+		pkg_override: Optional[str] = None
 		if isinstance(item, str):
-			title = item.strip()
-			est_amount = 0.0
+			raw_str = item.strip()
+			resolved = _lookup_deferred_row_by_id(ro.vehicle, raw_str) if raw_str else None
+			if resolved:
+				title, est_amount, pkg_override = resolved
+			else:
+				title = raw_str
+				est_amount = 0.0
 		elif isinstance(item, dict):
 			title = (item.get("job_title") or item.get("service_title") or "").strip()
 			raw_est = item.get("estimated_amount")
 			est_amount = flt(raw_est if raw_est is not None else item.get("estimated_cost", 0.0))
+			pkg_override = item.get("service_package") or None
+			if not title and item.get("name"):
+				resolved = _lookup_deferred_row_by_id(ro.vehicle, str(item["name"]).strip())
+				if resolved:
+					title, resolved_est, pkg_override = resolved
+					if not est_amount:
+						est_amount = resolved_est
 		else:
 			continue
 		if not title or title.lower() in existing_titles:
 			continue
 		existing_titles.add(title.lower())
-		parsed_requests.append((title, est_amount))
+		parsed_requests.append((title, est_amount, pkg_override))
 		candidate_titles.append(title)
 
 	pkg_by_title: Dict[str, str] = {}
@@ -733,8 +787,8 @@ def add_deferred_services_to_ro(ro, deferred_items=None, **kwargs) -> Dict[str, 
 				pkg_by_title[pkg_name] = pkg_name
 
 	added_services: List[str] = []
-	for title, est_amount in parsed_requests:
-		pkg_name = pkg_by_title.get(title)
+	for title, est_amount, pkg_override in parsed_requests:
+		pkg_name = pkg_override or pkg_by_title.get(title)
 		if pkg_name:
 			pkg = frappe.get_doc("Service Package", pkg_name)
 			row_fields = build_service_package_row_fields(

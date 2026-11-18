@@ -526,8 +526,10 @@ def submit_procurement_orders(repair_order=None, parts_data=None, submit=True, c
 		_ensure_supplier_exists(sup)
 	for (sup, code), sup_part_no in supplier_links.items():
 		item_doc = items_by_code[code]
-		if _apply_supplier_to_item_doc(item_doc, sup, sup_part_no, company=resolved_company):
-			item_doc.check_permission("write")
+		# PO/RFQ creation only needs Item read; skip optional Item master back-fill if user lacks Item write.
+		if item_doc.has_permission("write") and _apply_supplier_to_item_doc(
+			item_doc, sup, sup_part_no, company=resolved_company
+		):
 			if item_doc not in item_docs_to_save:
 				item_docs_to_save.append(item_doc)
 	for item_doc in item_docs_to_save:

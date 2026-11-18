@@ -1,6 +1,7 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import re
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote
@@ -31,9 +32,11 @@ from ism.scheduling.slot_search import (
 from ism.scheduling.time_utils import (
 	calculate_working_span as _calculate_working_span,
 	effective_end_time as _effective_end_time,
+	format_timedelta,
 	get_shop_settings,
 	normalize_date,
 	normalize_time,
+	to_timedelta,
 )
 
 
@@ -220,7 +223,18 @@ def _normalize_optional_tech(technician: Optional[str]) -> Optional[str]:
 	return text
 
 
-def resolve_service_bay_identifier(service_bay: Optional[str]) -> Optional[str]:
+def _throw_inactive_bay_error(bay_name: str) -> None:
+	frappe.throw(
+		_("Service Bay '{0}' is inactive / offline and cannot be scheduled.").format(bay_name),
+		frappe.ValidationError,
+	)
+
+
+def resolve_service_bay_identifier(
+	service_bay: Optional[str],
+	*,
+	allow_inactive: bool = False,
+) -> Optional[str]:
 	"""Resolve a Service Bay by exact ID, bay_name, or unambiguous case-insensitive match."""
 	if service_bay is None:
 		return None
@@ -230,28 +244,42 @@ def resolve_service_bay_identifier(service_bay: Optional[str]) -> Optional[str]:
 	if not text or text.lower() in ("none", "null"):
 		return None
 
-	if frappe.db.exists("Service Bay", text):
-		return text
+	exact_doc = frappe.db.get_value("Service Bay", text, ["name", "is_active"], as_dict=True)
+	if exact_doc:
+		if not allow_inactive and not cint(exact_doc.get("is_active")):
+			_throw_inactive_bay_error(exact_doc["name"])
+		return exact_doc["name"]
 
 	bays = frappe.get_all("Service Bay", fields=["name", "bay_name", "is_active"], order_by="is_active desc, name asc")
 	lowered = text.lower()
 
-	# Prefer active bays on exact case-insensitive match, then inactive
+	# Prefer active bays on exact case-insensitive match, rejecting inactive-only matches unless allowed
 	exact_matches = [
 		b for b in bays
 		if (b.get("name") or "").lower() == lowered or (b.get("bay_name") or "").lower() == lowered
 	]
 	if exact_matches:
 		active_exact = [b for b in exact_matches if cint(b.get("is_active"))]
-		chosen = active_exact or exact_matches
-		if len(chosen) == 1:
-			return chosen[0]["name"]
+		if active_exact:
+			if len(active_exact) == 1:
+				return active_exact[0]["name"]
+		elif len(exact_matches) == 1:
+			if not allow_inactive:
+				_throw_inactive_bay_error(exact_matches[0]["name"])
+			return exact_matches[0]["name"]
 
 	partial_matches = [
 		b for b in bays
 		if lowered in (b.get("name") or "").lower() or lowered in (b.get("bay_name") or "").lower()
 	]
 	active_partial = [b for b in partial_matches if cint(b.get("is_active"))]
+	if not active_partial and partial_matches and not allow_inactive:
+		if len(partial_matches) == 1:
+			_throw_inactive_bay_error(partial_matches[0]["name"])
+		frappe.throw(
+			_("Service Bay '{0}' matches only inactive / offline bays and cannot be scheduled.").format(text),
+			frappe.ValidationError,
+		)
 	candidates = active_partial or partial_matches
 
 	if len(candidates) == 1:
@@ -674,6 +702,20 @@ def build_conflict_feedback(
 	}
 
 
+def _get_shop_break_window_for_start(scheduled_time: str) -> Optional[tuple[timedelta, timedelta]]:
+	"""Return (break_start, break_end) if scheduled_time falls inside the configured shop break."""
+	settings = get_shop_settings()
+	op_start = settings.get("operating_hours_start")
+	op_end = settings.get("operating_hours_end")
+	bs_td = settings.get("break_start")
+	be_td = settings.get("break_end")
+	if bs_td and be_td and op_start and op_end and op_start < bs_td < be_td < op_end:
+		req_time_td = to_timedelta(scheduled_time)
+		if bs_td <= req_time_td < be_td:
+			return bs_td, be_td
+	return None
+
+
 def _validate_optional_str(value: Any, field_label: str) -> Optional[str]:
 	if value is None:
 		return None
@@ -824,8 +866,14 @@ def allocate_schedule_entry(
 		if explicit_clear_bay
 		else (resolved_bay if resolved_bay is not None else (doc.service_bay if is_update else None))
 	)
+	if effective_bay and is_update and resolved_bay is None:
+		bay_active = frappe.db.get_value("Service Bay", effective_bay, "is_active")
+		if bay_active is not None and not cint(bay_active):
+			_throw_inactive_bay_error(effective_bay)
+
 	target_tech = resolve_technician_identifier(assigned_technician)
 
+	tech_check = None
 	if target_tech and scheduled_date and scheduled_time and not allow_overlap:
 		try:
 			from ism.api.technician_availability import check_technician_availability
@@ -849,25 +897,45 @@ def allocate_schedule_entry(
 					repair_order=repair_order,
 					schedule_entry_name=clean_entry_name,
 				)
-			if tech_check.get("conflicts"):
-				conflict_names = ", ".join(c.get("name") for c in tech_check["conflicts"] if c.get("name"))
-				return build_conflict_feedback(
-					conflict_type="technician_conflict",
-					message=_(
-						"Technician '{0}' already has an overlapping allocation ({1}) during this work window. "
-						"Confirm double-booking to proceed."
-					).format(target_tech, conflict_names),
-					scheduled_date=scheduled_date,
-					scheduled_time=scheduled_time,
-					duration_minutes=duration_int,
-					service_bay=effective_bay,
-					technician=target_tech,
-					repair_order=repair_order,
-					schedule_entry_name=clean_entry_name,
-					conflicting_entries=list(tech_check["conflicts"]),
-				)
 		except ImportError:
-			pass
+			tech_check = None
+
+	if scheduled_date and scheduled_time:
+		break_window = _get_shop_break_window_for_start(scheduled_time)
+		if break_window:
+			bs_td, be_td = break_window
+			return build_conflict_feedback(
+				conflict_type="shop_break",
+				message=_(
+					"Requested start time {0} falls within the shop lunch break ({1}–{2}). "
+					"Please choose an available alternative slot."
+				).format(str(scheduled_time)[:5], format_timedelta(bs_td), format_timedelta(be_td)),
+				scheduled_date=scheduled_date,
+				scheduled_time=scheduled_time,
+				duration_minutes=duration_int,
+				service_bay=effective_bay,
+				technician=target_tech,
+				repair_order=repair_order,
+				schedule_entry_name=clean_entry_name,
+			)
+
+	if tech_check and tech_check.get("conflicts"):
+		conflict_names = ", ".join(c.get("name") for c in tech_check["conflicts"] if c.get("name"))
+		return build_conflict_feedback(
+			conflict_type="technician_conflict",
+			message=_(
+				"Technician '{0}' already has an overlapping allocation ({1}) during this work window. "
+				"Confirm double-booking to proceed."
+			).format(target_tech, conflict_names),
+			scheduled_date=scheduled_date,
+			scheduled_time=scheduled_time,
+			duration_minutes=duration_int,
+			service_bay=effective_bay,
+			technician=target_tech,
+			repair_order=repair_order,
+			schedule_entry_name=clean_entry_name,
+			conflicting_entries=list(tech_check["conflicts"]),
+		)
 
 	if effective_bay and scheduled_date and scheduled_time:
 		bay_conflicts = _find_conflicting_bay_entries(
@@ -978,6 +1046,98 @@ def allocate_schedule_entry(
 	return result
 
 
+def _resolve_provisional_customer_for_entry(provisional_name: Optional[str]) -> Optional[str]:
+	"""Resolve provisional customer name against existing Customer records (exact or case-insensitive)."""
+	cleaned = (provisional_name or "").strip()
+	if not cleaned:
+		return None
+	frappe.has_permission("Customer", "read", throw=True)
+	exact = (
+		frappe.db.get_value("Customer", cleaned, "name")
+		or frappe.db.get_value("Customer", {"customer_name": cleaned}, "name")
+	)
+	if exact:
+		frappe.has_permission("Customer", "read", doc=exact, throw=True)
+		return exact
+
+	lowered = cleaned.lower()
+	candidates = frappe.get_list("Customer", fields=["name", "customer_name"], limit=0)
+	matches = [
+		row["name"]
+		for row in candidates
+		if (row.get("name") or "").strip().lower() == lowered
+		or (row.get("customer_name") or "").strip().lower() == lowered
+	]
+	if len(matches) == 1:
+		frappe.has_permission("Customer", "read", doc=matches[0], throw=True)
+		return matches[0]
+	if len(matches) > 1:
+		frappe.throw(
+			_("Multiple Customers match '{0}': {1}.").format(cleaned, ", ".join(matches[:5])),
+			frappe.ValidationError,
+		)
+	return None
+
+
+def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Optional[str]) -> Optional[str]:
+	"""Resolve provisional vehicle info against Repair Vehicles owned by or linked to customer."""
+	from ism.ism.doctype.repair_vehicle.vehicle_queries import build_vehicle_search_results
+
+	vehicles = build_vehicle_search_results(customer=customer, limit=50)
+	if not vehicles:
+		return None
+
+	cleaned = (provisional_info or "").strip()
+	if not cleaned:
+		return vehicles[0]["name"] if len(vehicles) == 1 else None
+
+	lowered = cleaned.lower()
+	for v in vehicles:
+		for key in ("name", "vin", "license_plate"):
+			val = str(v.get(key) or "").strip().lower()
+			if val and val == lowered:
+				frappe.has_permission("Repair Vehicle", "read", doc=v["name"], throw=True)
+				return v["name"]
+
+	info_tokens = [tok for tok in re.split(r"[^a-z0-9]+", lowered) if tok]
+	scored: list[tuple[int, str]] = []
+	for v in vehicles:
+		haystack_parts = [
+			str(v.get("model_year") or ""),
+			str(v.get("manufacturer") or ""),
+			str(v.get("model") or ""),
+			str(v.get("trim") or ""),
+			str(v.get("vin") or ""),
+			str(v.get("license_plate") or ""),
+			str(v.get("name") or ""),
+		]
+		haystack_tokens = set(re.split(r"[^a-z0-9]+", " ".join(haystack_parts).lower()))
+		score = sum(1 for tok in info_tokens if tok in haystack_tokens)
+		model_val = str(v.get("model") or "").strip().lower()
+		if model_val and model_val in lowered:
+			score += 2
+		if score > 0:
+			scored.append((score, v["name"]))
+
+	if scored:
+		max_score = max(s for s, _ in scored)
+		top_matches = [name for s, name in scored if s == max_score]
+		if len(top_matches) == 1:
+			frappe.has_permission("Repair Vehicle", "read", doc=top_matches[0], throw=True)
+			return top_matches[0]
+		frappe.throw(
+			_("Ambiguous Repair Vehicle for Customer '{0}' matching '{1}': {2}.").format(
+				customer, cleaned, ", ".join(top_matches[:5])
+			),
+			frappe.ValidationError,
+		)
+
+	if len(vehicles) == 1:
+		frappe.has_permission("Repair Vehicle", "read", doc=vehicles[0]["name"], throw=True)
+		return vehicles[0]["name"]
+	return None
+
+
 @frappe.whitelist()
 def create_repair_order_from_schedule_entry(
 	schedule_entry: str,
@@ -1029,10 +1189,43 @@ def create_repair_order_from_schedule_entry(
 		"company": company,
 		"odometer_in": parsed_odo,
 	}
+	resolved_updates: Dict[str, Any] = {}
+	if not se.customer and getattr(se, "provisional_customer_name", None):
+		resolved_customer = _resolve_provisional_customer_for_entry(se.provisional_customer_name)
+		if resolved_customer:
+			se.customer = resolved_customer
+			resolved_updates["customer"] = resolved_customer
 	if not se.customer:
-		frappe.throw(_("Schedule Entry must have a Customer to create a Repair Order."))
+		if getattr(se, "provisional_customer_name", None):
+			frappe.throw(
+				_(
+					"Schedule Entry must have a Customer to create a Repair Order. "
+					"No existing Customer matched provisional name '{0}'."
+				).format(se.provisional_customer_name),
+				frappe.ValidationError,
+			)
+		frappe.throw(_("Schedule Entry must have a Customer to create a Repair Order."), frappe.ValidationError)
+
 	if not se.repair_vehicle:
-		frappe.throw(_("Schedule Entry must have a Vehicle to create a Repair Order."))
+		resolved_vehicle = _resolve_provisional_vehicle_for_entry(
+			se.customer, getattr(se, "provisional_vehicle_info", None)
+		)
+		if resolved_vehicle:
+			se.repair_vehicle = resolved_vehicle
+			resolved_updates["repair_vehicle"] = resolved_vehicle
+	if not se.repair_vehicle:
+		if getattr(se, "provisional_vehicle_info", None):
+			frappe.throw(
+				_(
+					"Schedule Entry must have a Vehicle to create a Repair Order. "
+					"No Repair Vehicle for Customer '{0}' matched '{1}'."
+				).format(se.customer, se.provisional_vehicle_info),
+				frappe.ValidationError,
+			)
+		frappe.throw(_("Schedule Entry must have a Vehicle to create a Repair Order."), frappe.ValidationError)
+
+	if resolved_updates:
+		se.db_set(resolved_updates)
 
 	ro_data["customer"] = se.customer
 	ro_data["vehicle"] = se.repair_vehicle

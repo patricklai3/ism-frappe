@@ -195,11 +195,12 @@ def _get_ro_doc(repair_order: str, ptype: str = "read") -> Any:
 
 
 def _serialize_pending_deferred(vehicle: str, ro: Any = None) -> List[Dict[str, Any]]:
-	"""Return compact open deferred services for a vehicle, excluding titles already on ro."""
+	"""Return compact open deferred services for a vehicle, excluding active (non-declined) titles on ro."""
 	existing_titles = {
 		str(getattr(s, "service_title", "") or "").strip().lower()
 		for s in (getattr(ro, "services", None) or [])
 		if getattr(s, "service_title", None)
+		and str(getattr(s, "status", "") or "") != "Declined"
 	}
 	items = []
 	for d in get_deferred_services_for_vehicle(vehicle) or []:
