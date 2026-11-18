@@ -1267,3 +1267,103 @@ class TestSchedulingCapacity(ISMTestCase):
 		span = calculate_working_span(day1, "15:00:00", 240)
 		self.assertEqual(str(se.completion_date), span["completion_date"])
 		self.assertIn(span["completion_time"][:5], str(se.completion_time))
+
+	def test_offline_bay_rejected_by_resolver_allocate_and_doctype(self):
+		"""Guard Test: Inactive / offline Service Bays are rejected across resolver, allocate, and ScheduleEntry."""
+		self._require_sched_api()
+		self._require_doctype("Schedule Entry")
+		from ism.api.scheduling import resolve_service_bay_identifier
+
+		offline_bay_name = f"TEST-OFFLINE-BAY-{frappe.generate_hash(length=6).upper()}"
+		offline_bay = frappe.get_doc({
+			"doctype": "Service Bay",
+			"bay_name": offline_bay_name,
+			"is_active": 0,
+		}).insert(ignore_permissions=True)
+		self.track(offline_bay)
+
+		with self.assertRaises(frappe.ValidationError):
+			resolve_service_bay_identifier(offline_bay.name)
+		self.assertEqual(resolve_service_bay_identifier(offline_bay.name, allow_inactive=True), offline_bay.name)
+
+		target_date = add_days(today(), 3)
+		with self.assertRaises(frappe.ValidationError):
+			allocate_schedule_entry(
+				repair_order=self.test_ro1.name,
+				scheduled_date=target_date,
+				scheduled_time="14:00:00",
+				estimated_duration=60,
+				service_bay=offline_bay.name,
+			)
+
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"repair_order": self.test_ro1.name,
+				"scheduled_date": target_date,
+				"scheduled_time": "14:00:00",
+				"estimated_duration": 60,
+				"service_bay": offline_bay.name,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+
+		cancelled_se = frappe.get_doc({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"repair_order": self.test_ro1.name,
+			"scheduled_date": target_date,
+			"scheduled_time": "14:00:00",
+			"estimated_duration": 60,
+			"service_bay": offline_bay.name,
+			"status": "Cancelled",
+		}).insert(ignore_permissions=True)
+		self.track(cancelled_se)
+		self.assertEqual(cancelled_se.status, "Cancelled")
+
+	def test_lunch_break_boundary_rejects_break_start_allows_spanning_and_post_break(self):
+		"""Guard Test: Starting inside [12:00, 12:30) returns conflict; 11:00 spanning & 12:30 start succeed."""
+		self._require_sched_api()
+		self._require_doctype("Schedule Entry")
+		self._set_ism_settings(
+			operating_hours_start="08:00:00",
+			operating_hours_end="17:00:00",
+			break_start="12:00:00",
+			break_end="12:30:00",
+		)
+		target_date = add_days(today(), 4)
+
+		for break_time in ("12:00:00", "12:15:00"):
+			res = allocate_schedule_entry(
+				repair_order=self.test_ro1.name,
+				scheduled_date=target_date,
+				scheduled_time=break_time,
+				estimated_duration=60,
+				service_bay=self.bay1,
+			)
+			self.assertEqual(res.get("status"), "conflict")
+			self.assertTrue(res.get("conflict"))
+			self.assertEqual(res.get("conflict_type"), "shop_break")
+			self.assertIn("lunch", (res.get("message") or "").lower())
+			self.assertTrue(res.get("alternative_slots"))
+
+		spanning = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="11:00:00",
+			estimated_duration=120,
+			service_bay=self.bay1,
+		)
+		self.assertTrue(spanning.get("name"))
+		self.track("Schedule Entry", spanning["name"])
+		self.assertEqual(spanning.get("completion_time")[:5], "13:30")
+
+		post_break = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="12:30:00",
+			estimated_duration=60,
+			service_bay=self.bay2,
+		)
+		self.assertTrue(post_break.get("name"))
+		self.track("Schedule Entry", post_break["name"])

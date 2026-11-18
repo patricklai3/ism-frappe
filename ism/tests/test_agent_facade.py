@@ -2107,3 +2107,293 @@ class TestAgentFacade(ISMTestCase):
 				{"payment_method": "Cash", "amount": 29.1},
 			],
 		)
+
+	def test_procurement_skips_item_write_when_user_lacks_item_write_permission(self):
+		"""Verify submit_procurement_orders creates POs when user lacks Item write permission."""
+		part_code = f"{TEST_PREFIX}NO_ITEM_WRITE_PART"
+		if not frappe.db.exists("Item", part_code):
+			item = frappe.get_doc({
+				"doctype": "Item",
+				"item_code": part_code,
+				"item_name": "No Item Write Test Part",
+				"item_group": "Products",
+				"stock_uom": "Nos",
+				"is_stock_item": 1,
+				"valuation_rate": 45.0,
+			}).insert(ignore_permissions=True)
+			self.track(item)
+
+		sup_name = f"{TEST_PREFIX}NoWriteSup"
+		if not frappe.db.exists("Supplier", sup_name):
+			sup = frappe.get_doc({
+				"doctype": "Supplier",
+				"supplier_name": sup_name,
+				"supplier_group": frappe.db.get_value("Supplier Group", {}, "name") or "All Supplier Groups",
+			}).insert(ignore_permissions=True)
+			self.track(sup)
+
+		user_email = f"{TEST_PREFIX.lower()}mgr_proc@example.com"
+		if not frappe.db.exists("User", user_email):
+			user = frappe.get_doc({
+				"doctype": "User",
+				"email": user_email,
+				"first_name": "Proc",
+				"last_name": "Manager",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"roles": [
+					{"role": "ISM Manager"},
+					{"role": "Stock User"},
+					{"role": "Purchase User"},
+				],
+			}).insert(ignore_permissions=True)
+			self.track(user)
+
+		ro_res = create_quote(
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
+			odometer_in=45100,
+			services=[{"service_title": "Brake Pad Service", "labor_hours": 1.0, "labor_rate": 140.0}],
+		)
+		ro_name = self._track_quote_ro(ro_res)
+
+		prev_user = frappe.session.user
+		try:
+			frappe.set_user(user_email)
+			self.assertFalse(frappe.get_doc("Item", part_code).has_permission("write"))
+			proc_res = submit_procurement_orders(
+				repair_order=ro_name,
+				parts_data=json.dumps([
+					{"item_code": part_code, "qty": 2, "rate": 50.0, "supplier": sup_name}
+				]),
+				submit=True,
+			)
+		finally:
+			frappe.set_user(prev_user)
+
+		self.assertTrue(proc_res["success"])
+		pos = proc_res["data"].get("purchase_orders") or []
+		self.assertEqual(len(pos), 1)
+		for po_name in pos:
+			self.track("Purchase Order", po_name)
+
+	def test_partially_approved_ro_surfaces_declined_deferred_service(self):
+		"""Verify get_deferred_services(repair_order=...) surfaces declined lines synced from that RO."""
+		q_res = create_quote(
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
+			odometer_in=45200,
+			services=[
+				{"service_title": "Approved Brake Service", "labor_hours": 1.0, "labor_rate": 140.0},
+				{"service_title": "Declined Suspension Flush", "labor_hours": 1.0, "labor_rate": 150.0},
+			],
+		)
+		ro_name = self._track_quote_ro(q_res)
+		ro_doc = frappe.get_doc("Repair Order", ro_name)
+		ro_doc.services[0].status = "Approved"
+		ro_doc.services[1].status = "Declined"
+		ro_doc.approval_status = "Partially Approved"
+		ro_doc.status = "Authorized - In Progress"
+		ro_doc.save(ignore_permissions=True)
+
+		def_res = get_deferred_services(repair_order=ro_name)
+		self.assertTrue(def_res["success"])
+		titles = [d["job_title"] for d in def_res["data"]["deferred_services"]]
+		self.assertIn("Declined Suspension Flush", titles)
+		self.assertNotIn("Approved Brake Service", titles)
+
+	def test_get_shop_floor_status_includes_schedule_entries(self):
+		"""Verify get_shop_floor_status surfaces active schedule_entries and omits Cancelled ones."""
+		target_day = add_days(today(), 4)
+		bay_name = self.manifest.resolve("bays.main_lift")
+		active_se = frappe.get_doc({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"status": "Scheduled",
+			"scheduled_date": target_day,
+			"scheduled_time": "09:30:00",
+			"estimated_duration": 60,
+			"service_bay": bay_name,
+			"provisional_customer_name": f"{TEST_PREFIX}Floor Status Active",
+		}).insert(ignore_permissions=True)
+		self.track(active_se)
+
+		cancelled_se = frappe.get_doc({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"status": "Cancelled",
+			"scheduled_date": target_day,
+			"scheduled_time": "11:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay_name,
+			"provisional_customer_name": f"{TEST_PREFIX}Floor Status Cancelled",
+		}).insert(ignore_permissions=True)
+		self.track(cancelled_se)
+
+		res = get_shop_floor_status(date=target_day)
+		self.assertTrue(res["success"])
+		entries = res["data"].get("schedule_entries") or []
+		by_name = {e["name"]: e for e in entries}
+		self.assertIn(active_se.name, by_name)
+		self.assertNotIn(cancelled_se.name, by_name)
+		row = by_name[active_se.name]
+		self.assertEqual(row["service_bay"], bay_name)
+		self.assertEqual(row["scheduled_time"], "09:30:00")
+		self.assertEqual(row["estimated_duration"], 60)
+		self.assertTrue(row["end_time"])
+		self.assertEqual(row["status"], "Scheduled")
+
+	def test_provisional_walkin_book_and_convert_to_ro_resolves_customer_and_vehicle(self):
+		"""Verify provisional walk-in booking resolves Customer and Repair Vehicle when converted to RO."""
+		target_day = add_days(today(), 5)
+		sophia_cust = self.manifest.resolve("customers.retail_2")
+		sophia_veh = self.manifest.resolve("vehicles.veh_modely_sophia")
+		bay_name = self.manifest.resolve("bays.tire_quick")
+
+		book_res = book_appointment(
+			scheduled_date=target_day,
+			start_time="14:30:00",
+			service_bay=bay_name,
+			entry_type="Diagnostic",
+			estimated_duration=60,
+			provisional_customer_name="sophia desjardins",
+			provisional_vehicle_info="2024 Tesla Model Y",
+		)
+		self.assertTrue(book_res["success"])
+		se_name = book_res["data"]["name"]
+		self.track("Schedule Entry", se_name)
+
+		conv_res = create_ro_from_appointment(schedule_entry=se_name, odometer_in=61200)
+		self.assertTrue(conv_res["success"])
+		ro_name = conv_res["data"]["repair_order"]
+		self.track("Repair Order", ro_name)
+
+		ro_doc = frappe.get_doc("Repair Order", ro_name)
+		self.assertEqual(ro_doc.customer, sophia_cust)
+		self.assertEqual(ro_doc.vehicle, sophia_veh)
+		self.assertEqual(ro_doc.odometer_in, 61200)
+
+		se_doc = frappe.get_doc("Schedule Entry", se_name)
+		self.assertEqual(se_doc.customer, sophia_cust)
+		self.assertEqual(se_doc.repair_vehicle, sophia_veh)
+		self.assertEqual(se_doc.repair_order, ro_name)
+
+		# Unknown provisional customer still fails cleanly with ValidationError
+		unknown_se = book_appointment(
+			scheduled_date=target_day,
+			start_time="15:30:00",
+			service_bay=bay_name,
+			entry_type="Diagnostic",
+			estimated_duration=60,
+			provisional_customer_name=f"{TEST_PREFIX}Nonexistent Walkin Person",
+			provisional_vehicle_info="2024 Tesla Model Y",
+		)
+		self.assertTrue(unknown_se["success"])
+		self.track("Schedule Entry", unknown_se["data"]["name"])
+		with self.assertRaises(frappe.ValidationError):
+			create_ro_from_appointment(schedule_entry=unknown_se["data"]["name"], odometer_in=10000)
+
+		# Multi-vehicle household customer resolves specific model from provisional_vehicle_info
+		hannah_cust = self.manifest.resolve("customers.household_primary")
+		hannah_modelx = self.manifest.resolve("vehicles.veh_modelx_household")
+		hh_se = book_appointment(
+			scheduled_date=target_day,
+			start_time="10:00:00",
+			service_bay=bay_name,
+			entry_type="Diagnostic",
+			estimated_duration=60,
+			provisional_customer_name="Hannah Kowalski",
+			provisional_vehicle_info="Tesla Model X",
+		)
+		self.assertTrue(hh_se["success"])
+		self.track("Schedule Entry", hh_se["data"]["name"])
+		hh_ro = create_ro_from_appointment(schedule_entry=hh_se["data"]["name"], odometer_in=52600)
+		self.assertTrue(hh_ro["success"])
+		self.track("Repair Order", hh_ro["data"]["repair_order"])
+		self.assertEqual(frappe.db.get_value("Repair Order", hh_ro["data"]["repair_order"], "customer"), hannah_cust)
+		self.assertEqual(frappe.db.get_value("Repair Order", hh_ro["data"]["repair_order"], "vehicle"), hannah_modelx)
+
+	def test_add_deferred_services_resolves_row_id_and_title(self):
+		"""Verify add_deferred_services resolves Vehicle Deferred Service and Declined ROS row IDs as well as job_title."""
+		hannah_cust = self.manifest.resolve("customers.household_primary")
+		hannah_veh = self.manifest.resolve("vehicles.veh_modelx_household")
+
+		veh_doc = frappe.get_doc("Repair Vehicle", hannah_veh)
+		vds_row = veh_doc.append(
+			"deferred_services",
+			{
+				"job_title": f"{TEST_PREFIX}Rear Brake Pad Replacement (3mm Remaining)",
+				"estimated_amount": 325.0,
+				"status": "Open Recommendation",
+				"safety_hazard": 1,
+				"decline_reason": "Deferred for next visit",
+			},
+		)
+		veh_doc.save(ignore_permissions=True)
+		vds_row_id = vds_row.name
+
+		# Also create a prior RO with a Declined Repair Order Service row
+		prior_ro = create_quote(
+			customer_name=hannah_cust,
+			vehicle_identifier=hannah_veh,
+			odometer_in=52300,
+			services=[
+				{"service_title": f"{TEST_PREFIX}Approved Inspection", "labor_hours": 0.5, "labor_rate": 140.0},
+				{"service_title": f"{TEST_PREFIX}Declined Coolant Flush", "labor_hours": 1.0, "labor_rate": 155.0},
+			],
+		)
+		prior_ro_name = self._track_quote_ro(prior_ro)
+		prior_ro_doc = frappe.get_doc("Repair Order", prior_ro_name)
+		prior_ro_doc.services[0].status = "Approved"
+		prior_ro_doc.services[1].status = "Declined"
+		prior_ro_doc.approval_status = "Partially Approved"
+		prior_ro_doc.status = "Authorized - In Progress"
+		prior_ro_doc.save(ignore_permissions=True)
+		declined_ros_row_id = prior_ro_doc.services[1].name
+
+		# Also add a title-matched deferred recommendation
+		veh_doc.reload()
+		veh_doc.append(
+			"deferred_services",
+			{
+				"job_title": f"{TEST_PREFIX}Cabin Air Filter Deferred",
+				"estimated_amount": 85.0,
+				"status": "Open Recommendation",
+			},
+		)
+		veh_doc.save(ignore_permissions=True)
+
+		target_q = create_quote(
+			customer_name=hannah_cust,
+			vehicle_identifier=hannah_veh,
+			odometer_in=52450,
+			services=[{"service_title": "Front Wiper Blade Set Replacement", "labor_hours": 0.5, "labor_rate": 140.0}],
+		)
+		target_ro_name = self._track_quote_ro(target_q)
+
+		# 1. Add by Vehicle Deferred Service row ID
+		res1 = add_deferred_services(repair_order=target_ro_name, deferred_items=[vds_row_id])
+		self.assertTrue(res1["success"])
+		self.assertEqual(res1["data"]["added_count"], 1)
+		self.assertEqual(res1["data"]["added_services"], [f"{TEST_PREFIX}Rear Brake Pad Replacement (3mm Remaining)"])
+		titles1 = [s["service_title"] for s in res1["data"]["services"]]
+		self.assertNotIn(vds_row_id, titles1)
+		self.assertIn(f"{TEST_PREFIX}Rear Brake Pad Replacement (3mm Remaining)", titles1)
+
+		# 2. Add by Declined Repair Order Service row ID
+		res2 = add_deferred_services(repair_order=target_ro_name, deferred_items=[declined_ros_row_id])
+		self.assertTrue(res2["success"])
+		self.assertEqual(res2["data"]["added_count"], 1)
+		self.assertEqual(res2["data"]["added_services"], [f"{TEST_PREFIX}Declined Coolant Flush"])
+		titles2 = [s["service_title"] for s in res2["data"]["services"]]
+		self.assertNotIn(declined_ros_row_id, titles2)
+		self.assertIn(f"{TEST_PREFIX}Declined Coolant Flush", titles2)
+
+		# 3. Add by job_title string
+		res3 = add_deferred_services(
+			repair_order=target_ro_name,
+			deferred_items=[f"{TEST_PREFIX}Cabin Air Filter Deferred"],
+		)
+		self.assertTrue(res3["success"])
+		self.assertEqual(res3["data"]["added_count"], 1)
+		self.assertIn(f"{TEST_PREFIX}Cabin Air Filter Deferred", [s["service_title"] for s in res3["data"]["services"]])

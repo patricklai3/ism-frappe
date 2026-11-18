@@ -43,7 +43,7 @@ from ism.api.technician_availability import (
 	get_daily_technician_overview,
 )
 from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES, ShopCapacityWindow, load_bay_tags_map
-from ism.scheduling.time_utils import get_shop_settings, normalize_date, normalize_time
+from ism.scheduling.time_utils import effective_end_time, get_shop_settings, normalize_date, normalize_time
 
 _VALID_SCHEDULE_ENTRY_STATUSES = (
 	"Draft",
@@ -818,7 +818,17 @@ def get_shop_floor_status(date: Optional[str] = None, include_summary: Any = Fal
 	entries = frappe.get_list(
 		"Schedule Entry",
 		filters={"scheduled_date": target_date, "status": ["!=", "Cancelled"]},
-		fields=["name", "service_bay", "assigned_technician", "scheduled_time", "status", "repair_order"],
+		fields=[
+			"name",
+			"repair_order",
+			"service_bay",
+			"scheduled_time",
+			"completion_time",
+			"estimated_duration",
+			"assigned_technician",
+			"status",
+		],
+		order_by="scheduled_time asc, name asc",
 	)
 
 	active_ros = frappe.get_list(
@@ -826,6 +836,35 @@ def get_shop_floor_status(date: Optional[str] = None, include_summary: Any = Fal
 		filters={"status": ["in", ["Authorized - In Progress", "Waiting on Parts", "Pending Authorization"]]},
 		fields=["name", "customer", "vehicle", "status", "approval_status", "vehicle_location"],
 	)
+
+	schedule_entries = [
+		{
+			"name": e.get("name"),
+			"repair_order": e.get("repair_order"),
+			"service_bay": e.get("service_bay"),
+			"scheduled_time": normalize_time(e.get("scheduled_time")) if e.get("scheduled_time") is not None else None,
+			"end_time": (
+				normalize_time(e.get("completion_time"))
+				if e.get("completion_time") is not None
+				else (
+					normalize_time(effective_end_time(e.get("scheduled_time"), e.get("estimated_duration") or 60))
+					if e.get("scheduled_time") is not None
+					else None
+				)
+			),
+			"estimated_duration": cint(e.get("estimated_duration") or 0),
+			"assigned_technician": e.get("assigned_technician"),
+			"status": e.get("status"),
+		}
+		for e in sorted(
+			entries,
+			key=lambda row: (
+				1 if row.get("status") in NON_BLOCKING_ENTRY_STATUSES else 0,
+				str(row.get("scheduled_time") or ""),
+				str(row.get("name") or ""),
+			),
+		)
+	]
 
 	summary = {
 		"active_bays": len(bays),
@@ -841,6 +880,7 @@ def get_shop_floor_status(date: Optional[str] = None, include_summary: Any = Fal
 		data={
 			"date": target_date,
 			"summary": summary,
+			"schedule_entries": schedule_entries,
 			"active_repair_orders": active_ros,
 		},
 		message=_("Shop floor telemetry retrieved for {0}.").format(target_date),
