@@ -461,16 +461,24 @@ function mergeEvents(incoming, { prepend = false } = {}) {
 	for (const ev of incoming) {
 		if (!ev || !ev.name) continue;
 		const prev = byName.get(ev.name);
+		const merged = { ...(prev || {}), ...ev };
 		if (!prev) {
 			changed = true;
 		} else if (
-			prev.resolution_state !== ev.resolution_state ||
-			prev.ai_status !== ev.ai_status ||
-			prev.transcript !== ev.transcript
+			prev.resolution_state !== merged.resolution_state ||
+			prev.resolved_by !== merged.resolved_by ||
+			prev.resolved_at !== merged.resolved_at ||
+			JSON.stringify(prev.resolution_payload ?? null) !==
+				JSON.stringify(merged.resolution_payload ?? null) ||
+			prev.ai_status !== merged.ai_status ||
+			prev.ai_error !== merged.ai_error ||
+			prev.transcript !== merged.transcript ||
+			prev.confidence_score !== merged.confidence_score ||
+			JSON.stringify(prev.card_schema ?? null) !== JSON.stringify(merged.card_schema ?? null)
 		) {
 			changed = true;
 		}
-		byName.set(ev.name, { ...(prev || {}), ...ev });
+		byName.set(ev.name, merged);
 	}
 
 	const ordered = prepend
@@ -610,7 +618,8 @@ async function syncThreadDelta() {
 		}
 		const newEvents = Array.isArray(res.events) ? res.events : [];
 		const openCards = Array.isArray(res.open_cards) ? res.open_cards : [];
-		const eventsChanged = mergeEvents([...newEvents, ...openCards]);
+		const updatedCards = Array.isArray(res.updated_cards) ? res.updated_cards : [];
+		const eventsChanged = mergeEvents([...newEvents, ...openCards, ...updatedCards]);
 
 		if (res.changed || eventsChanged) {
 			renderAndonHeader();
@@ -642,6 +651,18 @@ async function refreshThreadList() {
 async function handleResolveCard(params) {
 	try {
 		const res = await resolveBoardCard(params);
+		if (res && res.resolution_state && params && params.event_name) {
+			const patch = {
+				name: params.event_name,
+				resolution_state: res.resolution_state,
+			};
+			if (res.resolved_by !== undefined) patch.resolved_by = res.resolved_by;
+			if (res.resolved_at !== undefined) patch.resolved_at = res.resolved_at;
+			if (res.resolution_payload !== undefined) patch.resolution_payload = res.resolution_payload;
+			if (mergeEvents([patch])) {
+				renderTimeline({ scrollToBottom: false });
+			}
+		}
 		if (res.already_resolved) {
 			showToast("Card was already resolved.", "info");
 		} else {
@@ -677,6 +698,18 @@ async function handleResolveCard(params) {
 async function handleUndoReceipt(params) {
 	try {
 		const res = await undoBoardReceipt(params);
+		if (res && res.resolution_state && params && params.event_name) {
+			const patch = {
+				name: params.event_name,
+				resolution_state: res.resolution_state,
+			};
+			if (res.resolved_by !== undefined) patch.resolved_by = res.resolved_by;
+			if (res.resolved_at !== undefined) patch.resolved_at = res.resolved_at;
+			if (res.resolution_payload !== undefined) patch.resolution_payload = res.resolution_payload;
+			if (mergeEvents([patch])) {
+				renderTimeline({ scrollToBottom: false });
+			}
+		}
 		showToast(res.already_undone ? "Receipt was already undone." : "Action undone.", "success");
 		await syncThreadDelta();
 		return res;

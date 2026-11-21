@@ -555,6 +555,23 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		self.assertEqual(res_bill["decision"]["action"], "POST_PURCHASE_INVOICE")
 		self.assertEqual(res_bill["decision"]["action_payload"]["purchase_order"], po.name)
 		self.assertEqual(res_bill["decision"]["action_payload"]["bill_no"], "INV-90421")
+		self.assertFalse(res_bill["decision"]["action_payload"]["update_stock"])
+		self.assertEqual(res_bill["decision"]["followup_actions"], [])
+
+		# Combined packing slip + vendor invoice -> POST_PURCHASE_INVOICE with update_stock=True
+		# and NO redundant RECEIVE_PO followup
+		ev_combo = self._insert_capture_event(
+			"SHOP:AP_RECEIVING",
+			body_text=f"Packing slip and vendor invoice INV-90422 arrived for PO {po.name} from {supplier.supplier_name}.",
+			intent_tag="Vendor Bill",
+			actor_type="MANAGER",
+		)
+		res_combo, _ = self._dispatch_event(ev_combo.name)
+		self.assertEqual(res_combo["decision"]["action"], "POST_PURCHASE_INVOICE")
+		self.assertEqual(res_combo["decision"]["action_payload"]["purchase_order"], po.name)
+		self.assertEqual(res_combo["decision"]["action_payload"]["bill_no"], "INV-90422")
+		self.assertTrue(res_combo["decision"]["action_payload"]["update_stock"])
+		self.assertEqual(res_combo["decision"]["followup_actions"], [])
 
 		# Vendor invoice WITHOUT bill_no -> zero hallucination clarification card
 		ev_bill_missing = self._insert_capture_event(

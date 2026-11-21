@@ -539,6 +539,54 @@ def get_thread_delta(
 
 		current_ver = cint(thread_doc.projection_version or 1)
 		changed = current_ver > known_ver or bool(new_events)
+
+		updated_cards: list[dict[str, Any]] = []
+		if changed or clean_after:
+			terminal_card_rows = frappe.db.sql(
+				f"""
+				SELECT {cols_sql}
+				FROM `tabShop Board Event`
+				WHERE thread = %s
+					AND payload_type IN ('AI_RECEIPT', 'CLARIFICATION_CARD', 'APPROVAL_GATE')
+					AND resolution_state IN ('RESOLVED', 'REJECTED', 'UNDONE', 'EXPIRED')
+				ORDER BY modified DESC, event_timestamp DESC, creation DESC, name DESC
+				LIMIT 50
+				""",
+				(canonical_key,),
+				as_dict=True,
+			)
+			updated_by_name: dict[str, dict[str, Any]] = {
+				str(r.get("name")): r for r in terminal_card_rows if r.get("name")
+			}
+			parent_ids = sorted(
+				{
+					str(ev["parent_event"])
+					for ev in new_events
+					if ev.get("parent_event") and str(ev["parent_event"]) not in updated_by_name
+				}
+			)
+			if parent_ids:
+				parent_rows = frappe.get_all(
+					"Shop Board Event",
+					filters={
+						"thread": canonical_key,
+						"name": ["in", parent_ids],
+					},
+					fields=_EVENT_FIELDS,
+				)
+				for row in parent_rows:
+					if row.get("name"):
+						updated_by_name[str(row["name"])] = row
+			ordered_updated = sorted(
+				updated_by_name.values(),
+				key=lambda r: (
+					str(r.get("event_timestamp") or ""),
+					str(r.get("creation") or ""),
+					str(r.get("name") or ""),
+				),
+			)
+			updated_cards = [_serialize_event(r) for r in ordered_updated]
+
 		pin_state = _get_ro_pin_state_safe(
 			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
 		)
@@ -552,6 +600,7 @@ def get_thread_delta(
 		"thread": _serialize_thread(thread_doc),
 		"events": new_events,
 		"open_cards": open_cards,
+		"updated_cards": updated_cards,
 		"pin_state": pin_state,
 	}
 

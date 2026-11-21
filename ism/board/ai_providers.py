@@ -1327,19 +1327,6 @@ class MockMultimodalProvider:
 					}
 				)
 
-			followups: list[dict[str, Any]] = []
-			if is_packing_slip and po_name:
-				followups.append(
-					{
-						"action": "RECEIVE_PO",
-						"action_payload": {
-							"purchase_order": po_name,
-							"supplier": supplier,
-							"items": items,
-						},
-					}
-				)
-
 			return normalize_decision(
 				{
 					"intent": "ap_vendor_invoice",
@@ -1361,7 +1348,7 @@ class MockMultimodalProvider:
 					"missing_fields": [],
 					"clarification": None,
 					"customer_comms": None,
-					"followup_actions": followups,
+					"followup_actions": [],
 				}
 			)
 

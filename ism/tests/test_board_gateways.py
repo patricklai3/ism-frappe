@@ -1371,3 +1371,114 @@ class TestBoardGateways(ISMTestCase):
 			settings.flags.ignore_permissions = True
 			settings.save()
 			frappe.clear_cache(doctype="ISM Settings")
+
+	def test_get_thread_delta_returns_updated_cards_on_resolve_reject_and_undo(self):
+		"""get_thread_delta must return mutated parent cards in updated_cards for live DOM transitions."""
+		ro, _, _ = self._create_ro(approved=False, with_service=True)
+		thread_key = f"RO:{ro.name}"
+		src = self._insert_capture_event(thread_key, "Inspection and quote update capture")
+
+		# 1. Autonomous action -> AI_RECEIPT
+		receipt_res = dispatch_orchestrator_decision(
+			src,
+			{
+				"confidence": 0.96,
+				"audio_clarity_score": 0.97,
+				"action": "LOG_RO_NOTE",
+				"action_payload": {
+					"repair_order": ro.name,
+					"note": "Front left control arm bushing cracked",
+				},
+			},
+		)
+		receipt_name = receipt_res["receipts"][0]
+
+		# 2. Clarification card -> CLARIFICATION_CARD
+		clar_res = dispatch_orchestrator_decision(
+			src,
+			{
+				"confidence": 0.72,
+				"audio_clarity_score": 0.95,
+				"action": "LOG_RO_NOTE",
+				"action_payload": {"repair_order": ro.name, "note": "Control arm play"},
+				"missing_fields": ["position"],
+				"clarification": {
+					"prompt": "Which corner?",
+					"input_field": "position",
+					"options": ["Front Left", "Front Right"],
+				},
+			},
+		)
+		clar_name = clar_res["cards"][0]
+
+		# 3. Approval gate -> APPROVAL_GATE
+		gate_res = dispatch_orchestrator_decision(
+			src,
+			{
+				"confidence": 0.96,
+				"audio_clarity_score": 0.97,
+				"action": "AMEND_QUOTE",
+				"action_payload": {
+					"repair_order": ro.name,
+					"services": [{"description": "Alignment Check", "rate": 120.0, "qty": 1}],
+				},
+			},
+		)
+		gate_name = gate_res["gates"][0]
+
+		ver_before = frappe.db.get_value("Shop Board Thread", thread_key, "projection_version") or 1
+		after_event = gate_name
+
+		# Mutate all three cards: undo receipt, resolve clarification, reject gate
+		undo_res = board_api.undo_board_receipt(receipt_name, reason="Wrong corner logged")
+		self.assertTrue(undo_res["ok"])
+		self.assertEqual(undo_res["resolution_state"], "UNDONE")
+
+		resolve_res = board_api.resolve_board_card(
+			clar_name,
+			"approve",
+			selected_option="Front Left",
+		)
+		self.assertTrue(resolve_res["ok"])
+		self.assertEqual(resolve_res["resolution_state"], "RESOLVED")
+
+		reject_res = board_api.resolve_board_card(
+			gate_name,
+			"reject",
+			notes="Not needed",
+		)
+		self.assertTrue(reject_res["ok"])
+		self.assertEqual(reject_res["resolution_state"], "REJECTED")
+
+		delta = board_api.get_thread_delta(
+			thread_key=thread_key,
+			after_event=after_event,
+			known_projection_version=ver_before,
+		)
+		self.assertTrue(delta["ok"])
+		self.assertTrue(delta["changed"])
+		self.assertIn("updated_cards", delta)
+
+		updated_by_name = {c["name"]: c for c in delta["updated_cards"]}
+		self.assertIn(receipt_name, updated_by_name)
+		self.assertIn(clar_name, updated_by_name)
+		self.assertIn(gate_name, updated_by_name)
+
+		self.assertEqual(updated_by_name[receipt_name]["resolution_state"], "UNDONE")
+		self.assertTrue(updated_by_name[receipt_name]["resolved_by"])
+		self.assertTrue(updated_by_name[receipt_name]["resolved_at"])
+		self.assertIsNotNone(updated_by_name[receipt_name]["resolution_payload"])
+
+		self.assertEqual(updated_by_name[clar_name]["resolution_state"], "RESOLVED")
+		self.assertTrue(updated_by_name[clar_name]["resolved_by"])
+		self.assertTrue(updated_by_name[clar_name]["resolved_at"])
+		self.assertIsNotNone(updated_by_name[clar_name]["resolution_payload"])
+
+		self.assertEqual(updated_by_name[gate_name]["resolution_state"], "REJECTED")
+		self.assertTrue(updated_by_name[gate_name]["resolved_by"])
+		self.assertTrue(updated_by_name[gate_name]["resolved_at"])
+		self.assertIsNotNone(updated_by_name[gate_name]["resolution_payload"])
+
+		open_names = {c["name"] for c in delta["open_cards"]}
+		self.assertNotIn(clar_name, open_names)
+		self.assertNotIn(gate_name, open_names)
