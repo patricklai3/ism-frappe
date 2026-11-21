@@ -1385,3 +1385,166 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			mock_mail2.assert_called_once()
 			self.assertIn("/portal", mock_mail2.call_args.kwargs["message"])
 			self.assertNotIn("booking_token", mock_mail2.call_args.kwargs["message"])
+
+
+class TestBookingHostedRoute(ISMTestCase):
+	"""Wave 3 hosted /book page controller, security headers, boot JSON, and asset hygiene tests."""
+
+	_SETTINGS_FIELDS: tuple[str, ...] = (
+		"enable_self_serve_booking",
+		"sms_gateway_provider",
+		"portal_session_signing_secret",
+		"self_serve_booking_title",
+		"self_serve_booking_intro",
+		"self_serve_honeypot_enabled",
+	)
+
+	def setUp(self) -> None:
+		super().setUp()
+		self._prev_settings: dict[str, Any] = {}
+		settings = frappe.get_single("ISM Settings")
+		for field in self._SETTINGS_FIELDS:
+			self._prev_settings[field] = settings.get(field)
+
+		self._had_response_headers = hasattr(frappe.local, "response_headers")
+		self._prev_response_headers = getattr(frappe.local, "response_headers", None)
+		frappe.local.response_headers = {}
+
+		self._set_settings(
+			enable_self_serve_booking=1,
+			sms_gateway_provider="Mock (Deterministic Test)",
+			portal_session_signing_secret="test-p5-wave3-booking-secret-key-1234567890",
+			self_serve_booking_title="Book Your EV Service",
+			self_serve_booking_intro="Select your vehicle and drop-off time.",
+			self_serve_honeypot_enabled=1,
+		)
+
+	def tearDown(self) -> None:
+		self._set_settings(**self._prev_settings)
+		if self._had_response_headers:
+			frappe.local.response_headers = self._prev_response_headers
+		elif hasattr(frappe.local, "response_headers"):
+			delattr(frappe.local, "response_headers")
+		super().tearDown()
+
+	def _set_settings(self, **kwargs: Any) -> None:
+		for field, value in kwargs.items():
+			frappe.db.set_single_value("ISM Settings", field, value)
+		frappe.db.commit()
+		invalidate_shop_settings_cache()
+
+	def test_website_route_rule_registered(self) -> None:
+		from ism import hooks
+
+		rules = getattr(hooks, "website_route_rules", [])
+		self.assertIn({"from_route": "/book", "to_route": "book"}, rules)
+
+	def test_get_context_headers_boot_json_and_toggle_reflection(self) -> None:
+		import ism.www.book as book_page
+
+		ctx = frappe._dict()
+		book_page.get_context(ctx)
+
+		self.assertEqual(ctx.no_cache, 1)
+		self.assertFalse(ctx.show_sidebar)
+		self.assertTrue(ctx.no_breadcrumbs)
+		self.assertTrue(ctx.full_width)
+		self.assertTrue(bool(ctx.asset_version))
+
+		self.assertEqual(ctx.response_headers.get("X-Frame-Options"), "DENY")
+		self.assertEqual(ctx.response_headers.get("Content-Security-Policy"), "frame-ancestors 'none'")
+		self.assertEqual(frappe.local.response_headers.get("X-Frame-Options"), "DENY")
+		self.assertEqual(
+			frappe.local.response_headers.get("Content-Security-Policy"),
+			"frame-ancestors 'none'",
+		)
+
+		self.assertNotIn("</", ctx.boot_config_json)
+		boot_data = json.loads(ctx.boot_config_json)
+		self.assertTrue(boot_data["enabled"])
+		self.assertIsNone(boot_data["disabled_reason"])
+		self.assertEqual(set(boot_data["shop"].keys()), {"name", "phone", "email"})
+		self.assertTrue(bool(boot_data["form_nonce"]))
+		self.assertEqual(boot_data["portal_url"], PORTAL_ROUTE)
+
+		keys_found: set[str] = set()
+		strings_found: list[str] = []
+		_collect_keys_and_strings(boot_data, keys_found, strings_found)
+		self.assertFalse(keys_found & _FORBIDDEN_INTERNAL_KEYS)
+		for text in strings_found:
+			self.assertIsNone(_FORBIDDEN_CUSTOMER_REGEX.search(text))
+
+		self._set_settings(enable_self_serve_booking=0)
+		frappe.local.response_headers = {}
+		ctx_disabled = frappe._dict()
+		book_page.get_context(ctx_disabled)
+
+		disabled_data = json.loads(ctx_disabled.boot_config_json)
+		self.assertFalse(disabled_data["enabled"])
+		self.assertEqual(disabled_data["disabled_reason"], ERR_BOOKING_DISABLED)
+		self.assertIsNone(disabled_data["form_nonce"])
+		self.assertEqual(frappe.local.response_headers.get("X-Frame-Options"), "DENY")
+
+	def test_live_website_response_emits_anti_iframe_headers(self) -> None:
+		from frappe import app as frappe_app
+		from frappe.auth import CookieManager
+		from frappe.website.serve import get_response
+		from werkzeug.wrappers import Request
+
+		had_request = hasattr(frappe.local, "request")
+		prev_request = getattr(frappe.local, "request", None)
+		had_cm = hasattr(frappe.local, "cookie_manager")
+		prev_cm = getattr(frappe.local, "cookie_manager", None)
+		frappe.local.request = Request.from_values("/book", method="GET")
+		frappe.local.cookie_manager = CookieManager()
+		frappe.local.response_headers = {}
+		try:
+			response = get_response("book")
+			self.assertEqual(response.status_code, 200)
+			frappe_app.process_response(response)
+		finally:
+			if had_request:
+				frappe.local.request = prev_request
+			elif hasattr(frappe.local, "request"):
+				delattr(frappe.local, "request")
+			if had_cm:
+				frappe.local.cookie_manager = prev_cm
+			elif hasattr(frappe.local, "cookie_manager"):
+				delattr(frappe.local, "cookie_manager")
+
+		self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+		self.assertEqual(response.headers.get("Content-Security-Policy"), "frame-ancestors 'none'")
+
+		html = response.get_data(as_text=True)
+		self.assertIn('id="ism-booking-app"', html)
+		self.assertIn('id="ism-booking-boot"', html)
+		self.assertIn("/assets/ism/book/app.js", html)
+		self.assertIsNone(_FORBIDDEN_CUSTOMER_REGEX.search(html))
+
+	def test_hosted_assets_exist_and_enforce_security_hygiene(self) -> None:
+		from pathlib import Path
+
+		ism_root = Path(frappe.get_app_path("ism"))
+		self.assertFalse((ism_root / "www" / "__init__.py").exists())
+
+		required_files = [
+			ism_root / "www" / "book.py",
+			ism_root / "www" / "book.html",
+			ism_root / "public" / "book" / "book.css",
+			ism_root / "public" / "book" / "api.js",
+			ism_root / "public" / "book" / "state.js",
+			ism_root / "public" / "book" / "app.js",
+		]
+		for file_path in required_files:
+			self.assertTrue(file_path.is_file(), f"Missing hosted booking asset: {file_path}")
+
+		for asset_path in required_files[1:]:
+			content = asset_path.read_text(encoding="utf-8")
+			self.assertIsNone(
+				_FORBIDDEN_CUSTOMER_REGEX.search(content),
+				f"Forbidden buffer/leeway wording found in {asset_path.name}",
+			)
+			self.assertNotIn("innerHTML", content, f"innerHTML is forbidden in {asset_path.name}")
+			self.assertNotIn("localStorage", content, f"localStorage is forbidden in {asset_path.name}")
+			self.assertNotIn("sessionStorage", content, f"sessionStorage is forbidden in {asset_path.name}")
+

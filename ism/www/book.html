@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="csrf-token" content="{{ csrf_token }}">
+	<meta name="theme-color" content="#1a202c">
+	<title>{{ title }}</title>
+	<link rel="icon" href="data:,">
+	<link rel="stylesheet" href="/assets/ism/book/book.css?v={{ asset_version }}">
+</head>
+<body class="ism-book-body">
+	<header class="ism-book-header">
+		<div class="ism-book-header__inner">
+			<div class="ism-book-brand">
+				<span class="ism-book-brand__name">{{ boot_config.shop.name or "Service Center" }}</span>
+				<span class="ism-book-brand__sub">{{ title }}</span>
+			</div>
+			{% if boot_config.shop.phone %}
+			<a class="ism-book-header__phone" href="tel:{{ boot_config.shop.phone | replace(' ', '') }}">
+				Call {{ boot_config.shop.phone }}
+			</a>
+			{% endif %}
+		</div>
+	</header>
+
+	<main class="ism-book-main">
+		{% if not boot_config.enabled %}
+		<section class="ism-card ism-unavailable-card" aria-labelledby="ism-unavailable-heading">
+			<h1 id="ism-unavailable-heading" class="ism-card__title">Online Booking Temporarily Unavailable</h1>
+			<p class="ism-card__text">
+				We are not accepting online appointments at the moment. Please reach out to our team directly and we will be glad to schedule your visit.
+			</p>
+			<div class="ism-contact-actions">
+				{% if boot_config.shop.phone %}
+				<a class="ism-btn ism-btn-primary" href="tel:{{ boot_config.shop.phone | replace(' ', '') }}">
+					Call {{ boot_config.shop.phone }}
+				</a>
+				{% endif %}
+				{% if boot_config.shop.email %}
+				<a class="ism-btn ism-btn-secondary" href="mailto:{{ boot_config.shop.email }}">
+					Email {{ boot_config.shop.email }}
+				</a>
+				{% endif %}
+			</div>
+		</section>
+		{% else %}
+		{% if boot_config.intro %}
+		<p class="ism-book-intro">{{ boot_config.intro }}</p>
+		{% endif %}
+
+		<nav id="ism-booking-stepper" class="ism-stepper" aria-label="Booking progress">
+			<ol class="ism-stepper__list">
+				<li class="ism-stepper__item is-active" data-step="1" aria-current="step">
+					<span class="ism-stepper__num">1</span>
+					<span class="ism-stepper__label">Vehicle</span>
+				</li>
+				<li class="ism-stepper__item" data-step="2">
+					<span class="ism-stepper__num">2</span>
+					<span class="ism-stepper__label">Services</span>
+				</li>
+				<li class="ism-stepper__item" data-step="3">
+					<span class="ism-stepper__num">3</span>
+					<span class="ism-stepper__label">Drop-Off Time</span>
+				</li>
+				<li class="ism-stepper__item" data-step="4">
+					<span class="ism-stepper__num">4</span>
+					<span class="ism-stepper__label">Verify &amp; Confirm</span>
+				</li>
+				<li class="ism-stepper__item" data-step="5">
+					<span class="ism-stepper__num">5</span>
+					<span class="ism-stepper__label">Confirmed</span>
+				</li>
+			</ol>
+		</nav>
+
+		<div id="ism-booking-status" class="ism-live-region" role="status" aria-live="polite" aria-atomic="true"></div>
+
+		<div class="ism-hp-field" aria-hidden="true">
+			<label for="ism-hp-website">Website</label>
+			<input
+				type="text"
+				id="ism-hp-website"
+				name="{{ boot_config.honeypot_field or 'website_url' }}"
+				value=""
+				tabindex="-1"
+				autocomplete="off"
+				aria-hidden="true"
+			>
+		</div>
+
+		<div id="ism-booking-app" class="ism-booking-app">
+			<noscript>
+				<section class="ism-card">
+					<h1 class="ism-card__title">JavaScript Required</h1>
+					<p class="ism-card__text">
+						Please enable JavaScript to book your appointment online{% if boot_config.shop.phone %}, or call us at {{ boot_config.shop.phone }}{% endif %}.
+					</p>
+				</section>
+			</noscript>
+		</div>
+		{% endif %}
+	</main>
+
+	<footer class="ism-book-footer">
+		<span>{{ boot_config.shop.name or "Service Center" }}</span>
+		{% if boot_config.shop.phone %}
+		<span aria-hidden="true">&middot;</span>
+		<a href="tel:{{ boot_config.shop.phone | replace(' ', '') }}">{{ boot_config.shop.phone }}</a>
+		{% endif %}
+		{% if boot_config.shop.email %}
+		<span aria-hidden="true">&middot;</span>
+		<a href="mailto:{{ boot_config.shop.email }}">{{ boot_config.shop.email }}</a>
+		{% endif %}
+	</footer>
+
+	<script type="application/json" id="ism-booking-boot">{{ boot_config_json }}</script>
+	{% if boot_config.enabled %}
+	<script type="module" src="/assets/ism/book/app.js?v={{ asset_version }}"></script>
+	{% endif %}
+</body>
+</html>
