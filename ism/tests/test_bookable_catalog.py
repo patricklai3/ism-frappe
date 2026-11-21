@@ -330,3 +330,36 @@ class TestBookableCatalog(ISMTestCase):
 		too_many = [f"{TEST_PREFIX}Fake_{i}" for i in range(MAX_PACKAGES_PER_BOOKING + 1)]
 		with self.assertRaises(frappe.ValidationError):
 			compute_packages_booking_requirements(too_many)
+
+	def test_ism_settings_labor_rate_sigma_and_invalid_package_ids(self):
+		# 1. Custom ISM Settings.default_labor_rate affects fallback pricing
+		self._set_ism_settings(default_labor_rate=220.0)
+		pkg = self._create_package(
+			"Settings_Rate_Pkg",
+			standard_labor_hours=1.5,
+			hourly_rate=0.0,
+			service_rate=0.0,
+			customer_price_display_mode="Exact Price",
+			customer_estimate_min=0.0,
+		)
+		cards = {c["package_id"]: c for c in list_bookable_packages()}
+		self.assertEqual(cards[pkg.name]["price_min"], 330.0)
+		self.assertEqual(cards[pkg.name]["price_display_label"], "$330.00 CAD")
+
+		# 2. Custom ISM Settings.estimation_sigma affects FRT-derived duration
+		self._set_ism_settings(estimation_sigma=0.60, estimation_percentile=80.0, buffer_padding_minutes=0)
+		reqs_high_sigma = compute_packages_booking_requirements([pkg.name])
+		expected_high = estimate_total_duration([90.0], sigma=0.60, percentile=0.80)
+		self.assertEqual(reqs_high_sigma["duration_minutes"], expected_high)
+
+		self._set_ism_settings(estimation_sigma=0.10, estimation_percentile=80.0, buffer_padding_minutes=0)
+		reqs_low_sigma = compute_packages_booking_requirements([pkg.name])
+		expected_low = estimate_total_duration([90.0], sigma=0.10, percentile=0.80)
+		self.assertEqual(reqs_low_sigma["duration_minutes"], expected_low)
+		self.assertGreater(reqs_high_sigma["duration_minutes"], reqs_low_sigma["duration_minutes"])
+
+		# 3. Invalid package_ids types raise frappe.ValidationError
+		for bad_input in ({}, False, 0, 1.5, [], None, "", "[]", "{}", [123]):
+			with self.assertRaises(frappe.ValidationError):
+				compute_packages_booking_requirements(bad_input)
+

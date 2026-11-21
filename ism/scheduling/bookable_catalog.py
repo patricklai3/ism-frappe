@@ -242,6 +242,7 @@ def _get_catalog_settings() -> Dict[str, Any]:
 	defaults: Dict[str, Any] = {
 		"default_labor_rate": 140.0,
 		"currency": "CAD",
+		"estimation_sigma": 0.30,
 		"estimation_percentile": 0.80,
 		"buffer_padding_minutes": 0,
 		"default_diagnostic_duration": 60,
@@ -253,9 +254,13 @@ def _get_catalog_settings() -> Dict[str, Any]:
 	except frappe.DoesNotExistError:
 		return defaults
 
-	raw_rate = flt(getattr(doc, "default_hourly_rate", 0) or 0)
+	raw_rate = flt(getattr(doc, "default_labor_rate", 0) or 0)
 	if raw_rate > 0:
 		defaults["default_labor_rate"] = raw_rate
+
+	raw_sigma = getattr(doc, "estimation_sigma", None)
+	if raw_sigma is not None and flt(raw_sigma) > 0:
+		defaults["estimation_sigma"] = min(2.0, max(0.01, flt(raw_sigma)))
 
 	raw_pct = getattr(doc, "estimation_percentile", None)
 	if raw_pct is not None and flt(raw_pct) > 0:
@@ -350,28 +355,37 @@ def list_bookable_packages(
 
 
 def _parse_package_ids(package_ids: Union[str, Sequence[str]]) -> List[str]:
+	if package_ids is None or isinstance(package_ids, (bool, int, float, dict)):
+		frappe.throw(_("Invalid package_ids parameter."))
+
 	raw_list: List[str] = []
 	if isinstance(package_ids, str):
 		stripped = package_ids.strip()
 		if not stripped:
-			return []
-		if stripped.startswith("["):
+			frappe.throw(_("At least one service package must be selected."))
+		if stripped.startswith("[") or stripped.startswith("{"):
 			try:
 				parsed = frappe.parse_json(stripped)
-				if isinstance(parsed, (list, tuple)):
-					raw_list = [str(item).strip() for item in parsed if str(item).strip()]
-				else:
-					raw_list = [stripped]
 			except (ValueError, TypeError):
-				raw_list = [p.strip() for p in stripped.split(",") if p.strip()]
+				frappe.throw(_("Invalid package_ids parameter."))
+			if not isinstance(parsed, (list, tuple)):
+				frappe.throw(_("Invalid package_ids parameter."))
+			raw_list = [str(item).strip() for item in parsed if isinstance(item, str) and item.strip()]
 		else:
 			raw_list = [p.strip() for p in stripped.split(",") if p.strip()]
 	elif isinstance(package_ids, (list, tuple, set)):
-		raw_list = [str(item).strip() for item in package_ids if str(item).strip()]
+		for item in package_ids:
+			if not isinstance(item, str):
+				frappe.throw(_("Invalid package_ids parameter."))
+			if item.strip():
+				raw_list.append(item.strip())
 	else:
 		frappe.throw(_("Invalid package_ids parameter."))
 
-	return list(dict.fromkeys(raw_list))
+	deduped = list(dict.fromkeys(raw_list))
+	if not deduped:
+		frappe.throw(_("At least one service package must be selected."))
+	return deduped
 
 
 def compute_packages_booking_requirements(
@@ -462,7 +476,11 @@ def compute_packages_booking_requirements(
 				frt_minutes_list.append(float(settings["default_diagnostic_duration"]))
 
 	frt_duration = (
-		estimate_total_duration(frt_minutes_list, percentile=settings["estimation_percentile"])
+		estimate_total_duration(
+			frt_minutes_list,
+			sigma=settings["estimation_sigma"],
+			percentile=settings["estimation_percentile"],
+		)
 		if frt_minutes_list
 		else 0
 	)
