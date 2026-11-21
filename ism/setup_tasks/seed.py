@@ -107,6 +107,14 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 		"parts_pricing_tesla_search_url_template",
 		"https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
 	),
+	("self_serve_booking_title", "Book Your Service Appointment"),
+	(
+		"self_serve_booking_intro",
+		"Select your vehicle and service package to view live drop-off times and book online.",
+	),
+	("self_serve_max_packages_per_booking", 5),
+	("self_serve_booking_ip_rate_limit_per_hour", 15),
+	("self_serve_booking_phone_rate_limit_per_day", 3),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
@@ -127,6 +135,9 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("parts_pricing_min_cost_markup_pct", 25.0),
 	("parts_pricing_min_cost_margin_dollars", 5.0),
 	("parts_pricing_fallback_cost_markup_pct", 40.0),
+	("enable_self_serve_booking", 0),
+	("self_serve_require_email", 0),
+	("self_serve_honeypot_enabled", 1),
 )
 
 

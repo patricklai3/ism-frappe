@@ -33,6 +33,7 @@ class ISMSettings(Document):
 		self._validate_pricing_parameters()
 		self._validate_comms_and_otp_settings()
 		self._validate_square_settings()
+		self._validate_self_serve_booking_settings()
 
 	def _normalize_sms_settings(self):
 		# Twilio support was removed; coerce legacy values so existing sites save cleanly.
@@ -239,3 +240,28 @@ class ISMSettings(Document):
 						_("Square Webhook Notification URL must start with https:// in Production."),
 						frappe.ValidationError,
 					)
+
+	def _validate_self_serve_booking_settings(self):
+		if self.self_serve_booking_title is not None:
+			title = str(self.self_serve_booking_title).strip()
+			self.self_serve_booking_title = title
+			if len(title) > 140:
+				frappe.throw(_("Self-Serve Booking Title cannot exceed 140 characters."))
+
+		if self.self_serve_booking_intro is not None:
+			self.self_serve_booking_intro = str(self.self_serve_booking_intro).strip()
+
+		if self.self_serve_max_packages_per_booking is not None:
+			max_packages = cint(self.self_serve_max_packages_per_booking)
+			if max_packages < 1 or max_packages > 10:
+				frappe.throw(_("Max Packages Per Booking must be between 1 and 10."))
+
+		if self.self_serve_booking_ip_rate_limit_per_hour is not None:
+			ip_limit = cint(self.self_serve_booking_ip_rate_limit_per_hour)
+			if ip_limit < 1 or ip_limit > 500:
+				frappe.throw(_("Self-Serve Booking IP Rate Limit must be between 1 and 500 per hour."))
+
+		if self.self_serve_booking_phone_rate_limit_per_day is not None:
+			phone_limit = cint(self.self_serve_booking_phone_rate_limit_per_day)
+			if phone_limit < 1 or phone_limit > 20:
+				frappe.throw(_("Self-Serve Booking Phone Rate Limit must be between 1 and 20 per day."))

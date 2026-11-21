@@ -334,3 +334,56 @@ class TestISMSettings(ISMTestCase):
 		doc.operating_hours_start = "00:00:00"
 		doc.operating_hours_end = "00:00:00"
 		doc.validate()
+
+	def test_self_serve_booking_settings_defaults_and_bounds(self):
+		"""Verify all 8 sb_self_serve_booking defaults, trimming, and validation bounds."""
+		settings = frappe.get_single("ISM Settings")
+		self.assertEqual(int(settings.enable_self_serve_booking), 0)
+		self.assertEqual(settings.self_serve_booking_title, "Book Your Service Appointment")
+		self.assertEqual(
+			settings.self_serve_booking_intro,
+			"Select your vehicle and service package to view live drop-off times and book online.",
+		)
+		self.assertEqual(int(settings.self_serve_max_packages_per_booking), 5)
+		self.assertEqual(int(settings.self_serve_require_email), 0)
+		self.assertEqual(int(settings.self_serve_booking_ip_rate_limit_per_hour), 15)
+		self.assertEqual(int(settings.self_serve_booking_phone_rate_limit_per_day), 3)
+		self.assertEqual(int(settings.self_serve_honeypot_enabled), 1)
+
+		trimmed = frappe.new_doc("ISM Settings")
+		trimmed.self_serve_booking_title = "  Book Online  "
+		trimmed.self_serve_booking_intro = "  Fast drop-off booking.  "
+		trimmed.validate()
+		self.assertEqual(trimmed.self_serve_booking_title, "Book Online")
+		self.assertEqual(trimmed.self_serve_booking_intro, "Fast drop-off booking.")
+
+		invalid_cases = [
+			("self_serve_max_packages_per_booking", 0),
+			("self_serve_max_packages_per_booking", 11),
+			("self_serve_booking_ip_rate_limit_per_hour", 0),
+			("self_serve_booking_ip_rate_limit_per_hour", 501),
+			("self_serve_booking_phone_rate_limit_per_day", 0),
+			("self_serve_booking_phone_rate_limit_per_day", 21),
+			("self_serve_booking_title", "x" * 141),
+		]
+		for fieldname, bad_val in invalid_cases:
+			doc = frappe.new_doc("ISM Settings")
+			setattr(doc, fieldname, bad_val)
+			with self.subTest(fieldname=fieldname, bad_val=bad_val):
+				with self.assertRaises(frappe.ValidationError):
+					doc.validate()
+
+	def test_setup_preserves_explicit_zero_self_serve_booking_flags(self):
+		"""Verify setup_default_ism_settings preserves explicit 0 for booking and honeypot flags."""
+		from ism.setup_tasks.seed import setup_default_ism_settings
+
+		settings = frappe.get_single("ISM Settings")
+		settings.enable_self_serve_booking = 0
+		settings.self_serve_honeypot_enabled = 0
+		settings.save(ignore_permissions=True)
+
+		setup_default_ism_settings()
+
+		reloaded = frappe.get_single("ISM Settings")
+		self.assertEqual(int(reloaded.enable_self_serve_booking), 0)
+		self.assertEqual(int(reloaded.self_serve_honeypot_enabled), 0)
