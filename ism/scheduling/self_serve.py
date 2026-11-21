@@ -214,6 +214,7 @@ def evaluate_reschedule_eligibility(
 	schedule_entry: Union[str, Any],
 	*,
 	now_dt: Optional[datetime] = None,
+	use_current_read: bool = False,
 ) -> Dict[str, Any]:
 	"""Evaluate hard lifecycle locks, reschedule count cap, and cutoff window (measured against T_cust)."""
 	if isinstance(schedule_entry, str):
@@ -264,13 +265,27 @@ def evaluate_reschedule_eligibility(
 			"This appointment cannot be rescheduled because its current status is '{0}'. "
 			"Please contact the shop for assistance."
 		).format(status or "Unknown")
-	elif repair_order and frappe.db.exists("Repair Order", repair_order):
-		ro_meta = frappe.db.get_value(
-			"Repair Order",
-			repair_order,
-			["status", "picked_up_at", "vehicle_released"],
-			as_dict=True,
-		)
+	elif repair_order:
+		ro_meta = None
+		if use_current_read:
+			ro_rows = frappe.db.sql(
+				"""
+				SELECT `status`, `picked_up_at`, `vehicle_released`
+				FROM `tabRepair Order`
+				WHERE `name` = %s
+				LOCK IN SHARE MODE
+				""",
+				(repair_order,),
+				as_dict=True,
+			)
+			ro_meta = ro_rows[0] if ro_rows else None
+		elif frappe.db.exists("Repair Order", repair_order):
+			ro_meta = frappe.db.get_value(
+				"Repair Order",
+				repair_order,
+				["status", "picked_up_at", "vehicle_released"],
+				as_dict=True,
+			)
 		if ro_meta:
 			ro_status = ro_meta.get("status")
 			ro_locked = (
@@ -350,7 +365,7 @@ def find_self_serve_slots(
 	horizon_days = max(1, int(settings.get("self_serve_horizon_days", 30)))
 	default_diag_dur = int(settings.get("default_diagnostic_duration") or 60)
 
-	if package_ids:
+	if package_ids is not None:
 		reqs = compute_packages_booking_requirements(
 			package_ids,
 			vehicle_model=vehicle_model,
@@ -518,23 +533,11 @@ def _validate_target_slot(
 
 
 def _lock_schedule_entry(schedule_entry: str) -> Dict[str, Any]:
-	se = frappe.qb.DocType("Schedule Entry")
-	rows = (
-		frappe.qb.from_(se)
-		.select(
-			se.name,
-			se.status,
-			se.scheduled_date,
-			se.scheduled_time,
-			se.estimated_duration,
-			se.service_bay,
-			se.assigned_technician,
-			se.repair_order,
-			se.reschedule_count,
-		)
-		.where(se.name == schedule_entry)
-		.for_update()
-		.run(as_dict=True)
+	"""Acquire FOR UPDATE row lock and return full current-read column snapshot of Schedule Entry."""
+	rows = frappe.db.sql(
+		"SELECT * FROM `tabSchedule Entry` WHERE `name` = %s FOR UPDATE",
+		(schedule_entry,),
+		as_dict=True,
 	)
 	if not rows:
 		frappe.throw(_("Appointment '{0}' was not found.").format(schedule_entry), frappe.DoesNotExistError)
@@ -580,7 +583,7 @@ def _fetch_blocking_entries_current_read(
 	exclude_entry: Optional[str] = None,
 	lookback_days: int = 30,
 ) -> List[Dict[str, Any]]:
-	"""Locking current-read of blocking Schedule Entry rows so InnoDB REPEATABLE READ sees concurrent commits."""
+	"""Bounded share-mode current-read of blocking Schedule Entry rows so InnoDB REPEATABLE READ sees concurrent commits."""
 	start_dt = getdate(normalize_date(start_date) or start_date)
 	end_dt = getdate(normalize_date(end_date) or end_date)
 	start_str = str(start_dt)
@@ -594,34 +597,45 @@ def _fetch_blocking_entries_current_read(
 	if tech_list is not None and not tech_list:
 		return []
 
-	se = frappe.qb.DocType("Schedule Entry")
-	query = (
-		frappe.qb.from_(se)
-		.select(
-			se.name,
-			se.service_bay,
-			se.assigned_technician,
-			se.scheduled_date,
-			se.scheduled_time,
-			se.estimated_duration,
-			se.completion_date,
-			se.completion_time,
-			se.status,
-		)
-		.where(se.scheduled_date <= end_str)
-		.where(
-			(se.completion_date >= start_str)
-			| (se.completion_date.isnull() & (se.scheduled_date >= lookback_str))
-		)
-		.where(se.status.notin(list(NON_BLOCKING_ENTRY_STATUSES)))
-	)
+	conditions = [
+		"`scheduled_date` >= %s",
+		"`scheduled_date` <= %s",
+		"(`completion_date` >= %s OR `completion_date` IS NULL)",
+		"`status` NOT IN %s",
+	]
+	params: List[Any] = [lookback_str, end_str, start_str, tuple(NON_BLOCKING_ENTRY_STATUSES)]
+
 	if bay_list is not None:
-		query = query.where(se.service_bay.isin(bay_list))
+		conditions.append("`service_bay` IN %s")
+		params.append(tuple(bay_list))
 	if tech_list is not None:
-		query = query.where(se.assigned_technician.isin(tech_list))
+		conditions.append("`assigned_technician` IN %s")
+		params.append(tuple(tech_list))
 	if exclude_entry:
-		query = query.where(se.name != exclude_entry)
-	return query.orderby(se.name).for_update().run(as_dict=True)
+		conditions.append("`name` != %s")
+		params.append(exclude_entry)
+
+	where_sql = " AND ".join(conditions)
+	return frappe.db.sql(
+		f"""
+		SELECT
+			`name`,
+			`service_bay`,
+			`assigned_technician`,
+			`scheduled_date`,
+			`scheduled_time`,
+			`estimated_duration`,
+			`completion_date`,
+			`completion_time`,
+			`status`
+		FROM `tabSchedule Entry`
+		WHERE {where_sql}
+		ORDER BY `name` ASC
+		LOCK IN SHARE MODE
+		""",
+		tuple(params),
+		as_dict=True,
+	)
 
 
 def _select_available_bay_under_lock(
@@ -805,6 +819,11 @@ def _rollback_savepoint_safe(savepoint_name: str) -> None:
 		pass
 
 
+def _is_snapshot_isolation_conflict(exc: Exception) -> bool:
+	"""Return True for MariaDB ER_CHECKREAD (1020) snapshot-isolation conflict on locking read."""
+	return isinstance(exc, frappe.QueryDeadlockError) and "1020" in str(exc)
+
+
 def reschedule_self_serve_appointment(
 	schedule_entry: str,
 	target_date: str,
@@ -831,12 +850,30 @@ def reschedule_self_serve_appointment(
 		_throw_self_serve_error(_("A valid appointment date is required."), "invalid_date")
 	internal_start_time = to_internal_slot_start(customer_arrival_time, offset_minutes=offset_minutes)
 
-	# 2. Canonical Lock Order Step 1: Lock target Schedule Entry FOR UPDATE.
-	_lock_schedule_entry(se_name)
-	se = frappe.get_doc("Schedule Entry", se_name)
-
-	# 3. Re-evaluate eligibility INSIDE the lock (prevents TOCTOU races).
-	eligibility = evaluate_reschedule_eligibility(se, now_dt=now_val)
+	# 2 & 3. Canonical Lock Order Step 1: Lock target Schedule Entry FOR UPDATE (current read),
+	# sync doc, and re-evaluate eligibility (including Repair Order current read) inside the lock.
+	# Under MariaDB innodb_snapshot_isolation=ON (ER_CHECKREAD 1020), a prior non-locking read in
+	# the same transaction (e.g. has_permission/exists) conflicts with a concurrent commit; restart
+	# the pre-mutation transaction once to lock and evaluate the latest committed state cleanly.
+	se = None
+	eligibility = None
+	for attempt in range(2):
+		try:
+			locked_row = _lock_schedule_entry(se_name)
+			se = frappe.get_doc("Schedule Entry", se_name)
+			se.update(locked_row)
+			se._original_modified = locked_row.get("modified")
+			se._doc_before_save = None
+			se._last_span_key = None
+			eligibility = evaluate_reschedule_eligibility(se, now_dt=now_val, use_current_read=True)
+			break
+		except Exception as exc:
+			if attempt == 0 and _is_snapshot_isolation_conflict(exc):
+				frappe.db.rollback()
+				if hasattr(frappe, "clear_document_cache"):
+					frappe.clear_document_cache("Schedule Entry", se_name)
+				continue
+			raise
 	if not eligibility["allowed"]:
 		_throw_self_serve_error(
 			eligibility["reason_message"] or _("This appointment cannot be rescheduled online."),
