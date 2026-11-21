@@ -72,7 +72,16 @@
   "square_webhook_signature_key",
   "square_webhook_notification_url",
   "square_mode_of_payment",
-  "square_bank_account"
+  "square_bank_account",
+  "sb_customer_scheduling_policy",
+  "customer_arrival_offset_minutes",
+  "reschedule_cutoff_hours",
+  "max_self_reschedules",
+  "cb_customer_scheduling_policy",
+  "self_serve_default_entry_type",
+  "self_serve_min_lead_time_minutes",
+  "self_serve_horizon_days",
+  "enable_waiter_preference"
  ],
  "fields": [
   {
@@ -473,11 +482,70 @@
    "fieldtype": "Link",
    "label": "Square Bank Account",
    "options": "Account"
+  },
+  {
+   "fieldname": "sb_customer_scheduling_policy",
+   "fieldtype": "Section Break",
+   "label": "Customer Scheduling & Self-Serve Policy"
+  },
+  {
+   "default": "15",
+   "description": "Earlier arrival offset in minutes (0-120) applied uniformly to customer-facing appointment slots including the opening slot. Set to 0 to disable.",
+   "fieldname": "customer_arrival_offset_minutes",
+   "fieldtype": "Int",
+   "label": "Customer Arrival Offset (Minutes)"
+  },
+  {
+   "default": "24",
+   "description": "Minimum hours before the customer appointment time required to allow self-serve rescheduling.",
+   "fieldname": "reschedule_cutoff_hours",
+   "fieldtype": "Int",
+   "label": "Reschedule Cutoff (Hours)"
+  },
+  {
+   "default": "2",
+   "description": "Maximum number of customer self-serve reschedules permitted per Schedule Entry (0 disables self-rescheduling).",
+   "fieldname": "max_self_reschedules",
+   "fieldtype": "Int",
+   "label": "Max Self-Serve Reschedules"
+  },
+  {
+   "fieldname": "cb_customer_scheduling_policy",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Diagnostic",
+   "description": "Default Schedule Entry Type assigned to website provisional bookings (must not require a Repair Order).",
+   "fieldname": "self_serve_default_entry_type",
+   "fieldtype": "Link",
+   "label": "Self-Serve Default Entry Type",
+   "options": "Schedule Entry Type"
+  },
+  {
+   "default": "120",
+   "description": "Minimum lead time in minutes from current shop time before the target customer arrival time.",
+   "fieldname": "self_serve_min_lead_time_minutes",
+   "fieldtype": "Int",
+   "label": "Self-Serve Min Lead Time (Minutes)"
+  },
+  {
+   "default": "30",
+   "description": "Maximum days ahead (1-180) exposed for self-serve booking and rescheduling.",
+   "fieldname": "self_serve_horizon_days",
+   "fieldtype": "Int",
+   "label": "Self-Serve Horizon (Days)"
+  },
+  {
+   "default": "1",
+   "description": "Enable collecting Drop-Off vs. Waiter preference during self-serve booking.",
+   "fieldname": "enable_waiter_preference",
+   "fieldtype": "Check",
+   "label": "Enable Waiter Preference"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-21 00:00:00.000000",
+ "modified": "2026-11-21 08:20:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

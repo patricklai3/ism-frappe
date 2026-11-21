@@ -20,6 +20,13 @@ DEFAULT_SHOP_SETTINGS: Dict[str, Any] = {
 	"technician_designation": "Technician",
 	"holiday_list": None,
 	"default_diagnostic_duration": 60,
+	"customer_arrival_offset_minutes": 15,
+	"reschedule_cutoff_hours": 24,
+	"max_self_reschedules": 2,
+	"self_serve_default_entry_type": "Diagnostic",
+	"self_serve_min_lead_time_minutes": 120,
+	"self_serve_horizon_days": 30,
+	"enable_waiter_preference": 1,
 }
 
 
@@ -232,6 +239,26 @@ def get_shop_settings() -> Dict[str, Any]:
 		settings["holiday_list"] = doc.holiday_list
 	if getattr(doc, "default_diagnostic_duration", None):
 		settings["default_diagnostic_duration"] = int(doc.default_diagnostic_duration)
+
+	raw_offset = getattr(doc, "customer_arrival_offset_minutes", None)
+	if raw_offset is not None and raw_offset != "":
+		settings["customer_arrival_offset_minutes"] = min(120, max(0, cint(raw_offset)))
+	raw_cutoff = getattr(doc, "reschedule_cutoff_hours", None)
+	if raw_cutoff is not None and raw_cutoff != "":
+		settings["reschedule_cutoff_hours"] = max(0, cint(raw_cutoff))
+	raw_max_reschedules = getattr(doc, "max_self_reschedules", None)
+	if raw_max_reschedules is not None and raw_max_reschedules != "":
+		settings["max_self_reschedules"] = max(0, cint(raw_max_reschedules))
+	if getattr(doc, "self_serve_default_entry_type", None):
+		settings["self_serve_default_entry_type"] = doc.self_serve_default_entry_type
+	raw_lead_time = getattr(doc, "self_serve_min_lead_time_minutes", None)
+	if raw_lead_time is not None and raw_lead_time != "":
+		settings["self_serve_min_lead_time_minutes"] = max(0, cint(raw_lead_time))
+	if getattr(doc, "self_serve_horizon_days", None):
+		settings["self_serve_horizon_days"] = min(180, max(1, cint(doc.self_serve_horizon_days)))
+	raw_waiter = getattr(doc, "enable_waiter_preference", None)
+	if raw_waiter is not None and raw_waiter != "":
+		settings["enable_waiter_preference"] = 1 if cint(raw_waiter) else 0
 
 	if cache is not None:
 		try:

@@ -92,6 +92,8 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("transactional_email_ip_rate_limit_per_hour", 20),
 	("square_environment", "Disabled"),
 	("square_currency", "CAD"),
+	("self_serve_default_entry_type", "Diagnostic"),
+	("self_serve_horizon_days", 30),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
@@ -99,6 +101,11 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("buffer_padding_minutes", 0),
 	("sms_enforce_opt_out", 1),
 	("portal_session_secure_cookie", 1),
+	("customer_arrival_offset_minutes", 15),
+	("reschedule_cutoff_hours", 24),
+	("max_self_reschedules", 2),
+	("self_serve_min_lead_time_minutes", 120),
+	("enable_waiter_preference", 1),
 )
 
 
