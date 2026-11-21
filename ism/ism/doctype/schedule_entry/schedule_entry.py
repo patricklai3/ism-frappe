@@ -114,7 +114,45 @@ class ScheduleEntry(Document):
 			return self.repair_vehicle
 		if self.provisional_vehicle_info:
 			return self.provisional_vehicle_info
+		parts = []
+		year = cint(getattr(self, "provisional_vehicle_year", 0) or 0)
+		if year > 0:
+			parts.append(str(year))
+		model = (getattr(self, "provisional_vehicle_model", None) or "").strip()
+		if model:
+			parts.append(model)
+		vin_or_plate = (getattr(self, "provisional_vin_or_plate", None) or "").strip()
+		if parts:
+			label = " ".join(parts)
+			return f"{label} ({vin_or_plate})" if vin_or_plate else label
+		if vin_or_plate:
+			return vin_or_plate
 		return ""
+
+	def _normalize_provisional_fields(self):
+		"""Trim leading/trailing whitespace on provisional intake text fields."""
+		for fieldname in (
+			"provisional_customer_name",
+			"provisional_phone",
+			"provisional_email",
+			"provisional_vehicle_info",
+			"provisional_vehicle_model",
+			"provisional_vin_or_plate",
+		):
+			val = getattr(self, fieldname, None)
+			if isinstance(val, str):
+				setattr(self, fieldname, val.strip())
+
+	def _normalize_reschedule_count(self):
+		"""Default reschedule_count to 0 and reject negative values."""
+		raw = getattr(self, "reschedule_count", None)
+		if raw is None or raw == "":
+			self.reschedule_count = 0
+			return
+		count = cint(raw)
+		if count < 0:
+			frappe.throw(_("Reschedule Count cannot be negative."), frappe.ValidationError)
+		self.reschedule_count = count
 
 	def set_title(self):
 		"""Set dynamic human-readable title for Desk header, calendar, and link fields."""
@@ -127,10 +165,14 @@ class ScheduleEntry(Document):
 			self.title = f"{customer} ({entry_type_str})"
 
 	def before_insert(self):
+		self._normalize_provisional_fields()
+		self._normalize_reschedule_count()
 		self.populate_from_repair_order()
 		self.set_title()
 
 	def before_save(self):
+		self._normalize_provisional_fields()
+		self._normalize_reschedule_count()
 		if getattr(self.flags, "ignore_validate", False) or not self.completion_date or not self.completion_time:
 			self.update_working_span()
 		self._prev_repair_order = (
@@ -217,6 +259,7 @@ class ScheduleEntry(Document):
 
 	def validate(self):
 		self.flags.scheduling_warnings = []
+		self._normalize_reschedule_count()
 		self.update_working_span()
 		self.validate_estimated_duration()
 		self.validate_repair_order_requirement()

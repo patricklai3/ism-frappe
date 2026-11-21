@@ -39,6 +39,7 @@ class _SlotSearchContext:
 		required_tags: Optional[Union[str, List[str]]] = None,
 		service_bay: Optional[str] = None,
 		target_tech: Optional[str] = None,
+		exclude_entry: Optional[str] = None,
 	) -> None:
 		self.settings = get_shop_settings()
 		self.op_start: timedelta = self.settings["operating_hours_start"]
@@ -58,6 +59,7 @@ class _SlotSearchContext:
 		self.end_dt = getdate(normalize_date(end_date) or end_date)
 		self.service_bay = service_bay
 		self.target_tech = target_tech
+		self.exclude_entry = exclude_entry
 
 		self.valid_hours: bool = (
 			self.op_start < self.op_end and self.interval > 0 and self.end_dt >= self.start_dt
@@ -156,7 +158,7 @@ class _SlotSearchContext:
 	def _load_entries(self, start_dt: date, horizon_end_dt: date) -> None:
 		if not self._candidate_bay_set and not self._tech_id_set:
 			return
-		entries = fetch_blocking_entries(start_dt, horizon_end_dt)
+		entries = fetch_blocking_entries(start_dt, horizon_end_dt, exclude_entry=self.exclude_entry)
 		for entry in entries:
 			bay = entry.get("service_bay")
 			if bay and bay in self._candidate_bay_set:
@@ -422,6 +424,7 @@ def search_day_slots(
 	max_slots: Optional[int] = None,
 	technician: Optional[str] = None,
 	include_all: bool = False,
+	exclude_entry: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 	"""Return slots for a single date using a single batched snapshot load."""
 	ctx = _SlotSearchContext(
@@ -431,6 +434,7 @@ def search_day_slots(
 		required_tags=required_tags,
 		service_bay=service_bay,
 		target_tech=technician,
+		exclude_entry=exclude_entry,
 	)
 	return ctx.slots_for_date(target_date, include_all=include_all, max_slots=max_slots)
 
@@ -443,6 +447,7 @@ def find_next_available_slot_batch(
 	required_tags: Optional[Union[str, List[str]]] = None,
 	service_bay: Optional[str] = None,
 	technician: Optional[str] = None,
+	exclude_entry: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
 	"""Find the earliest non-holiday date after start_dt (up to max_days) with open slots."""
 	if max_days <= 0:
@@ -457,6 +462,7 @@ def find_next_available_slot_batch(
 		required_tags=required_tags,
 		service_bay=service_bay,
 		target_tech=technician,
+		exclude_entry=exclude_entry,
 	)
 	if not ctx.valid_hours:
 		return None

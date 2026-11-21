@@ -30,6 +30,16 @@
   "column_break_assignment",
   "service_bay",
   "assigned_technician",
+  "section_break_self_serve",
+  "booking_source",
+  "waiter_preference",
+  "reschedule_count",
+  "cb_self_serve_meta",
+  "last_rescheduled_at",
+  "provisional_vehicle_model",
+  "provisional_vehicle_year",
+  "provisional_vin_or_plate",
+  "booked_packages_json",
   "section_break_notes",
   "items_summary",
   "notes"
@@ -211,6 +221,68 @@
    "search_index": 1
   },
   {
+   "fieldname": "section_break_self_serve",
+   "fieldtype": "Section Break",
+   "label": "Booking Origin & Self-Serve Metadata"
+  },
+  {
+   "default": "Staff / Desk",
+   "fieldname": "booking_source",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Booking Source",
+   "options": "Staff / Desk\nWebsite Self-Serve\nCustomer Portal\nShop OS Intake\nAgent / API",
+   "search_index": 1
+  },
+  {
+   "default": "Drop-Off",
+   "fieldname": "waiter_preference",
+   "fieldtype": "Select",
+   "label": "Waiter Preference",
+   "options": "Drop-Off\nWaiter\nNot Specified"
+  },
+  {
+   "default": "0",
+   "fieldname": "reschedule_count",
+   "fieldtype": "Int",
+   "label": "Reschedule Count",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_self_serve_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_rescheduled_at",
+   "fieldtype": "Datetime",
+   "label": "Last Rescheduled At",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_vehicle_model",
+   "fieldtype": "Data",
+   "label": "Provisional Vehicle Model"
+  },
+  {
+   "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_vehicle_year",
+   "fieldtype": "Int",
+   "label": "Provisional Vehicle Year"
+  },
+  {
+   "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_vin_or_plate",
+   "fieldtype": "Data",
+   "label": "Provisional VIN / Plate"
+  },
+  {
+   "fieldname": "booked_packages_json",
+   "fieldtype": "Long Text",
+   "label": "Booked Packages (JSON)",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_notes",
    "fieldtype": "Section Break",
    "label": "Summary & Notes"
@@ -231,7 +303,7 @@
  "index_web_pages_for_search": 1,
  "is_calendar_and_gantt": 1,
  "links": [],
- "modified": "2026-10-26 12:00:00.000000",
+ "modified": "2026-11-21 08:30:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Schedule Entry",

@@ -94,6 +94,7 @@ class ShopCapacityWindow:
 		required_tags: Optional[Union[str, List[str]]] = None,
 		service_bay: Optional[str] = None,
 		skip_holidays: bool = False,
+		exclude_entry: Optional[str] = None,
 	) -> None:
 		self.settings = get_shop_settings()
 		self.start_dt = getdate(start_date)
@@ -105,6 +106,7 @@ class ShopCapacityWindow:
 		self.interval: int = int(self.settings["default_slot_interval"] or 30)
 		self.enable_tech: int = cint(self.settings.get("enable_technician_capacity"))
 		self.skip_holidays: bool = bool(skip_holidays)
+		self.exclude_entry: Optional[str] = exclude_entry
 
 		self.candidate_bays: List[str] = []
 		self.bay_tags: Dict[str, List[str]] = {}
@@ -189,7 +191,7 @@ class ShopCapacityWindow:
 		end_str: str,
 	) -> Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]]:
 		se = frappe.qb.DocType("Schedule Entry")
-		entries = (
+		query = (
 			frappe.qb.from_(se)
 			.select(
 				se.scheduled_date,
@@ -203,7 +205,10 @@ class ShopCapacityWindow:
 			.where(se.scheduled_date <= end_str)
 			.where(Coalesce(se.completion_date, se.scheduled_date) >= start_str)
 			.where(se.status.notin(list(NON_BLOCKING_ENTRY_STATUSES)))
-		).run(as_dict=True)
+		)
+		if self.exclude_entry:
+			query = query.where(se.name != self.exclude_entry)
+		entries = query.run(as_dict=True)
 
 		by_date: Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]] = {}
 		for entry in entries:
