@@ -29,6 +29,10 @@ __all__ = [
 ]
 
 _TEARDOWN_ORDER = {
+	"Customer Portal Session": 0,
+	"Portal OTP Challenge": 1,
+	"SMS Audit Log": 2,
+	"SMS Opt Out": 3,
 	"Schedule Entry": 1,
 	"Payment Entry": 2,
 	"Purchase Receipt": 3,

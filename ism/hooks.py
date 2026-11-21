@@ -175,23 +175,12 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"ism.tasks.all"
-# 	],
-# 	"daily": [
-# 		"ism.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"ism.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"ism.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"ism.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"daily": [
+		"ism.comms.otp.cleanup_expired_otp_challenges",
+		"ism.comms.sessions.cleanup_expired_portal_sessions",
+	],
+}
 
 # Testing
 # -------
@@ -227,7 +216,12 @@ doc_events = {
 # Ignore links to specified DocTypes when deleting documents
 # -----------------------------------------------------------
 
-ignore_links_on_delete = ["Repair Order Schedule Entry"]
+ignore_links_on_delete = [
+	"Repair Order Schedule Entry",
+	"SMS Audit Log",
+	"Portal OTP Challenge",
+	"Customer Portal Session",
+]
 
 # Request Events
 # ----------------
@@ -273,9 +267,9 @@ ignore_links_on_delete = ["Repair Order Schedule Entry"]
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
 
-# default_log_clearing_doctypes = {
-# 	"Logging DocType Name": 30  # days to retain logs
-# }
+default_log_clearing_doctypes = {
+	"SMS Audit Log": 180,
+}
 
 # Translation
 # ------------

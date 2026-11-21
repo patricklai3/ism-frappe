@@ -1,0 +1,108 @@
+{
+ "actions": [],
+ "autoname": "field:phone_e164",
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "phone_e164",
+  "is_opted_out",
+  "source",
+  "last_keyword",
+  "opted_out_at",
+  "opted_in_at",
+  "last_event_id",
+  "customer",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "phone_e164",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Phone (E.164)",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "is_opted_out",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Opted Out"
+  },
+  {
+   "default": "Telnyx STOP Keyword",
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Source",
+   "options": "Telnyx STOP Keyword\nCarrier Opt-Out Error\nManual Staff Override\nCustomer Re-Opt-In (START)"
+  },
+  {
+   "fieldname": "last_keyword",
+   "fieldtype": "Data",
+   "label": "Last Keyword"
+  },
+  {
+   "fieldname": "opted_out_at",
+   "fieldtype": "Datetime",
+   "label": "Opted Out At"
+  },
+  {
+   "fieldname": "opted_in_at",
+   "fieldtype": "Datetime",
+   "label": "Opted In At"
+  },
+  {
+   "fieldname": "last_event_id",
+   "fieldtype": "Data",
+   "label": "Last Event ID"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "SMS Opt Out",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "ISM Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "ISM Service Advisor"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

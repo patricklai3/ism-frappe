@@ -1,6 +1,8 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import secrets
+
 import frappe
 
 from ism.ism.doctype.schedule_entry_type.schedule_entry_type import STANDARD_SCHEDULE_ENTRY_TYPES
@@ -73,11 +75,28 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("estimation_sigma", 0.30),
 	("default_diagnostic_duration", 60),
 	("default_labor_rate", 140.0),
+	("sms_default_country_code", "+1"),
+	("telnyx_webhook_tolerance_seconds", 300),
+	("sms_help_reply_text", "Reply STOP to unsubscribe from SMS alerts, or call the shop for assistance."),
+	("otp_code_length", 6),
+	("otp_ttl_seconds", 300),
+	("otp_resend_cooldown_seconds", 60),
+	("otp_max_verify_attempts", 5),
+	("otp_lockout_seconds", 900),
+	("otp_phone_rate_limit_per_hour", 5),
+	("otp_ip_rate_limit_per_hour", 20),
+	("portal_session_cookie_name", "ism_portal_session"),
+	("portal_session_ttl_days", 30),
+	("portal_session_cookie_samesite", "Lax"),
+	("transactional_email_rate_limit_per_hour", 5),
+	("transactional_email_ip_rate_limit_per_hour", 20),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
 	("enable_technician_capacity", 1),
 	("buffer_padding_minutes", 0),
+	("sms_enforce_opt_out", 1),
+	("portal_session_secure_cookie", 1),
 )
 
 
@@ -104,13 +123,22 @@ def setup_default_ism_settings():
 			settings.set(fieldname, default_val)
 			changed = True
 
+	persisted_fields = set(
+		frappe.db.sql_list("SELECT field FROM `tabSingles` WHERE doctype = %s", ("ISM Settings",))
+	)
 	for fieldname, default_val in _ISM_SETTINGS_NONE_DEFAULTS:
-		if settings.get(fieldname) is None:
+		if settings.get(fieldname) is None or fieldname not in persisted_fields:
 			settings.set(fieldname, default_val)
 			changed = True
 
 	if not settings.sms_gateway_provider or settings.sms_gateway_provider == "Twilio":
 		settings.sms_gateway_provider = "Disabled"
+		changed = True
+
+	if not settings.portal_session_signing_secret and not settings.get_password(
+		"portal_session_signing_secret", raise_exception=False
+	):
+		settings.portal_session_signing_secret = secrets.token_urlsafe(48)
 		changed = True
 
 	if changed or settings.is_new():

@@ -15,6 +15,31 @@
   "sms_gateway_api_key",
   "sms_sender_id",
   "enable_ready_for_pickup_sms",
+  "sms_default_country_code",
+  "cb_sms_settings",
+  "telnyx_api_key",
+  "telnyx_messaging_profile_id",
+  "telnyx_webhook_public_key",
+  "sms_webhook_hmac_secret",
+  "telnyx_webhook_tolerance_seconds",
+  "sms_enforce_opt_out",
+  "sms_help_reply_text",
+  "sb_otp_and_sessions",
+  "otp_code_length",
+  "otp_ttl_seconds",
+  "otp_resend_cooldown_seconds",
+  "otp_max_verify_attempts",
+  "otp_lockout_seconds",
+  "otp_phone_rate_limit_per_hour",
+  "otp_ip_rate_limit_per_hour",
+  "cb_otp_and_sessions",
+  "portal_session_cookie_name",
+  "portal_session_ttl_days",
+  "portal_session_signing_secret",
+  "portal_session_cookie_samesite",
+  "portal_session_secure_cookie",
+  "transactional_email_rate_limit_per_hour",
+  "transactional_email_ip_rate_limit_per_hour",
   "sb_scheduling",
   "operating_hours_start",
   "operating_hours_end",
@@ -78,14 +103,16 @@
    "fieldname": "sms_gateway_provider",
    "fieldtype": "Select",
    "label": "SMS Gateway Provider",
-   "options": "Disabled\nCustom HTTP Webhook"
+   "options": "Disabled\nTelnyx\nCustom HTTP Webhook\nMock (Deterministic Test)"
   },
   {
+   "depends_on": "eval:doc.sms_gateway_provider=='Custom HTTP Webhook'",
    "fieldname": "sms_gateway_endpoint",
    "fieldtype": "Data",
    "label": "SMS Gateway Endpoint URL"
   },
   {
+   "depends_on": "eval:doc.sms_gateway_provider=='Custom HTTP Webhook'",
    "fieldname": "sms_gateway_api_key",
    "fieldtype": "Password",
    "label": "API Key / Auth Token"
@@ -101,6 +128,149 @@
    "fieldname": "enable_ready_for_pickup_sms",
    "fieldtype": "Check",
    "label": "Enable Ready for Pickup SMS"
+  },
+  {
+   "default": "+1",
+   "fieldname": "sms_default_country_code",
+   "fieldtype": "Data",
+   "label": "Default Country Code"
+  },
+  {
+   "fieldname": "cb_sms_settings",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.sms_gateway_provider=='Telnyx'",
+   "fieldname": "telnyx_api_key",
+   "fieldtype": "Password",
+   "label": "Telnyx API Key"
+  },
+  {
+   "depends_on": "eval:doc.sms_gateway_provider=='Telnyx'",
+   "fieldname": "telnyx_messaging_profile_id",
+   "fieldtype": "Data",
+   "label": "Telnyx Messaging Profile ID"
+  },
+  {
+   "fieldname": "telnyx_webhook_public_key",
+   "fieldtype": "Small Text",
+   "label": "Telnyx Webhook Public Key (Ed25519)"
+  },
+  {
+   "fieldname": "sms_webhook_hmac_secret",
+   "fieldtype": "Password",
+   "label": "Custom Webhook HMAC Secret"
+  },
+  {
+   "default": "300",
+   "fieldname": "telnyx_webhook_tolerance_seconds",
+   "fieldtype": "Int",
+   "label": "Webhook Replay Tolerance (Seconds)"
+  },
+  {
+   "default": "1",
+   "fieldname": "sms_enforce_opt_out",
+   "fieldtype": "Check",
+   "label": "Enforce SMS Opt-Out Compliance"
+  },
+  {
+   "default": "Reply STOP to unsubscribe from SMS alerts, or call the shop for assistance.",
+   "fieldname": "sms_help_reply_text",
+   "fieldtype": "Small Text",
+   "label": "HELP Keyword Auto-Reply Text"
+  },
+  {
+   "fieldname": "sb_otp_and_sessions",
+   "fieldtype": "Section Break",
+   "label": "OTP & Portal Sessions"
+  },
+  {
+   "default": "6",
+   "fieldname": "otp_code_length",
+   "fieldtype": "Int",
+   "label": "OTP Code Length"
+  },
+  {
+   "default": "300",
+   "fieldname": "otp_ttl_seconds",
+   "fieldtype": "Int",
+   "label": "OTP Expiry TTL (Seconds)"
+  },
+  {
+   "default": "60",
+   "fieldname": "otp_resend_cooldown_seconds",
+   "fieldtype": "Int",
+   "label": "OTP Resend Cooldown (Seconds)"
+  },
+  {
+   "default": "5",
+   "fieldname": "otp_max_verify_attempts",
+   "fieldtype": "Int",
+   "label": "OTP Max Verification Attempts"
+  },
+  {
+   "default": "900",
+   "fieldname": "otp_lockout_seconds",
+   "fieldtype": "Int",
+   "label": "OTP Lockout Window (Seconds)"
+  },
+  {
+   "default": "5",
+   "fieldname": "otp_phone_rate_limit_per_hour",
+   "fieldtype": "Int",
+   "label": "OTP Per-Phone Rate Limit (Per Hour)"
+  },
+  {
+   "default": "20",
+   "fieldname": "otp_ip_rate_limit_per_hour",
+   "fieldtype": "Int",
+   "label": "OTP Per-IP Rate Limit (Per Hour)"
+  },
+  {
+   "fieldname": "cb_otp_and_sessions",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "ism_portal_session",
+   "fieldname": "portal_session_cookie_name",
+   "fieldtype": "Data",
+   "label": "Portal Session Cookie Name"
+  },
+  {
+   "default": "30",
+   "fieldname": "portal_session_ttl_days",
+   "fieldtype": "Int",
+   "label": "Portal Session TTL (Days)"
+  },
+  {
+   "fieldname": "portal_session_signing_secret",
+   "fieldtype": "Password",
+   "label": "Portal Session Signing Secret"
+  },
+  {
+   "default": "Lax",
+   "fieldname": "portal_session_cookie_samesite",
+   "fieldtype": "Select",
+   "label": "Portal Session Cookie SameSite",
+   "options": "Lax\nStrict"
+  },
+  {
+   "default": "1",
+   "fieldname": "portal_session_secure_cookie",
+   "fieldtype": "Check",
+   "label": "Require Secure Portal Session Cookie"
+  },
+  {
+   "default": "5",
+   "fieldname": "transactional_email_rate_limit_per_hour",
+   "fieldtype": "Int",
+   "label": "Transactional Email Per-Recipient Limit (Per Hour)"
+  },
+  {
+   "default": "20",
+   "fieldname": "transactional_email_ip_rate_limit_per_hour",
+   "fieldtype": "Int",
+   "label": "Transactional Email Per-IP Limit (Per Hour)"
   },
   {
    "fieldname": "sb_scheduling",
@@ -235,7 +405,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-17 07:30:00.000000",
+ "modified": "2026-11-21 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

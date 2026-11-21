@@ -1,0 +1,177 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "direction",
+  "provider",
+  "message_type",
+  "phone_e164",
+  "sender_id",
+  "provider_message_id",
+  "status",
+  "is_redacted",
+  "message_preview",
+  "reference_doctype",
+  "reference_name",
+  "error_code",
+  "error_message",
+  "sent_at",
+  "delivered_at",
+  "last_webhook_event_id",
+  "webhook_payload_sanitized"
+ ],
+ "fields": [
+  {
+   "default": "Outbound",
+   "fieldname": "direction",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Direction",
+   "options": "Outbound\nInbound",
+   "reqd": 1
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Provider",
+   "options": "Telnyx\nCustom HTTP Webhook\nMock (Deterministic Test)\nDisabled",
+   "reqd": 1
+  },
+  {
+   "default": "Notification",
+   "fieldname": "message_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Message Type",
+   "options": "Notification\nApproval Link\nReady For Pickup\nOTP\nBooking Confirmation\nReschedule Confirmation\nCompliance Reply\nInbound Keyword\nOther",
+   "reqd": 1
+  },
+  {
+   "fieldname": "phone_e164",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Phone (E.164)",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "sender_id",
+   "fieldtype": "Data",
+   "label": "Sender ID"
+  },
+  {
+   "fieldname": "provider_message_id",
+   "fieldtype": "Data",
+   "label": "Provider Message ID",
+   "search_index": 1
+  },
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Queued\nSent\nDelivered\nFailed\nBlocked - Opted Out\nBlocked - Unconfigured\nReceived",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_redacted",
+   "fieldtype": "Check",
+   "label": "Is Redacted"
+  },
+  {
+   "fieldname": "message_preview",
+   "fieldtype": "Small Text",
+   "label": "Message Preview"
+  },
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Link",
+   "label": "Reference DocType",
+   "options": "DocType",
+   "search_index": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "label": "Reference Name",
+   "options": "reference_doctype",
+   "search_index": 1
+  },
+  {
+   "fieldname": "error_code",
+   "fieldtype": "Data",
+   "label": "Error Code"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message"
+  },
+  {
+   "fieldname": "sent_at",
+   "fieldtype": "Datetime",
+   "label": "Sent At"
+  },
+  {
+   "fieldname": "delivered_at",
+   "fieldtype": "Datetime",
+   "label": "Delivered At"
+  },
+  {
+   "fieldname": "last_webhook_event_id",
+   "fieldtype": "Data",
+   "label": "Last Webhook Event ID",
+   "search_index": 1
+  },
+  {
+   "fieldname": "webhook_payload_sanitized",
+   "fieldtype": "Long Text",
+   "label": "Webhook Payload (Sanitized)",
+   "read_only": 1
+  }
+ ],
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "SMS Audit Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

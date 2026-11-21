@@ -256,7 +256,10 @@ class TestISMSettings(ISMTestCase):
 		provider_field = meta.get_field("sms_gateway_provider")
 		self.assertIsNotNone(provider_field)
 		options = [opt.strip() for opt in (provider_field.options or "").splitlines() if opt.strip()]
-		self.assertEqual(options, ["Disabled", "Custom HTTP Webhook"])
+		self.assertEqual(
+			options,
+			["Disabled", "Telnyx", "Custom HTTP Webhook", "Mock (Deterministic Test)"],
+		)
 
 		settings = frappe.new_doc("ISM Settings")
 		settings.sms_gateway_provider = "Twilio"
@@ -265,11 +268,65 @@ class TestISMSettings(ISMTestCase):
 		settings.validate()
 		self.assertEqual(settings.sms_gateway_provider, "Disabled")
 
-		settings.sms_gateway_provider = "Custom HTTP Webhook"
-		settings.before_validate()
-		settings._validate_selects()
-		settings.validate()
-		self.assertEqual(settings.sms_gateway_provider, "Custom HTTP Webhook")
+		for valid_provider in ("Telnyx", "Custom HTTP Webhook", "Mock (Deterministic Test)"):
+			settings.sms_gateway_provider = valid_provider
+			settings.before_validate()
+			settings._validate_selects()
+			settings.validate()
+			self.assertEqual(settings.sms_gateway_provider, valid_provider)
+
+	def test_comms_and_otp_settings_defaults_and_bounds(self):
+		"""Verify seeded comms/OTP/session defaults and validation bounds on ISM Settings."""
+		settings = frappe.get_single("ISM Settings")
+		self.assertEqual(settings.sms_default_country_code, "+1")
+		self.assertEqual(int(settings.telnyx_webhook_tolerance_seconds), 300)
+		self.assertEqual(int(settings.sms_enforce_opt_out), 1)
+		self.assertTrue(settings.sms_help_reply_text)
+		self.assertEqual(int(settings.otp_code_length), 6)
+		self.assertEqual(int(settings.otp_ttl_seconds), 300)
+		self.assertEqual(int(settings.otp_resend_cooldown_seconds), 60)
+		self.assertEqual(int(settings.otp_max_verify_attempts), 5)
+		self.assertEqual(int(settings.otp_lockout_seconds), 900)
+		self.assertEqual(int(settings.otp_phone_rate_limit_per_hour), 5)
+		self.assertEqual(int(settings.otp_ip_rate_limit_per_hour), 20)
+		self.assertEqual(settings.portal_session_cookie_name, "ism_portal_session")
+		self.assertEqual(int(settings.portal_session_ttl_days), 30)
+		self.assertEqual(settings.portal_session_cookie_samesite, "Lax")
+		self.assertEqual(int(settings.portal_session_secure_cookie), 1)
+		self.assertEqual(int(settings.transactional_email_rate_limit_per_hour), 5)
+		self.assertEqual(int(settings.transactional_email_ip_rate_limit_per_hour), 20)
+		self.assertTrue(settings.get_password("portal_session_signing_secret", raise_exception=False))
+
+		invalid_cases = [
+			("sms_default_country_code", "1"),
+			("sms_default_country_code", "+1234"),
+			("telnyx_webhook_tolerance_seconds", 10),
+			("telnyx_webhook_tolerance_seconds", 7200),
+			("otp_code_length", 3),
+			("otp_code_length", 9),
+			("otp_ttl_seconds", 30),
+			("otp_ttl_seconds", 1200),
+			("otp_resend_cooldown_seconds", 5),
+			("otp_resend_cooldown_seconds", 600),
+			("otp_max_verify_attempts", 0),
+			("otp_max_verify_attempts", 11),
+			("otp_lockout_seconds", 30),
+			("otp_lockout_seconds", 100000),
+			("otp_phone_rate_limit_per_hour", 0),
+			("otp_ip_rate_limit_per_hour", 0),
+			("portal_session_cookie_name", "ab"),
+			("portal_session_cookie_name", "bad cookie!"),
+			("portal_session_ttl_days", 0),
+			("portal_session_ttl_days", 91),
+			("transactional_email_rate_limit_per_hour", 0),
+			("transactional_email_ip_rate_limit_per_hour", 0),
+		]
+		for fieldname, bad_val in invalid_cases:
+			doc = frappe.new_doc("ISM Settings")
+			setattr(doc, fieldname, bad_val)
+			with self.subTest(fieldname=fieldname, bad_val=bad_val):
+				with self.assertRaises(frappe.ValidationError):
+					doc.validate()
 
 	def test_closed_shop_zero_hours_allowed(self):
 		"""Verify 00:00:00-00:00:00 closed-shop operating hours validate natively on ISMSettings."""

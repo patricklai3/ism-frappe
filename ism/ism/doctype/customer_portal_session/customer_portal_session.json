@@ -1,0 +1,178 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "session_id",
+  "token_hash",
+  "customer",
+  "phone_e164",
+  "auth_method",
+  "scope_type",
+  "scope_repair_order",
+  "scope_schedule_entry",
+  "status",
+  "issued_at",
+  "expires_at",
+  "last_seen_at",
+  "revoked_at",
+  "revoked_reason",
+  "issued_ip",
+  "last_ip",
+  "user_agent_hash",
+  "source_otp_challenge",
+  "source_token_hash"
+ ],
+ "fields": [
+  {
+   "fieldname": "session_id",
+   "fieldtype": "Data",
+   "label": "Session ID",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "token_hash",
+   "fieldtype": "Data",
+   "label": "Token Hash",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "search_index": 1
+  },
+  {
+   "fieldname": "phone_e164",
+   "fieldtype": "Data",
+   "label": "Phone (E.164)",
+   "search_index": 1
+  },
+  {
+   "fieldname": "auth_method",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Auth Method",
+   "options": "sms_otp\nmagic_link\nbooking_otp",
+   "reqd": 1
+  },
+  {
+   "default": "customer",
+   "fieldname": "scope_type",
+   "fieldtype": "Select",
+   "label": "Scope Type",
+   "options": "customer\nrepair_order\nbooking",
+   "reqd": 1
+  },
+  {
+   "fieldname": "scope_repair_order",
+   "fieldtype": "Link",
+   "label": "Scope Repair Order",
+   "options": "Repair Order",
+   "search_index": 1
+  },
+  {
+   "fieldname": "scope_schedule_entry",
+   "fieldtype": "Link",
+   "label": "Scope Schedule Entry",
+   "options": "Schedule Entry",
+   "search_index": 1
+  },
+  {
+   "default": "Active",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Active\nRotated\nRevoked\nExpired",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "issued_at",
+   "fieldtype": "Datetime",
+   "label": "Issued At",
+   "reqd": 1
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "last_seen_at",
+   "fieldtype": "Datetime",
+   "label": "Last Seen At"
+  },
+  {
+   "fieldname": "revoked_at",
+   "fieldtype": "Datetime",
+   "label": "Revoked At"
+  },
+  {
+   "fieldname": "revoked_reason",
+   "fieldtype": "Data",
+   "label": "Revoked Reason"
+  },
+  {
+   "fieldname": "issued_ip",
+   "fieldtype": "Data",
+   "label": "Issued IP"
+  },
+  {
+   "fieldname": "last_ip",
+   "fieldtype": "Data",
+   "label": "Last IP"
+  },
+  {
+   "fieldname": "user_agent_hash",
+   "fieldtype": "Data",
+   "label": "User Agent Hash"
+  },
+  {
+   "fieldname": "source_otp_challenge",
+   "fieldtype": "Link",
+   "label": "Source OTP Challenge",
+   "options": "Portal OTP Challenge"
+  },
+  {
+   "fieldname": "source_token_hash",
+   "fieldtype": "Data",
+   "label": "Source Token Hash"
+  }
+ ],
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Customer Portal Session",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "ISM Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}
