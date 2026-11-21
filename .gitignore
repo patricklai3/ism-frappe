@@ -54,8 +54,7 @@ jspm_packages/
 # Aider AI Chat
 .aider*
 
-# Remote Tunnel & Dev Site Logs
-scripts/.tunnel-config.json
+# Dev Site Logs
 logs/
 
 # Tooling & test caches

@@ -32,8 +32,8 @@ This runbook deploys `ism` onto **Frappe / ERPNext v16** on Frappe Cloud while i
 4. Optional local push from Windows (`d:\ism`):
    ```powershell
    git remote add frappe-deploy git@github.com:<owner>/ism-frappe.git
-   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\push-deploy-subtree.ps1 -DryRun
-   powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\push-deploy-subtree.ps1 -Branch staging
+   powershell -ExecutionPolicy Bypass -File scripts\push-deploy-subtree.ps1 -DryRun
+   powershell -ExecutionPolicy Bypass -File scripts\push-deploy-subtree.ps1 -Branch staging
    ```
 
 ---

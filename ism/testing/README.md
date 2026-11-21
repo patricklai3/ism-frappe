@@ -93,7 +93,7 @@ Supported `build(stage)` targets: `checked_in`, `draft_estimate`, `pending_autho
 
 - **Isolated worktree clean reinstall + test**:
   ```powershell
-  powershell -ExecutionPolicy Bypass -File ism-frappe\scripts\test-in-slot.ps1 -CleanReinstall -Module ism.tests.test_simulation_foundation
+  powershell -ExecutionPolicy Bypass -File scripts\test-in-slot.ps1 -CleanReinstall -Module ism.tests.test_simulation_foundation
   ```
 - **Rebuild `main_golden.sql.gz` from primary `D:\ism` (`main`)**:
   - `provision-bench-slots.ps1 -RefreshGolden` and `promote-to-main.ps1` build `main_golden.sql.gz` from a clean `golden.localhost` site + `ism.testing.catalog.seed_all` (decoupled from `development.localhost`).
