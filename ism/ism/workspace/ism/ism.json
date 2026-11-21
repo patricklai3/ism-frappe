@@ -171,6 +171,18 @@
    "label": "Repair Vehicles",
    "link_to": "Repair Vehicle",
    "type": "DocType"
+  },
+  {
+   "color": "Green",
+   "label": "Shop Floor Blackboard",
+   "type": "URL",
+   "url": "/board"
+  },
+  {
+   "color": "Blue",
+   "label": "Shop Cockpit",
+   "type": "URL",
+   "url": "/cockpit"
   }
  ],
  "title": "ISM"

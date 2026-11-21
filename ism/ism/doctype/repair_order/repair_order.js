@@ -1324,6 +1324,10 @@ frappe.ui.form.on("Repair Order", {
 			frappe.set_route("List", "Schedule Entry", "Calendar");
 		}, __("Navigation"));
 
+		frm.add_custom_button(__("Open Shop Board"), () => {
+			window.open(`/board?thread=${encodeURIComponent(`RO:${frm.doc.name}`)}`, "_blank");
+		}, __("Navigation"));
+
 		if (frm.doc.approval_token) {
 			frm.add_custom_button(__("🔗 Customer Approval Portal"), () => {
 				window.open(
