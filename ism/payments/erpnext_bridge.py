@@ -132,12 +132,12 @@ def _get_square_settings_snapshot_safe() -> dict[str, Any]:
 
 	singles = frappe.db.get_singles_dict("ISM Settings") or {}
 	return {
-		"square_environment": _clean_str(singles.get("square_environment")) or SQUARE_ENV_DISABLED,
-		"square_currency": _clean_str(singles.get("square_currency")) or SQUARE_CURRENCY,
-		"square_mode_of_payment": _clean_str(singles.get("square_mode_of_payment")) or SQUARE_DEFAULT_MOP,
-		"square_bank_account": _clean_str(singles.get("square_bank_account")),
-		"square_application_id": _clean_str(singles.get("square_application_id")),
-		"square_location_id": _clean_str(singles.get("square_location_id")),
+		"environment": _clean_str(singles.get("square_environment")) or SQUARE_ENV_DISABLED,
+		"currency": _clean_str(singles.get("square_currency")) or SQUARE_CURRENCY,
+		"mode_of_payment": _clean_str(singles.get("square_mode_of_payment")) or SQUARE_DEFAULT_MOP,
+		"bank_account": _clean_str(singles.get("square_bank_account")),
+		"application_id": _clean_str(singles.get("square_application_id")),
+		"location_id": _clean_str(singles.get("square_location_id")),
 	}
 
 
@@ -534,10 +534,15 @@ def execute_tokenized_payment(
 	idem_key = normalize_idempotency_key(idempotency_key)
 
 	settings = _get_square_settings_snapshot_safe()
-	square_env = _clean_str(settings.get("square_environment")) or SQUARE_ENV_DISABLED
+	square_env = (
+		_clean_str(settings.get("environment") or settings.get("square_environment")) or SQUARE_ENV_DISABLED
+	)
 	if square_env == SQUARE_ENV_DISABLED:
 		frappe.throw(_("Online Square payments are currently disabled."), frappe.ValidationError)
-	assert_cad_currency(settings.get("square_currency") or SQUARE_CURRENCY, context="ISM Settings Square")
+	assert_cad_currency(
+		settings.get("currency") or settings.get("square_currency") or SQUARE_CURRENCY,
+		context="ISM Settings Square",
+	)
 
 	client = _resolve_square_client(square_client, settings)
 

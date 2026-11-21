@@ -3,7 +3,8 @@
 
 """ISM Square CAD Payments & ERPNext Accounting Bridge package.
 
-Wave 1 re-exports frozen contracts; Wave 3 adds final facade exports.
+Frozen public Python facade for Project 4 Customer Portal, Desk actions,
+whitelisted API endpoints, and accounting reconciliation.
 """
 
 from ism.payments.contracts import (
@@ -54,6 +55,28 @@ from ism.payments.contracts import (
 	cents_to_cad,
 	normalize_idempotency_key,
 )
+from ism.payments.deposit_requests import (
+	cancel_deposit_request,
+	create_deposit_request,
+	get_ro_payment_state,
+	list_ro_payment_transactions,
+)
+from ism.payments.erpnext_bridge import (
+	execute_tokenized_payment,
+	process_square_webhook_event,
+	reconcile_and_post_square_payment,
+	resolve_square_accounting_config,
+)
+from ism.payments.square_client import (
+	SquareApiError,
+	get_sdk_boot_config,
+	get_square_client,
+)
+from ism.payments.webhooks import (
+	compute_square_webhook_signature,
+	parse_square_webhook_event,
+	verify_square_webhook_signature,
+)
 
 __all__ = [
 	"DEPOSIT_REQ_CANCELLED",
@@ -92,6 +115,7 @@ __all__ = [
 	"WEBHOOK_SUPPORTED_EVENTS",
 	"PaymentStateSummary",
 	"SquareAccountingConfig",
+	"SquareApiError",
 	"SquareChargeResult",
 	"SquareSdkBootConfig",
 	"WebhookEventNormalized",
@@ -100,6 +124,19 @@ __all__ = [
 	"build_square_deposit_remark",
 	"build_square_invoice_remark",
 	"cad_to_cents",
+	"cancel_deposit_request",
 	"cents_to_cad",
+	"compute_square_webhook_signature",
+	"create_deposit_request",
+	"execute_tokenized_payment",
+	"get_ro_payment_state",
+	"get_sdk_boot_config",
+	"get_square_client",
+	"list_ro_payment_transactions",
 	"normalize_idempotency_key",
+	"parse_square_webhook_event",
+	"process_square_webhook_event",
+	"reconcile_and_post_square_payment",
+	"resolve_square_accounting_config",
+	"verify_square_webhook_signature",
 ]
