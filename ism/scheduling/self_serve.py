@@ -824,6 +824,37 @@ def _is_snapshot_isolation_conflict(exc: Exception) -> bool:
 	return isinstance(exc, frappe.QueryDeadlockError) and "1020" in str(exc)
 
 
+def _can_safely_restart_read_transaction() -> bool:
+	"""Return True iff the current DB transaction has zero writes, zero pending callbacks, and tx control enabled."""
+	db = getattr(frappe, "db", None)
+	if db is None:
+		return False
+	if getattr(db, "_disable_transaction_control", False):
+		return False
+
+	tx_writes = getattr(db, "transaction_writes", None)
+	if tx_writes is None or cint(tx_writes) != 0:
+		return False
+
+	for cb_attr in ("before_commit", "after_commit", "before_rollback", "after_rollback"):
+		cb = getattr(db, cb_attr, None)
+		if cb is None:
+			continue
+		try:
+			if len(cb) > 0:
+				return False
+		except TypeError:
+			funcs = getattr(cb, "_functions", None)
+			if funcs:
+				return False
+
+	for sp_attr in ("_savepoints", "savepoints"):
+		if getattr(db, sp_attr, None):
+			return False
+
+	return True
+
+
 def reschedule_self_serve_appointment(
 	schedule_entry: str,
 	target_date: str,
@@ -868,7 +899,11 @@ def reschedule_self_serve_appointment(
 			eligibility = evaluate_reschedule_eligibility(se, now_dt=now_val, use_current_read=True)
 			break
 		except Exception as exc:
-			if attempt == 0 and _is_snapshot_isolation_conflict(exc):
+			if (
+				attempt == 0
+				and _is_snapshot_isolation_conflict(exc)
+				and _can_safely_restart_read_transaction()
+			):
 				frappe.db.rollback()
 				if hasattr(frappe, "clear_document_cache"):
 					frappe.clear_document_cache("Schedule Entry", se_name)
