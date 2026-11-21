@@ -32,7 +32,8 @@ def sanitize_invoice_filename(raw_name: str | None) -> str:
 	base = _clean_single_line(raw_name or "", default="Invoice.pdf")
 	# Strip directory components before character sanitization
 	base = base.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-	sanitized = _SAFE_FILENAME_RE.sub("-", base).strip(".-")
+	sanitized = _SAFE_FILENAME_RE.sub("-", base)
+	sanitized = re.sub(r"\.{2,}", "-", sanitized).strip(".-")
 	if not sanitized:
 		sanitized = "Invoice"
 	if not sanitized.lower().endswith(".pdf"):
@@ -57,27 +58,43 @@ def _resolve_ro_doc(repair_order: str | Any):
 		if not ro_name:
 			frappe.throw(_("Repair Order is required."), frappe.ValidationError)
 		return frappe.get_doc("Repair Order", ro_name)
-	if repair_order is not None and getattr(repair_order, "name", None):
+	if (
+		repair_order is not None
+		and getattr(repair_order, "doctype", None) == "Repair Order"
+		and getattr(repair_order, "name", None)
+	):
 		return repair_order
 	frappe.throw(_("Repair Order is required."), frappe.ValidationError)
+
+
+def _parse_single_email(raw_email: Any) -> str | None:
+	if not isinstance(raw_email, str):
+		return None
+	if "\r" in raw_email or "\n" in raw_email or "\x00" in raw_email:
+		return None
+	cleaned = raw_email.strip()
+	if not cleaned or "," in cleaned or ";" in cleaned:
+		return None
+	validated = validate_email_address(cleaned, throw=False)
+	if not validated:
+		return None
+	return validated.strip()
 
 
 def _resolve_customer_default_email(ro_doc) -> str | None:
 	customer = getattr(ro_doc, "customer", None)
 	if customer:
 		cust_email = frappe.db.get_value("Customer", customer, "email_id")
-		if isinstance(cust_email, str) and cust_email.strip():
-			validated = validate_email_address(cust_email.strip(), throw=False)
-			if validated:
-				return validated.strip()
+		parsed = _parse_single_email(cust_email)
+		if parsed:
+			return parsed
 
 	contact_person = getattr(ro_doc, "contact_person", None)
 	if contact_person:
 		contact_email = frappe.db.get_value("Contact", contact_person, "email_id")
-		if isinstance(contact_email, str) and contact_email.strip():
-			validated = validate_email_address(contact_email.strip(), throw=False)
-			if validated:
-				return validated.strip()
+		parsed = _parse_single_email(contact_email)
+		if parsed:
+			return parsed
 
 	return None
 
@@ -122,7 +139,9 @@ def _resolve_validated_ro_and_invoice(repair_order: str | Any) -> tuple[Any, dic
 			frappe.ValidationError,
 		)
 
-	if si_row.get("customer") != getattr(ro_doc, "customer", None):
+	ro_customer = getattr(ro_doc, "customer", None)
+	si_customer = si_row.get("customer")
+	if not ro_customer or not si_customer or si_customer != ro_customer:
 		frappe.throw(
 			_("Linked Sales Invoice does not match the Repair Order customer."),
 			frappe.ValidationError,
@@ -138,7 +157,10 @@ def _resolve_portal_invoice_print_format() -> str:
 		configured = None
 
 	candidate = _clean_single_line(configured, default=PORTAL_DEFAULT_INVOICE_PRINT_FORMAT)
-	if candidate != PORTAL_DEFAULT_INVOICE_PRINT_FORMAT and not frappe.db.exists("Print Format", candidate):
+	if candidate != PORTAL_DEFAULT_INVOICE_PRINT_FORMAT and not frappe.db.exists(
+		"Print Format",
+		{"name": candidate, "doc_type": "Sales Invoice", "disabled": 0},
+	):
 		return PORTAL_DEFAULT_INVOICE_PRINT_FORMAT
 	return candidate or PORTAL_DEFAULT_INVOICE_PRINT_FORMAT
 
@@ -168,7 +190,7 @@ def _generate_invoice_pdf_bytes(si_name: str, print_format: str) -> bytes:
 
 	if isinstance(pdf_data, bytearray):
 		pdf_data = bytes(pdf_data)
-	if not isinstance(pdf_data, bytes) or not pdf_data:
+	if not isinstance(pdf_data, bytes) or not pdf_data.startswith(b"%PDF"):
 		frappe.throw(_("Unable to generate Sales Invoice PDF."), frappe.ValidationError)
 	return pdf_data
 
@@ -222,7 +244,9 @@ def get_ro_invoice_summary(ro_doc) -> dict[str, Any]:
 		return unavailable
 	if cint(si_row.get("docstatus")) != 1:
 		return unavailable
-	if si_row.get("customer") != getattr(ro_doc, "customer", None):
+	ro_customer = getattr(ro_doc, "customer", None)
+	si_customer = si_row.get("customer")
+	if not ro_customer or not si_customer or si_customer != ro_customer:
 		return unavailable
 
 	grand_total, paid_amount, outstanding_amount, is_paid, payment_badge = _compute_invoice_amounts(si_row)
@@ -248,28 +272,25 @@ def get_ro_invoice_summary(ro_doc) -> dict[str, Any]:
 	}
 
 
+def _render_pdf_for_invoice(si_name: str) -> tuple[str, bytes]:
+	print_format = _resolve_portal_invoice_print_format()
+	pdf_bytes = _generate_invoice_pdf_bytes(si_name, print_format)
+	filename = sanitize_invoice_filename(f"Invoice-{si_name}.pdf")
+	return filename, pdf_bytes
+
+
 def render_sales_invoice_pdf(repair_order: str) -> tuple[str, bytes]:
 	"""Validate RO/Sales Invoice linkage and render official PDF bytes."""
 	_, si_row = _resolve_validated_ro_and_invoice(repair_order)
-	print_format = _resolve_portal_invoice_print_format()
-	pdf_bytes = _generate_invoice_pdf_bytes(si_row["name"], print_format)
-	filename = sanitize_invoice_filename(f"Invoice-{si_row['name']}.pdf")
-	return filename, pdf_bytes
+	return _render_pdf_for_invoice(si_row["name"])
 
 
 def _validate_target_email(ro_doc, recipient_email: str | None) -> str:
 	if recipient_email is not None:
-		if not isinstance(recipient_email, str):
+		parsed = _parse_single_email(recipient_email)
+		if not parsed:
 			frappe.throw(_("Invalid recipient email address."), frappe.ValidationError)
-		if "\r" in recipient_email or "\n" in recipient_email or "\x00" in recipient_email:
-			frappe.throw(_("Recipient email address contains invalid characters."), frappe.ValidationError)
-		cleaned = recipient_email.strip()
-		if not cleaned or "," in cleaned or ";" in cleaned:
-			frappe.throw(_("Invalid recipient email address."), frappe.ValidationError)
-		validated = validate_email_address(cleaned, throw=False)
-		if not validated:
-			frappe.throw(_("Invalid recipient email address."), frappe.ValidationError)
-		return validated.strip()
+		return parsed
 
 	default_email = _resolve_customer_default_email(ro_doc)
 	if not default_email:
@@ -328,7 +349,7 @@ def email_sales_invoice_copy(
 	ro_doc, si_row = _resolve_validated_ro_and_invoice(repair_order)
 	target_email = _validate_target_email(ro_doc, recipient_email)
 
-	filename, pdf_bytes = render_sales_invoice_pdf(ro_doc.name)
+	filename, pdf_bytes = _render_pdf_for_invoice(si_row["name"])
 	grand_total, paid_amount, outstanding_amount, is_paid, payment_badge = _compute_invoice_amounts(si_row)
 	currency = _clean_single_line(si_row.get("currency"), default="CAD")
 	shop_name = _clean_single_line(
@@ -365,6 +386,13 @@ def email_sales_invoice_copy(
 	)
 
 	masked_recipient = mask_email_address(dispatch_result.recipient or target_email)
+	if dispatch_result.success:
+		message = _("Invoice {0} sent to {1}.").format(si_row["name"], masked_recipient or "")
+	elif dispatch_result.error_code == "SMTP_ERROR":
+		message = _("Unable to send invoice email. Please try again later.")
+	else:
+		message = dispatch_result.error or _("Unable to send invoice email.")
+
 	return {
 		"success": bool(dispatch_result.success),
 		"sales_invoice": si_row["name"],
@@ -372,9 +400,5 @@ def email_sales_invoice_copy(
 		"rate_limited": bool(dispatch_result.rate_limited),
 		"retry_after_seconds": int(dispatch_result.retry_after_seconds or 0),
 		"error_code": dispatch_result.error_code,
-		"message": (
-			_("Invoice {0} sent to {1}.").format(si_row["name"], masked_recipient or "")
-			if dispatch_result.success
-			else (dispatch_result.error or _("Unable to send invoice email."))
-		),
+		"message": message,
 	}

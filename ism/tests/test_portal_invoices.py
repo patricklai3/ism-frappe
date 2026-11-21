@@ -10,6 +10,7 @@ from unittest.mock import patch
 import frappe
 
 from ism.comms.email_dispatch import clear_email_rate_limits
+from ism.portal.contracts import find_forbidden_portal_keys
 from ism.portal.invoices import (
 	build_invoice_download_headers,
 	email_sales_invoice_copy,
@@ -166,6 +167,7 @@ class TestPortalInvoices(ISMTestCase):
 			summary["download_url"],
 			f"/api/method/ism.api.portal.download_invoice_pdf?repair_order={ro.name}",
 		)
+		self.assertEqual(find_forbidden_portal_keys(summary), [])
 
 		filename, pdf_bytes = render_sales_invoice_pdf(ro.name)
 		self.assertTrue(filename.startswith("Invoice-"))
@@ -190,10 +192,13 @@ class TestPortalInvoices(ISMTestCase):
 		self.assertTrue(call_kwargs["attachments"][0]["fcontent"].startswith(b"%PDF"))
 
 		html_body = call_kwargs["message"]
+		subject = call_kwargs["subject"]
 		self.assertIn("Balance Due", html_body)
 		self.assertIn("/portal", html_body)
 		self.assertNotIn("secret-approval-tok-123", html_body)
+		self.assertNotIn("secret-approval-tok-123", subject)
 		self.assertNotIn("pin_to_drive", html_body.lower())
+		self.assertNotIn("pin_to_drive", subject.lower())
 
 	def test_paid_submitted_invoice_unlocks_and_reports_paid_in_full(self):
 		"""Submitted PAID Sales Invoice unlocks cleanly with Paid badge and Paid in Full email."""
@@ -243,17 +248,21 @@ class TestPortalInvoices(ISMTestCase):
 		self.assertTrue(pdf_bytes.startswith(b"%PDF"))
 		self.assertTrue(filename.endswith(".pdf"))
 
-		# Verify CRLF/path traversal filename sanitization & security headers
-		unsafe_name = "../../evil\r\nSet-Cookie: pwn=1; filename=bad\".pdf"
-		clean_name = sanitize_invoice_filename(unsafe_name)
-		self.assertNotIn("\r", clean_name)
-		self.assertNotIn("\n", clean_name)
-		self.assertNotIn("..", clean_name)
-		self.assertNotIn("/", clean_name)
-		self.assertNotIn('"', clean_name)
-		self.assertTrue(clean_name.endswith(".pdf"))
+		# Verify CRLF/path traversal filename sanitization (including embedded '..') & security headers
+		for unsafe_name in (
+			"../../evil\r\nSet-Cookie: pwn=1; filename=bad\".pdf",
+			"../../evil..name.pdf",
+			"Invoice-..bad.pdf",
+		):
+			clean_name = sanitize_invoice_filename(unsafe_name)
+			self.assertNotIn("\r", clean_name)
+			self.assertNotIn("\n", clean_name)
+			self.assertNotIn("..", clean_name)
+			self.assertNotIn("/", clean_name)
+			self.assertNotIn('"', clean_name)
+			self.assertTrue(clean_name.endswith(".pdf"))
 
-		headers = build_invoice_download_headers(unsafe_name)
+		headers = build_invoice_download_headers("../../evil\r\nSet-Cookie: pwn=1; filename=bad\".pdf")
 		self.assertEqual(headers["Content-Type"], "application/pdf")
 		self.assertTrue(headers["Content-Disposition"].startswith('attachment; filename="'))
 		self.assertNotIn("\r", headers["Content-Disposition"])
@@ -328,3 +337,34 @@ class TestPortalInvoices(ISMTestCase):
 		self.assertGreater(ip2["retry_after_seconds"], 0)
 		self.assertEqual(ip2["error_code"], "RATE_LIMITED")
 		self.assertEqual(mock_sendmail.call_count, 1)
+
+	def test_guest_execution_and_smtp_error_masking(self):
+		"""Guest user can render PDF and send invoice email; raw SMTP errors are masked."""
+		ro = self._create_ro()
+		si = self._create_sales_invoice(rate=110.0, submit=True)
+		ro.db_set("sales_invoice", si.name, update_modified=False)
+		ro.reload()
+
+		prev_user = frappe.session.user
+		frappe.set_user("Guest")
+		try:
+			summary = get_ro_invoice_summary(ro)
+			self.assertTrue(summary["available"])
+			self.assertEqual(find_forbidden_portal_keys(summary), [])
+
+			filename, pdf_bytes = render_sales_invoice_pdf(ro.name)
+			self.assertTrue(filename.endswith(".pdf"))
+			self.assertTrue(pdf_bytes.startswith(b"%PDF"))
+
+			with patch("frappe.sendmail") as mock_sendmail:
+				ok_res = email_sales_invoice_copy(ro.name, client_ip="203.0.113.55")
+			self.assertTrue(ok_res["success"])
+			mock_sendmail.assert_called_once()
+
+			with patch("frappe.sendmail", side_effect=RuntimeError("smtp://internal-secret-host:587 failed")):
+				err_res = email_sales_invoice_copy(ro.name, client_ip="203.0.113.56")
+			self.assertFalse(err_res["success"])
+			self.assertEqual(err_res["error_code"], "SMTP_ERROR")
+			self.assertNotIn("internal-secret-host", err_res["message"])
+		finally:
+			frappe.set_user(prev_user)
