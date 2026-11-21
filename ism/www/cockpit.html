@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1120">
+  <title>{{ title or "ISM Shop OS — Cockpit" }}</title>
+  <link rel="stylesheet" href="/assets/ism/board/board.css">
+  <link rel="stylesheet" href="/assets/ism/cockpit/cockpit.css">
+</head>
+<body class="cockpit-body">
+  <div class="cockpit-shell">
+    <!-- Shared Shop OS Top Navigation Bar -->
+    <nav class="shop-os-nav" aria-label="ISM Shop OS Navigation">
+      <div class="shop-os-nav__brand">ISM Shop OS</div>
+      <div class="shop-os-nav__tabs" role="tablist" aria-label="Shop OS Views">
+        <a class="shop-os-nav__tab" href="/board" role="tab" aria-selected="false">Board</a>
+        <a class="shop-os-nav__tab is-active" href="/cockpit" role="tab" aria-selected="true">Cockpit</a>
+      </div>
+      <div class="shop-os-nav__shortcuts">
+        <a class="shop-os-nav__pill" href="/board?thread=SHOP%3AINTAKE">+ New Intake</a>
+        <a class="shop-os-nav__pill" href="/board?thread=SHOP%3AAP_RECEIVING">Receive / Vendor Bill</a>
+        <a class="shop-os-nav__pill" href="/app/ism">Desk</a>
+      </div>
+      <div class="shop-os-nav__user" title="{{ user_role_label }}">
+        <span class="cockpit-user-name">{{ user_full_name }}</span>
+        <span class="cockpit-user-role">{{ user_role_label }}</span>
+      </div>
+    </nav>
+
+    <!-- Cockpit Operational Controls Bar -->
+    <header class="cockpit-toolbar">
+      <div class="cockpit-toolbar__left">
+        <div class="cockpit-status-group">
+          <span id="bottleneckPill" class="cockpit-pill cockpit-pill--sky">Loading…</span>
+          <span id="capacityMeta" class="cockpit-pill">—</span>
+          <span id="tagSaturationGroup" class="cockpit-tag-sat"></span>
+        </div>
+      </div>
+
+      <div class="cockpit-toolbar__right">
+        <div class="cockpit-date-nav" role="group" aria-label="Cockpit Date Switcher">
+          <button id="prevDayBtn" class="cockpit-btn cockpit-btn--icon" type="button" title="Previous day" aria-label="Previous day">&lt;</button>
+          <input id="datePicker" class="cockpit-date-input" type="date" aria-label="Cockpit Date">
+          <button id="nextDayBtn" class="cockpit-btn cockpit-btn--icon" type="button" title="Next day" aria-label="Next day">&gt;</button>
+          <button id="todayBtn" class="cockpit-btn" type="button">Today</button>
+        </div>
+
+        <button id="refreshBtn" class="cockpit-btn cockpit-btn--primary" type="button">Refresh</button>
+
+        <div class="cockpit-sync-meta">
+          <span id="realtimeBadge" class="cockpit-live-dot" title="Realtime connection status">Live</span>
+          <span id="updatedAt" class="cockpit-updated-at">—</span>
+        </div>
+
+        <div class="cockpit-quick-triggers">
+          <a class="cockpit-trigger-btn cockpit-trigger-btn--intake" href="/board?thread=SHOP%3AINTAKE">+ New Intake</a>
+          <a class="cockpit-trigger-btn cockpit-trigger-btn--ap" href="/board?thread=SHOP%3AAP_RECEIVING">Receive / Vendor Bill</a>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Cockpit Workspace -->
+    <div class="cockpit-workspace">
+      <!-- Left Rail: Prioritized Action Queue -->
+      <aside class="cockpit-action-rail" aria-label="Prioritized Action Queue">
+        <div class="cockpit-rail-head">
+          <div class="cockpit-rail-title-row">
+            <h2 class="cockpit-section-title">Action Queue</h2>
+            <div class="cockpit-rail-counts">
+              <span id="suppressedPill" class="cockpit-pill cockpit-pill--muted" style="display:none;"></span>
+              <span id="queueCountPill" class="cockpit-pill cockpit-pill--green">0</span>
+            </div>
+          </div>
+
+          <div class="cockpit-status-tabs" id="queueStatusTabs" role="tablist" aria-label="Queue Status Filter">
+            <button class="cockpit-tab is-active" data-status="open" type="button" role="tab" aria-selected="true">
+              Open <span class="cockpit-tab__count" data-count-for="open">0</span>
+            </button>
+            <button class="cockpit-tab" data-status="snoozed" type="button" role="tab" aria-selected="false">
+              Snoozed <span class="cockpit-tab__count" data-count-for="snoozed">0</span>
+            </button>
+            <button class="cockpit-tab" data-status="dismissed" type="button" role="tab" aria-selected="false">
+              Dismissed <span class="cockpit-tab__count" data-count-for="dismissed">0</span>
+            </button>
+            <button class="cockpit-tab" data-status="all" type="button" role="tab" aria-selected="false">
+              All <span class="cockpit-tab__count" data-count-for="all">0</span>
+            </button>
+          </div>
+
+          <div class="cockpit-priority-filters" id="priorityFilters" role="group" aria-label="Priority Filter">
+            <button class="cockpit-chip is-active" data-prio="ALL" type="button">All</button>
+            <button class="cockpit-chip" data-prio="Critical" type="button">Critical</button>
+            <button class="cockpit-chip" data-prio="High" type="button">High</button>
+            <button class="cockpit-chip" data-prio="Medium" type="button">Medium</button>
+          </div>
+        </div>
+
+        <div id="actionQueueList" class="cockpit-rail-list" aria-live="polite"></div>
+      </aside>
+
+      <!-- Right Main Pane: 7 Gauges + Coupled Bay & Tech Swimlane -->
+      <main class="cockpit-main">
+        <div id="errBanner" class="cockpit-banner cockpit-banner--error" role="alert" style="display:none;"></div>
+        <div id="toastBanner" class="cockpit-banner cockpit-banner--info" role="status" style="display:none;"></div>
+
+        <!-- 7 Health & Velocity Gauges -->
+        <section aria-label="Shop Health and Velocity Gauges">
+          <div id="gaugeGrid" class="cockpit-gauge-grid"></div>
+        </section>
+
+        <!-- Coupled Bay & Technician Swimlane -->
+        <section class="cockpit-swimlane-panel" aria-label="Coupled Bay and Technician Swimlane">
+          <div class="cockpit-swim-head">
+            <div class="cockpit-swim-head__left">
+              <h2 class="cockpit-section-title">Bay &amp; Technician Swimlane</h2>
+              <span id="swimDateLabel" class="cockpit-pill">—</span>
+              <span class="cockpit-pill cockpit-pill--sky" title="Seam 4 Invariant: Swimlane uses Internal Capacity Start (T), never customer arrival offset">Internal Time (T)</span>
+              <span id="collisionBadge" class="cockpit-pill cockpit-pill--red" style="display:none;"></span>
+            </div>
+            <div class="cockpit-legend" aria-label="Swimlane Legend">
+              <span class="cockpit-leg-item"><span class="cockpit-swatch cockpit-swatch--active"></span>Active</span>
+              <span class="cockpit-leg-item"><span class="cockpit-swatch cockpit-swatch--scheduled"></span>Scheduled</span>
+              <span class="cockpit-leg-item"><span class="cockpit-swatch cockpit-swatch--dead-lift"></span>Dead Lift &gt;30m</span>
+              <span class="cockpit-leg-item"><span class="cockpit-swatch cockpit-swatch--overrun"></span>&gt; P80 / Spillover</span>
+              <span class="cockpit-leg-item"><span class="cockpit-swatch cockpit-swatch--completed"></span>Completed</span>
+            </div>
+          </div>
+
+          <div id="swimBody" class="cockpit-swim-body"></div>
+          <div id="unslottedBar" class="cockpit-strip cockpit-strip--warn" style="display:none;"></div>
+          <div id="unscheduledBar" class="cockpit-strip cockpit-strip--sky" style="display:none;"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    window.ISM_COCKPIT_BOOT = {{ cockpit_boot_json | safe }};
+  </script>
+  <script type="module" src="/assets/ism/cockpit/cockpit.js"></script>
+</body>
+</html>
