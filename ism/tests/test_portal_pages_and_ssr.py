@@ -81,20 +81,23 @@ class TestPortalPagesAndSSR(ISMTestCase):
 		clear_portal_auth_rate_limits()
 
 	def tearDown(self):
-		frappe.set_user(self._saved_user)
-		if self._had_cookie_manager:
-			frappe.local.cookie_manager = self._saved_cookie_manager
-		elif hasattr(frappe.local, "cookie_manager"):
-			delattr(frappe.local, "cookie_manager")
-		if self._had_request:
-			frappe.local.request = self._saved_request
-		elif hasattr(frappe.local, "request"):
-			delattr(frappe.local, "request")
-		clear_portal_auth_rate_limits()
 		try:
-			self._save_settings(self._saved_settings)
-		finally:
 			super().tearDown()
+		finally:
+			frappe.set_user(self._saved_user)
+			if self._had_cookie_manager:
+				frappe.local.cookie_manager = self._saved_cookie_manager
+			elif hasattr(frappe.local, "cookie_manager"):
+				delattr(frappe.local, "cookie_manager")
+			if self._had_request:
+				frappe.local.request = self._saved_request
+			elif hasattr(frappe.local, "request"):
+				delattr(frappe.local, "request")
+			clear_portal_auth_rate_limits()
+			self._save_settings(self._saved_settings)
+			frappe.clear_cache(doctype="ISM Settings")
+			if hasattr(frappe.db, "value_cache"):
+				frappe.db.value_cache.clear()
 
 	def _attach_cookie_manager(self) -> CookieManager:
 		cm = CookieManager()
@@ -323,6 +326,77 @@ class TestPortalPagesAndSSR(ISMTestCase):
 			self.assertEqual(bad_ctx.token, "")
 			self.assertFalse(bad_ctx.approval_data["valid"])
 			self.assertFalse(bad_ctx.portal_boot["authenticated"])
+
+	def test_path1_exchange_commits_when_not_in_test_and_skips_commit_on_invalid_token(self):
+		_customer, _vehicle, ro, se = self._create_seeded_visit()
+		ro_token, _url = get_or_create_approval_token(ro.name)
+		booking_url = create_booking_portal_link(se.name)
+		booking_token = parse_qs(urlparse(booking_url).query)["booking_token"][0]
+
+		prev_in_test = getattr(frappe.flags, "in_test", True)
+		frappe.flags.in_test = False
+		try:
+			# Valid /portal?token=... commits when in_test=False
+			self._attach_request(cookie_value=None, path="/portal")
+			self._attach_cookie_manager()
+			with (
+				patch.object(frappe, "form_dict", frappe._dict({"token": ro_token})),
+				patch.object(frappe.db, "commit") as mock_commit,
+			):
+				ctx = frappe._dict()
+				get_portal_page_context(ctx)
+				self.assertTrue(ctx.portal_boot["authenticated"])
+				mock_commit.assert_called_once()
+
+			# Valid /portal?booking_token=... commits when in_test=False
+			self._attach_request(cookie_value=None, path="/portal")
+			self._attach_cookie_manager()
+			with (
+				patch.object(frappe, "form_dict", frappe._dict({"booking_token": booking_token})),
+				patch.object(frappe.db, "commit") as mock_commit,
+			):
+				ctx = frappe._dict()
+				get_portal_page_context(ctx)
+				self.assertTrue(ctx.portal_boot["authenticated"])
+				mock_commit.assert_called_once()
+
+			# Valid /quote-approval?token=... commits when in_test=False
+			self._attach_request(cookie_value=None, path="/quote-approval")
+			self._attach_cookie_manager()
+			with (
+				patch.object(frappe, "form_dict", frappe._dict({"token": ro_token})),
+				patch.object(frappe.db, "commit") as mock_commit,
+			):
+				ctx = frappe._dict()
+				get_quote_approval_context(ctx)
+				self.assertTrue(ctx.portal_boot["authenticated"])
+				mock_commit.assert_called_once()
+
+			# Invalid token on /portal does NOT commit
+			self._attach_request(cookie_value=None, path="/portal")
+			self._attach_cookie_manager()
+			with (
+				patch.object(frappe, "form_dict", frappe._dict({"token": "bad-token-no-commit"})),
+				patch.object(frappe.db, "commit") as mock_commit,
+			):
+				ctx = frappe._dict()
+				get_portal_page_context(ctx)
+				self.assertFalse(ctx.portal_boot["authenticated"])
+				mock_commit.assert_not_called()
+
+			# Invalid token on /quote-approval does NOT commit
+			self._attach_request(cookie_value=None, path="/quote-approval")
+			self._attach_cookie_manager()
+			with (
+				patch.object(frappe, "form_dict", frappe._dict({"token": "bad-token-no-commit"})),
+				patch.object(frappe.db, "commit") as mock_commit,
+			):
+				ctx = frappe._dict()
+				get_quote_approval_context(ctx)
+				self.assertFalse(ctx.portal_boot["authenticated"])
+				mock_commit.assert_not_called()
+		finally:
+			frappe.flags.in_test = prev_in_test
 
 	def test_portal_public_asset_manifest_complete_and_non_empty(self):
 		portal_public_dir = frappe.get_app_path("ism", "public", "portal")

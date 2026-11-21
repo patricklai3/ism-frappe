@@ -54,6 +54,8 @@ def get_context(context):
 			if exchange.get("valid"):
 				authenticated = True
 				active_ro = exchange.get("repair_order")
+				if not getattr(frappe.flags, "in_test", False):
+					frappe.db.commit()
 			else:
 				token_error = _INVALID_LINK_SIGNIN_MSG
 		except (frappe.ValidationError, frappe.TooManyRequestsError) as exc:
@@ -72,6 +74,8 @@ def get_context(context):
 				authenticated = True
 				active_schedule_entry = exchange.get("schedule_entry")
 				active_ro = exchange.get("repair_order")
+				if not getattr(frappe.flags, "in_test", False):
+					frappe.db.commit()
 			else:
 				token_error = _INVALID_LINK_SIGNIN_MSG
 		except (frappe.ValidationError, frappe.TooManyRequestsError) as exc:
