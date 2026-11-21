@@ -61,7 +61,18 @@
   "sb_pricing",
   "default_labor_rate",
   "shop_supplies_percentage",
-  "shop_supplies_cap"
+  "shop_supplies_cap",
+  "sb_square_payments",
+  "square_environment",
+  "square_application_id",
+  "square_location_id",
+  "square_currency",
+  "cb_square_payments",
+  "square_access_token",
+  "square_webhook_signature_key",
+  "square_webhook_notification_url",
+  "square_mode_of_payment",
+  "square_bank_account"
  ],
  "fields": [
   {
@@ -401,6 +412,67 @@
    "fieldname": "shop_supplies_cap",
    "fieldtype": "Currency",
    "label": "Shop Supplies Cap ($)"
+  },
+  {
+   "fieldname": "sb_square_payments",
+   "fieldtype": "Section Break",
+   "label": "Square Online Payments (CAD)"
+  },
+  {
+   "default": "Disabled",
+   "fieldname": "square_environment",
+   "fieldtype": "Select",
+   "label": "Square Environment",
+   "options": "Disabled\nSandbox\nProduction\nMock (Deterministic Test)"
+  },
+  {
+   "fieldname": "square_application_id",
+   "fieldtype": "Data",
+   "label": "Square Application ID"
+  },
+  {
+   "fieldname": "square_location_id",
+   "fieldtype": "Data",
+   "label": "Square Location ID"
+  },
+  {
+   "default": "CAD",
+   "fieldname": "square_currency",
+   "fieldtype": "Link",
+   "label": "Square Currency",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_square_payments",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "square_access_token",
+   "fieldtype": "Password",
+   "label": "Square Access Token"
+  },
+  {
+   "fieldname": "square_webhook_signature_key",
+   "fieldtype": "Password",
+   "label": "Square Webhook Signature Key"
+  },
+  {
+   "fieldname": "square_webhook_notification_url",
+   "fieldtype": "Data",
+   "label": "Square Webhook Notification URL"
+  },
+  {
+   "fieldname": "square_mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Square Mode of Payment",
+   "options": "Mode of Payment"
+  },
+  {
+   "fieldname": "square_bank_account",
+   "fieldtype": "Link",
+   "label": "Square Bank Account",
+   "options": "Account"
   }
  ],
  "issingle": 1,

@@ -80,7 +80,16 @@
   "col_payment",
   "deposit_amount",
   "paid_amount",
-  "outstanding_amount"
+  "outstanding_amount",
+  "sec_deposit_request",
+  "deposit_request_status",
+  "deposit_request_amount",
+  "deposit_request_note",
+  "cb_deposit_request",
+  "deposit_request_requested_by",
+  "deposit_request_requested_at",
+  "deposit_request_paid_at",
+  "deposit_request_transaction"
  ],
  "fields": [
   {
@@ -557,7 +566,7 @@
    "options": "Repair Order Time Log"
   },
   {
-   "depends_on": "eval:in_list(['Work Completed', 'Billed / Paid', 'Closed / Released', 'Cancelled'], doc.status) || doc.vehicle_location == 'Completed / Parked in Lot' || doc.vehicle_released",
+   "depends_on": "eval:in_list(['Work Completed', 'Billed / Paid', 'Closed / Released', 'Cancelled'], doc.status) || doc.vehicle_location == 'Completed / Parked in Lot' || doc.vehicle_released || (doc.deposit_request_status && doc.deposit_request_status !== 'None') || flt(doc.deposit_amount) > 0",
    "fieldname": "tab_billing",
    "fieldtype": "Tab Break",
    "label": "Billing & Release"
@@ -613,6 +622,70 @@
    "read_only": 1
   },
   {
+   "fieldname": "sec_deposit_request",
+   "fieldtype": "Section Break",
+   "label": "Online Deposit Request"
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "None",
+   "fieldname": "deposit_request_status",
+   "fieldtype": "Select",
+   "label": "Deposit Request Status",
+   "options": "None\nRequested\nPaid\nCancelled",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "default": "0",
+   "fieldname": "deposit_request_amount",
+   "fieldtype": "Currency",
+   "label": "Deposit Request Amount",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "deposit_request_note",
+   "fieldtype": "Small Text",
+   "label": "Deposit Request Note",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_deposit_request",
+   "fieldtype": "Column Break"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "deposit_request_requested_by",
+   "fieldtype": "Link",
+   "label": "Deposit Requested By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "deposit_request_requested_at",
+   "fieldtype": "Datetime",
+   "label": "Deposit Requested At",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "deposit_request_paid_at",
+   "fieldtype": "Datetime",
+   "label": "Deposit Paid At",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "deposit_request_transaction",
+   "fieldtype": "Link",
+   "label": "Deposit Payment Transaction",
+   "options": "ISM Payment Transaction",
+   "read_only": 1
+  },
+  {
    "allow_on_submit": 1,
    "fieldname": "origin_schedule_entry",
    "fieldtype": "Link",
@@ -623,7 +696,7 @@
  ],
  "is_submittable": 0,
  "links": [],
- "modified": "2026-11-17 07:30:00.000000",
+ "modified": "2026-11-21 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Repair Order",

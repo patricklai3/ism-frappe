@@ -1105,7 +1105,9 @@ frappe.ui.form.on("Repair Order", {
 		const show_billing =
 			BILLING_RO_STATUSES.includes(status) ||
 			frm.doc.vehicle_location === "Completed / Parked in Lot" ||
-			Boolean(frm.doc.vehicle_released);
+			Boolean(frm.doc.vehicle_released) ||
+			(Boolean(frm.doc.deposit_request_status) && frm.doc.deposit_request_status !== "None") ||
+			flt(frm.doc.deposit_amount) > 0;
 
 		const toggle_tab = (fieldname, show) => {
 			const tab = frm.layout.tabs.find((t) => t.df && t.df.fieldname === fieldname);
@@ -1192,6 +1194,91 @@ frappe.ui.form.on("Repair Order", {
 			frm.add_custom_button(__("💵 Record Deposit"), () => {
 				open_record_deposit_dialog(frm);
 			}, __("Billing"));
+		}
+
+		if (!frm.doc.sales_invoice && !CLOSED_RO_STATUSES.includes(status)) {
+			if (frm.doc.deposit_request_status !== "Requested") {
+				frm.add_custom_button(__("Request Online Deposit"), () => {
+					const d = new frappe.ui.Dialog({
+						title: __("Request Online Deposit"),
+						fields: [
+							{
+								fieldname: "amount",
+								fieldtype: "Currency",
+								label: __("Deposit Amount (CAD)"),
+								reqd: 1,
+							},
+							{
+								fieldname: "note",
+								fieldtype: "Data",
+								label: __("Note (Optional)"),
+							},
+						],
+						primary_action_label: __("Send Request"),
+						primary_action(values) {
+							if (ro_flt(values.amount, 2) <= 0) {
+								frappe.msgprint(__("Deposit amount must be greater than 0."));
+								return;
+							}
+							frappe.call({
+								method: "ism.api.payments.request_ro_deposit",
+								args: {
+									repair_order: frm.doc.name,
+									amount: ro_flt(values.amount, 2),
+									note: values.note || null,
+								},
+								freeze: true,
+								freeze_message: __("Requesting online deposit..."),
+								callback: (r) => {
+									if (!r.exc) {
+										d.hide();
+										frappe.show_alert({
+											message: __("Online deposit requested."),
+											indicator: "green",
+										});
+										frm.reload_doc();
+									}
+								},
+							});
+						},
+					});
+					d.show();
+				}, __("Billing"));
+			} else {
+				frm.add_custom_button(__("Cancel Deposit Request"), () => {
+					frappe.prompt(
+						[
+							{
+								fieldname: "reason",
+								fieldtype: "Data",
+								label: __("Reason (Optional)"),
+							},
+						],
+						(values) => {
+							frappe.call({
+								method: "ism.api.payments.cancel_ro_deposit_request",
+								args: {
+									repair_order: frm.doc.name,
+									reason: values.reason || null,
+								},
+								freeze: true,
+								freeze_message: __("Cancelling deposit request..."),
+								callback: (r) => {
+									if (!r.exc) {
+										frappe.show_alert({
+											message: __("Deposit request cancelled."),
+											indicator: "orange",
+										});
+										frm.reload_doc();
+									}
+								},
+							});
+						},
+						__("Cancel Deposit Request"),
+						__("Cancel Request")
+					);
+				}, __("Billing"));
+			}
 		}
 
 		if (status === "Work Completed" && !frm.doc.vehicle_released) {

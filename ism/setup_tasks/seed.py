@@ -90,6 +90,8 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("portal_session_cookie_samesite", "Lax"),
 	("transactional_email_rate_limit_per_hour", 5),
 	("transactional_email_ip_rate_limit_per_hour", 20),
+	("square_environment", "Disabled"),
+	("square_currency", "CAD"),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
@@ -143,6 +145,131 @@ def setup_default_ism_settings():
 
 	if changed or settings.is_new():
 		settings.save(ignore_permissions=True)
+
+	ensure_square_bank_account_and_mop()
+
+
+def _find_company_bank_group_account(company_name: str, abbr: str | None) -> str | None:
+	if abbr:
+		candidate = f"Bank Accounts - {abbr}"
+		if frappe.db.get_value("Account", candidate, "is_group") == 1:
+			return candidate
+
+	parent = frappe.db.get_value(
+		"Account",
+		{"company": company_name, "account_name": "Bank Accounts", "is_group": 1},
+		"name",
+	)
+	if parent:
+		return parent
+
+	return frappe.db.get_value(
+		"Account",
+		{"company": company_name, "is_group": 1, "account_type": "Bank"},
+		"name",
+	)
+
+
+def ensure_square_bank_account_and_mop() -> dict[str, str]:
+	"""Idempotently seed per-company CAD Square Bank Accounts, Square Mode of Payment, and blank ISM Settings links.
+
+	Never overwrites operator-customized Mode of Payment Account rows or non-blank ISM Settings fields.
+	"""
+	if not frappe.db.exists("DocType", "Company") or not frappe.db.exists("DocType", "Account"):
+		return {}
+
+	company_filters = {"is_group": 0} if frappe.db.has_column("Company", "is_group") else {}
+	companies = frappe.get_all(
+		"Company",
+		filters=company_filters,
+		fields=["name", "abbr"],
+		order_by="creation asc",
+	)
+
+	company_square_accounts: dict[str, str] = {}
+	for comp in companies:
+		comp_name = comp.name
+		abbr = comp.get("abbr")
+		existing_acc = None
+		if abbr:
+			expected_name = f"Square - {abbr}"
+			if frappe.db.exists("Account", expected_name):
+				existing_acc = expected_name
+		if not existing_acc:
+			existing_acc = frappe.db.get_value(
+				"Account",
+				{"company": comp_name, "account_name": "Square", "is_group": 0},
+				"name",
+			)
+
+		if existing_acc:
+			company_square_accounts[comp_name] = existing_acc
+			continue
+
+		parent_account = _find_company_bank_group_account(comp_name, abbr)
+		if not parent_account:
+			frappe.logger("ism").warning(
+				f"Could not locate Bank Accounts group for Company '{comp_name}'; skipping Square Bank Account seed."
+			)
+			continue
+
+		try:
+			acc_doc = frappe.get_doc({
+				"doctype": "Account",
+				"account_name": "Square",
+				"parent_account": parent_account,
+				"company": comp_name,
+				"account_type": "Bank",
+				"account_currency": "CAD",
+				"is_group": 0,
+			})
+			acc_doc.insert(ignore_permissions=True)
+			company_square_accounts[comp_name] = acc_doc.name
+		except Exception as exc:
+			frappe.logger("ism").warning(f"Could not seed Square Bank Account for {comp_name}: {exc}")
+
+	if frappe.db.exists("DocType", "Mode of Payment"):
+		if not frappe.db.exists("Mode of Payment", "Square"):
+			mop_doc = frappe.get_doc({
+				"doctype": "Mode of Payment",
+				"mode_of_payment": "Square",
+				"type": "Bank",
+				"enabled": 1,
+			})
+			mop_doc.insert(ignore_permissions=True)
+
+		if frappe.db.exists("Mode of Payment", "Square") and company_square_accounts:
+			mop_doc = frappe.get_doc("Mode of Payment", "Square")
+			existing_companies = {row.company for row in (mop_doc.accounts or [])}
+			mop_changed = False
+			for comp_name, acc_name in company_square_accounts.items():
+				if comp_name not in existing_companies:
+					mop_doc.append("accounts", {"company": comp_name, "default_account": acc_name})
+					mop_changed = True
+			if mop_changed:
+				mop_doc.save(ignore_permissions=True)
+
+	if frappe.db.exists("DocType", "ISM Settings"):
+		settings = frappe.get_single("ISM Settings")
+		settings_changed = False
+		if not settings.square_mode_of_payment and frappe.db.exists("Mode of Payment", "Square"):
+			settings.square_mode_of_payment = "Square"
+			settings_changed = True
+
+		if not settings.square_bank_account and company_square_accounts:
+			default_company = frappe.defaults.get_global_default("company")
+			default_acc = (
+				company_square_accounts.get(default_company)
+				or next(iter(company_square_accounts.values()), None)
+			)
+			if default_acc:
+				settings.square_bank_account = default_acc
+				settings_changed = True
+
+		if settings_changed:
+			settings.save(ignore_permissions=True)
+
+	return company_square_accounts
 
 
 def setup_parts_item_group():

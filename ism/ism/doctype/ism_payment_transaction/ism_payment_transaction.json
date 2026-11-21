@@ -1,0 +1,363 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_core",
+  "naming_series",
+  "repair_order",
+  "sales_invoice",
+  "customer",
+  "company",
+  "cb_core",
+  "payment_intent",
+  "status",
+  "currency",
+  "amount",
+  "amount_cents",
+  "refunded_amount",
+  "sec_square",
+  "square_environment",
+  "idempotency_key",
+  "square_payment_id",
+  "square_order_id",
+  "square_location_id",
+  "square_status",
+  "cb_square",
+  "square_receipt_url",
+  "square_receipt_number",
+  "card_brand",
+  "card_last4",
+  "sec_erpnext",
+  "payment_entry",
+  "paid_to_account",
+  "posted_at",
+  "erpnext_sync_status",
+  "cb_erpnext",
+  "initiated_by",
+  "client_ip",
+  "error_message",
+  "sec_webhooks",
+  "last_webhook_event_id",
+  "last_webhook_event_type",
+  "processed_webhook_event_ids",
+  "refund_ids_json",
+  "webhook_audit_trace"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_core",
+   "fieldtype": "Section Break",
+   "label": "Transaction Summary"
+  },
+  {
+   "default": "PAYTX-.YYYY.-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "options": "PAYTX-.YYYY.-.#####",
+   "reqd": 1
+  },
+  {
+   "fieldname": "repair_order",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Repair Order",
+   "options": "Repair Order",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "search_index": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "cb_core",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "payment_intent",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Payment Intent",
+   "options": "Manual Deposit\nInvoice Balance",
+   "reqd": 1
+  },
+  {
+   "default": "Initiated",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Initiated\nPending\nCompleted\nPosted\nFailed\nVoided\nPartially Refunded\nRefunded\nReconciliation Error",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "default": "CAD",
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount (CAD)",
+   "reqd": 1
+  },
+  {
+   "fieldname": "amount_cents",
+   "fieldtype": "Int",
+   "label": "Amount (Cents)",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "refunded_amount",
+   "fieldtype": "Currency",
+   "label": "Refunded Amount (CAD)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_square",
+   "fieldtype": "Section Break",
+   "label": "Square Gateway Metadata"
+  },
+  {
+   "fieldname": "square_environment",
+   "fieldtype": "Select",
+   "label": "Square Environment",
+   "options": "Sandbox\nProduction\nMock (Deterministic Test)",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "idempotency_key",
+   "fieldtype": "Data",
+   "label": "Idempotency Key",
+   "reqd": 1,
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "square_payment_id",
+   "fieldtype": "Data",
+   "label": "Square Payment ID",
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "square_order_id",
+   "fieldtype": "Data",
+   "label": "Square Order ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "square_location_id",
+   "fieldtype": "Data",
+   "label": "Square Location ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "square_status",
+   "fieldtype": "Data",
+   "label": "Square Raw Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_square",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "square_receipt_url",
+   "fieldtype": "Data",
+   "label": "Square Receipt URL",
+   "read_only": 1
+  },
+  {
+   "fieldname": "square_receipt_number",
+   "fieldtype": "Data",
+   "label": "Square Receipt Number",
+   "read_only": 1
+  },
+  {
+   "fieldname": "card_brand",
+   "fieldtype": "Data",
+   "label": "Card Brand",
+   "read_only": 1
+  },
+  {
+   "fieldname": "card_last4",
+   "fieldtype": "Data",
+   "label": "Card Last 4",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_erpnext",
+   "fieldtype": "Section Break",
+   "label": "ERPNext Accounting & Context"
+  },
+  {
+   "fieldname": "payment_entry",
+   "fieldtype": "Link",
+   "label": "Payment Entry",
+   "options": "Payment Entry",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "paid_to_account",
+   "fieldtype": "Link",
+   "label": "Paid To Account",
+   "options": "Account",
+   "read_only": 1
+  },
+  {
+   "fieldname": "posted_at",
+   "fieldtype": "Datetime",
+   "label": "Posted At",
+   "read_only": 1
+  },
+  {
+   "default": "Not Posted",
+   "fieldname": "erpnext_sync_status",
+   "fieldtype": "Select",
+   "label": "ERPNext Sync Status",
+   "options": "Not Posted\nPosted\nManual Review Required",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_erpnext",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "initiated_by",
+   "fieldtype": "Data",
+   "label": "Initiated By",
+   "read_only": 1
+  },
+  {
+   "fieldname": "client_ip",
+   "fieldtype": "Data",
+   "label": "Client IP",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sec_webhooks",
+   "fieldtype": "Section Break",
+   "label": "Webhook Deduplication & Audit Trace"
+  },
+  {
+   "fieldname": "last_webhook_event_id",
+   "fieldtype": "Data",
+   "label": "Last Webhook Event ID",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "last_webhook_event_type",
+   "fieldtype": "Data",
+   "label": "Last Webhook Event Type",
+   "read_only": 1
+  },
+  {
+   "default": "[]",
+   "fieldname": "processed_webhook_event_ids",
+   "fieldtype": "Long Text",
+   "label": "Processed Webhook Event IDs",
+   "read_only": 1
+  },
+  {
+   "default": "[]",
+   "fieldname": "refund_ids_json",
+   "fieldtype": "Long Text",
+   "label": "Refund IDs JSON",
+   "read_only": 1
+  },
+  {
+   "default": "[]",
+   "fieldname": "webhook_audit_trace",
+   "fieldtype": "Long Text",
+   "label": "Webhook Audit Trace",
+   "read_only": 1
+  }
+ ],
+ "is_submittable": 0,
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "ISM Payment Transaction",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

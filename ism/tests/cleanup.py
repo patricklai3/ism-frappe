@@ -86,6 +86,7 @@ def cleanup_all_test_data(verbose: bool = True):
 	stub_customers_created = _ensure_stub_customers_for_orphaned_transactions(test_customers, log, errors)
 	test_ros = _find_test_repair_orders(test_customers)
 
+	_cleanup_payment_transactions(test_customers, test_ros, log, errors)
 	_cleanup_payment_entries(test_customers, test_suppliers, log, errors)
 	_cleanup_purchase_receipts(test_suppliers, test_ros, log, errors)
 	_cleanup_purchase_invoices(test_suppliers, test_ros, log, errors)
@@ -166,6 +167,31 @@ def _ensure_stub_customers_for_orphaned_transactions(known_test_customers, log, 
 					errors.append(msg)
 					log(f"Failed creating {msg}")
 	return stubs
+
+
+def _cleanup_payment_transactions(test_customers, test_ros, log, errors):
+	if not frappe.db.exists("DocType", "ISM Payment Transaction"):
+		return
+	for tx in frappe.get_all(
+		"ISM Payment Transaction",
+		fields=["name", "customer", "repair_order"],
+	):
+		if _is_test_customer_party(tx.customer, test_customers) or (tx.repair_order and tx.repair_order in test_ros):
+			if tx.repair_order and frappe.db.exists("Repair Order", tx.repair_order):
+				if frappe.db.has_column("Repair Order", "deposit_request_transaction"):
+					frappe.db.set_value(
+						"Repair Order",
+						tx.repair_order,
+						"deposit_request_transaction",
+						None,
+						update_modified=False,
+					)
+			prev_force_delete = getattr(frappe.flags, "force_delete", False)
+			frappe.flags.force_delete = True
+			try:
+				_delete_doc_safe("ISM Payment Transaction", tx.name, log, errors)
+			finally:
+				frappe.flags.force_delete = prev_force_delete
 
 
 def _cleanup_payment_entries(test_customers, test_suppliers, log, errors):
