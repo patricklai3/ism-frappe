@@ -1,0 +1,35 @@
+{% extends "templates/web.html" %}
+
+{% block head_include %}
+<meta name="ism-csrf-token" content="{{ csrf_token }}">
+<link rel="stylesheet" href="/assets/ism/portal/portal.css">
+{% endblock %}
+
+{% block page_content %}
+<div
+	id="ism-portal-root"
+	class="ism-portal-shell"
+	data-portal-boot="{{ portal_boot | tojson | forceescape }}"
+>
+	<div class="portal-ssr-shell">
+		<div class="portal-ssr-card">
+			<h1 class="portal-ssr-brand">{{ branding.company_name if branding and branding.company_name else _("Customer Portal") }}</h1>
+			{% if portal_boot and portal_boot.token_error %}
+			<div class="portal-alert portal-alert--warning" role="alert">
+				{{ portal_boot.token_error }}
+			</div>
+			{% endif %}
+			<p class="portal-ssr-status">{{ _("Loading your visit portal...") }}</p>
+			<noscript>
+				<p class="portal-alert portal-alert--danger">
+					{{ _("JavaScript is required to use the Customer Portal.") }}
+				</p>
+			</noscript>
+		</div>
+	</div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script type="module" src="/assets/ism/portal/app.js"></script>
+{% endblock %}
