@@ -1105,7 +1105,9 @@ frappe.ui.form.on("Repair Order", {
 		const show_billing =
 			BILLING_RO_STATUSES.includes(status) ||
 			frm.doc.vehicle_location === "Completed / Parked in Lot" ||
-			Boolean(frm.doc.vehicle_released);
+			Boolean(frm.doc.vehicle_released) ||
+			(Boolean(frm.doc.deposit_request_status) && frm.doc.deposit_request_status !== "None") ||
+			flt(frm.doc.deposit_amount) > 0;
 
 		const toggle_tab = (fieldname, show) => {
 			const tab = frm.layout.tabs.find((t) => t.df && t.df.fieldname === fieldname);
@@ -1221,7 +1223,7 @@ frappe.ui.form.on("Repair Order", {
 							frappe.call({
 								method: "ism.api.payments.request_ro_deposit",
 								args: {
-									ro_name: frm.doc.name,
+									repair_order: frm.doc.name,
 									amount: ro_flt(values.amount, 2),
 									note: values.note || null,
 								},
@@ -1256,7 +1258,7 @@ frappe.ui.form.on("Repair Order", {
 							frappe.call({
 								method: "ism.api.payments.cancel_ro_deposit_request",
 								args: {
-									ro_name: frm.doc.name,
+									repair_order: frm.doc.name,
 									reason: values.reason || null,
 								},
 								freeze: true,

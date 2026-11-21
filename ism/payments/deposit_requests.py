@@ -101,15 +101,18 @@ def _is_online_payments_enabled(company: str | None) -> bool:
 	mop = frappe.db.get_single_value("ISM Settings", "square_mode_of_payment") or SQUARE_DEFAULT_MOP
 	configured_account = frappe.db.get_single_value("ISM Settings", "square_bank_account")
 
-	candidate_account = frappe.db.get_value(
-		"Mode of Payment Account",
-		{"parent": mop, "company": company},
-		"default_account",
-	)
-	if not candidate_account and configured_account:
+	candidate_account = None
+	if configured_account:
 		acc_company = frappe.db.get_value("Account", configured_account, "company")
 		if acc_company == company:
 			candidate_account = configured_account
+
+	if not candidate_account:
+		candidate_account = frappe.db.get_value(
+			"Mode of Payment Account",
+			{"parent": mop, "company": company},
+			"default_account",
+		)
 
 	if not candidate_account:
 		return False
@@ -384,7 +387,7 @@ def get_ro_payment_state(ro_name: str) -> PaymentStateSummary:
 		ignore_permissions=True,
 	)
 
-	has_in_flight_payment = any(tx.get("status") in IN_FLIGHT_TX_STATUSES for tx in tx_rows)
+	has_in_flight_payment = _has_in_flight_tx(ro_name)
 
 	transactions = [
 		{

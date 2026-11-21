@@ -139,9 +139,15 @@ class TestPaymentsDepositRequests(ISMTestCase):
 		self.assertEqual(flt(ro.grand_total), 0.0)
 
 		# Invalid amounts rejected
-		for bad_amount in (0, -25.0, True, float("nan"), "not-a-number"):
+		for bad_amount in (0, -25.0, True, float("nan"), float("inf"), "not-a-number"):
 			with self.assertRaises(frappe.ValidationError):
 				create_deposit_request(ro.name, bad_amount)
+
+		# Non-CAD Repair Order currency rejected
+		frappe.db.set_value("Repair Order", ro.name, "currency", "USD")
+		with self.assertRaises(frappe.ValidationError):
+			create_deposit_request(ro.name, 50.0)
+		frappe.db.set_value("Repair Order", ro.name, "currency", SQUARE_CURRENCY)
 
 		# Pre-estimate RO (grand_total == 0) allows positive CAD deposit request
 		with patch("frappe.publish_realtime") as mock_rt:
@@ -211,6 +217,7 @@ class TestPaymentsDepositRequests(ISMTestCase):
 
 		# Initiated blocks both overwrite and cancel
 		tx = self._create_payment_tx(ro, status=TX_STATUS_INITIATED)
+		self.assertTrue(get_ro_payment_state(ro.name)["has_in_flight_payment"])
 		with self.assertRaises(frappe.ValidationError):
 			create_deposit_request(ro.name, 60.0)
 		with self.assertRaises(frappe.ValidationError):
@@ -218,6 +225,7 @@ class TestPaymentsDepositRequests(ISMTestCase):
 
 		# Pending also blocks both overwrite and cancel
 		frappe.db.set_value("ISM Payment Transaction", tx.name, "status", TX_STATUS_PENDING)
+		self.assertTrue(get_ro_payment_state(ro.name)["has_in_flight_payment"])
 		with self.assertRaises(frappe.ValidationError):
 			create_deposit_request(ro.name, 60.0)
 		with self.assertRaises(frappe.ValidationError):
@@ -225,6 +233,7 @@ class TestPaymentsDepositRequests(ISMTestCase):
 
 		# Once no longer in-flight, cancel succeeds and logs audit Comment
 		frappe.db.set_value("ISM Payment Transaction", tx.name, "status", "Failed")
+		self.assertFalse(get_ro_payment_state(ro.name)["has_in_flight_payment"])
 		state = cancel_deposit_request(ro.name, reason="Card declined, customer switched to cash")
 		self.assertEqual(state["deposit_request"]["status"], DEPOSIT_REQ_CANCELLED)
 		self.assertEqual(state["deposit_request"]["amount"], 0.0)
@@ -311,11 +320,16 @@ class TestPaymentsDepositRequests(ISMTestCase):
 				"https://squareup.com/receipt/preview/test",
 			)
 
-			# Guest-safe read check
+			# Guest-safe read check (zero secret/sensitive key exposure)
 			frappe.set_user("Guest")
 			s_guest = get_ro_payment_state(ro.name)
 			self.assertEqual(s_guest["portal_payment_badge"], "Deposit Paid")
 			self.assertEqual(s_guest["repair_order"], ro.name)
+			self.assertFalse(s_guest["has_in_flight_payment"])
+			for forbidden_key in ("square_access_token", "square_webhook_signature_key", "client_ip", "webhook_audit_trace"):
+				self.assertNotIn(forbidden_key, s_guest)
+				for tx_item in s_guest["transactions"]:
+					self.assertNotIn(forbidden_key, tx_item)
 			frappe.set_user("Administrator")
 
 			# 4. Balance Due (submitted Sales Invoice with outstanding > 0)
