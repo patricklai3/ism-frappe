@@ -78,6 +78,11 @@ class TestPortalAuthAndSessions(ISMTestCase):
 	def setUp(self):
 		super().setUp()
 		self._saved_user = frappe.session.user
+		self._local_sentinel = object()
+		self._saved_local_attrs = {
+			attr: (getattr(frappe.local, attr) if hasattr(frappe.local, attr) else self._local_sentinel)
+			for attr in ("cookie_manager", "request", "request_ip", "form_dict", "response")
+		}
 		self._saved_settings = {}
 		settings = frappe.get_single("ISM Settings")
 		for fieldname in self._SETTINGS_FIELDS:
@@ -105,17 +110,24 @@ class TestPortalAuthAndSessions(ISMTestCase):
 		clear_mock_sms_outbox()
 
 	def tearDown(self):
-		frappe.set_user(self._saved_user)
-		if hasattr(frappe.local, "cookie_manager"):
-			frappe.local.cookie_manager = None
-		if hasattr(frappe.local, "request"):
-			frappe.local.request = None
+		frappe.set_user("Administrator")
+		for attr, prev_val in self._saved_local_attrs.items():
+			if prev_val is self._local_sentinel:
+				if hasattr(frappe.local, attr):
+					delattr(frappe.local, attr)
+			else:
+				setattr(frappe.local, attr, prev_val)
 		clear_portal_auth_rate_limits()
 		clear_mock_sms_outbox()
 		try:
-			self._save_settings(self._saved_settings)
-		finally:
 			super().tearDown()
+		finally:
+			frappe.set_user("Administrator")
+			self._save_settings(self._saved_settings)
+			frappe.db.commit()
+			frappe.clear_cache(doctype="ISM Settings")
+			frappe.db.value_cache.clear()
+			frappe.set_user(self._saved_user)
 
 	def _track_session(self, session_id: str | None) -> str | None:
 		if not session_id:

@@ -123,11 +123,15 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 		super().setUp()
 		self._saved_user = frappe.session.user
 		frappe.set_user("Administrator")
+
+		# Snapshot ISM Settings BEFORE ensure_square_bank_account_and_mop() or any test mutation.
+		settings_before = frappe.get_single("ISM Settings")
+		self._saved_settings = {f: getattr(settings_before, f, None) for f in self._SETTINGS_FIELDS}
+
 		ensure_square_bank_account_and_mop()
 		MockSquareClient.reset_store()
 
 		settings = frappe.get_single("ISM Settings")
-		self._saved_settings = {f: getattr(settings, f, None) for f in self._SETTINGS_FIELDS}
 		self._save_settings({
 			"sms_gateway_provider": "Mock (Deterministic Test)",
 			"sms_default_country_code": "+1",
@@ -187,10 +191,14 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 		clear_mock_sms_outbox()
 		MockSquareClient.reset_store()
 		try:
-			self._save_settings(self._saved_settings)
-		finally:
-			frappe.set_user(self._saved_user)
 			super().tearDown()
+		finally:
+			frappe.set_user("Administrator")
+			self._save_settings(self._saved_settings)
+			frappe.db.commit()
+			frappe.clear_cache(doctype="ISM Settings")
+			frappe.db.value_cache.clear()
+			frappe.set_user(self._saved_user)
 
 	def _attach_request(self, cookie_value: str | None = None, ip: str = "198.51.100.77") -> CookieManager:
 		cm = CookieManager()

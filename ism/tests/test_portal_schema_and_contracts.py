@@ -327,6 +327,8 @@ class TestPortalSchemaAndContracts(ISMTestCase):
 		self.assertIn("ism.comms.sessions.cleanup_expired_portal_sessions", daily_jobs)
 		self.assertIn("ism.portal.pin_vault.purge_stale_closed_ro_pins", daily_jobs)
 
-		# Placeholder handlers are callable safe no-ops in Wave 1
+		# PIN purge handlers are callable and safe
 		self.assertIsNone(on_repair_order_update_purge_pin(None))
-		self.assertIsNone(purge_stale_closed_ro_pins())
+		res = purge_stale_closed_ro_pins()
+		self.assertIsInstance(res, int)
+		self.assertGreaterEqual(res, 0)

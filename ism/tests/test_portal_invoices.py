@@ -40,15 +40,19 @@ class TestPortalInvoices(ISMTestCase):
 
 	def tearDown(self):
 		clear_email_rate_limits()
-		frappe.db.set_single_value("ISM Settings", "portal_invoice_print_format", self._orig_print_format)
-		frappe.db.set_single_value(
-			"ISM Settings", "transactional_email_rate_limit_per_hour", self._orig_rcpt_limit
-		)
-		frappe.db.set_single_value(
-			"ISM Settings", "transactional_email_ip_rate_limit_per_hour", self._orig_ip_limit
-		)
-		frappe.clear_cache(doctype="ISM Settings")
-		super().tearDown()
+		try:
+			super().tearDown()
+		finally:
+			frappe.db.set_single_value("ISM Settings", "portal_invoice_print_format", self._orig_print_format)
+			frappe.db.set_single_value(
+				"ISM Settings", "transactional_email_rate_limit_per_hour", self._orig_rcpt_limit
+			)
+			frappe.db.set_single_value(
+				"ISM Settings", "transactional_email_ip_rate_limit_per_hour", self._orig_ip_limit
+			)
+			frappe.db.commit()
+			frappe.clear_cache(doctype="ISM Settings")
+			frappe.db.value_cache.clear()
 
 	def _create_ro(self, *, customer=None, vehicle=None, status="Work Completed", **extra):
 		cust_name = customer or self.customer.name
