@@ -82,6 +82,12 @@ function buildSmsOtpFlow(container, { shop, title, subtitle, tokenError, upgrade
 			submitBtn.textContent = "Sending SMS Code...";
 			try {
 				const res = await requestLoginOtp({ phone: rawPhone });
+				if (!res || res.success === false || !res.challenge_id) {
+					renderPhoneStep(
+						res?.error || res?.message || "Unable to send verification code. Please try again."
+					);
+					return;
+				}
 				challengeId = res.challenge_id;
 				renderCodeStep(res);
 			} catch (err) {
@@ -167,6 +173,13 @@ function buildSmsOtpFlow(container, { shop, title, subtitle, tokenError, upgrade
 			resendBtn.textContent = "Sending...";
 			try {
 				const next = await requestLoginOtp({ phone: submittedPhone });
+				if (!next || next.success === false || !next.challenge_id) {
+					renderCodeStep(
+						challenge,
+						next?.error || next?.message || "Unable to resend SMS code."
+					);
+					return;
+				}
 				challengeId = next.challenge_id;
 				renderCodeStep(next);
 			} catch (err) {

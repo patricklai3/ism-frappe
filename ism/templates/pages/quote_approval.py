@@ -45,6 +45,8 @@ def get_context(context):
 			if exchange.get("valid"):
 				authenticated = True
 				active_ro = exchange.get("repair_order") or active_ro
+				if not getattr(frappe.flags, "in_test", False):
+					frappe.db.commit()
 			else:
 				token_error = exchange.get("error") or _("This estimate link is invalid or has expired.")
 		except (frappe.ValidationError, frappe.TooManyRequestsError) as exc:

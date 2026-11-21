@@ -254,10 +254,26 @@ export function renderPaymentsSection(container, { visit, onHubUpdated, notify }
 				buyer_email: buyerEmail,
 			});
 
-			if (notify) {
+			if (!res || res.success === false) {
+				payBtn.disabled = false;
+				payBtn.textContent = payHeading;
+				showError(
+					res?.error_message ||
+						res?.error ||
+						res?.message ||
+						"Payment could not be completed. Please try again."
+				);
+				return;
+			}
+
+			if (res.status === "Pending") {
+				if (notify) {
+					notify("Payment is finalizing. Please check back in a moment for your receipt.", "info");
+				}
+			} else if (notify) {
 				notify("Payment confirmed and receipt recorded.", "success");
 			}
-			if (res && res.hub) {
+			if (res.hub) {
 				onHubUpdated(res.hub);
 			}
 		} catch (err) {
