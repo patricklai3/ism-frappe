@@ -73,11 +73,18 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("estimation_sigma", 0.30),
 	("default_diagnostic_duration", 60),
 	("default_labor_rate", 140.0),
+	("self_serve_default_entry_type", "Diagnostic"),
+	("self_serve_horizon_days", 30),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
 	("enable_technician_capacity", 1),
 	("buffer_padding_minutes", 0),
+	("customer_arrival_offset_minutes", 15),
+	("reschedule_cutoff_hours", 24),
+	("max_self_reschedules", 2),
+	("self_serve_min_lead_time_minutes", 120),
+	("enable_waiter_preference", 1),
 )
 
 
