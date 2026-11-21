@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 from typing import Any
@@ -112,6 +113,20 @@ def assert_can_manage_media_storage(user: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+@contextmanager
+def _as_system_user():
+	"""Temporarily elevate to Administrator for verified internal ERP calls; always restores prior user."""
+	prev_user = getattr(frappe.session, "user", None) or "Administrator"
+	if prev_user == "Administrator":
+		yield prev_user
+		return
+	frappe.set_user("Administrator")
+	try:
+		yield prev_user
+	finally:
+		frappe.set_user(prev_user)
+
+
 def _parse_json(raw: Any, default: Any) -> Any:
 	if raw is None or raw == "":
 		return default
@@ -127,10 +142,11 @@ def _parse_json(raw: Any, default: Any) -> Any:
 
 def _get_confidence_threshold() -> float:
 	try:
-		settings = frappe.get_single("ISM Settings")
-		val = getattr(settings, "board_ai_confidence_threshold", None)
-		if val is not None and flt(val) > 0:
-			return flt(val)
+		with _as_system_user():
+			settings = frappe.get_single("ISM Settings")
+			val = getattr(settings, "board_ai_confidence_threshold", None)
+			if val is not None and flt(val) > 0:
+				return flt(val)
 	except Exception:
 		pass
 	return DEFAULT_CONFIDENCE_THRESHOLD
@@ -399,6 +415,74 @@ def _resolve_ro_name(action_payload: dict[str, Any], source_doc: Any = None, fal
 	return ro.strip()
 
 
+def _resolve_catalog_item_code(entry: dict[str, Any]) -> str | None:
+	"""Resolve an unambiguous catalog Item.name from a part dict, or return None if uncatalogued."""
+	if not isinstance(entry, dict):
+		return None
+
+	for key in ("item_code", "oem_part_number", "part_number"):
+		code = str(entry.get(key) or "").strip()
+		if not code:
+			continue
+		if frappe.db.exists("Item", code):
+			return code
+		try:
+			matched = frappe.get_all("Item", filters={"oem_part_number": code}, pluck="name", limit=2)
+			if len(matched) == 1:
+				return matched[0]
+		except Exception:
+			pass
+
+	for key in ("item_name", "part_name"):
+		name_hint = str(entry.get(key) or "").strip()
+		if not name_hint:
+			continue
+		if frappe.db.exists("Item", name_hint):
+			return name_hint
+		try:
+			matched = frappe.get_all("Item", filters={"item_name": name_hint}, pluck="name", limit=2)
+			if len(matched) == 1:
+				return matched[0]
+		except Exception:
+			pass
+
+	return None
+
+
+def _resolve_default_supplier(
+	entry: dict[str, Any],
+	item_code: str | None,
+	payload: dict[str, Any] | None = None,
+) -> str | None:
+	"""Resolve supplier from part entry, parent payload, Item Supplier, or Item Default."""
+	for candidate in (
+		entry.get("supplier") if isinstance(entry, dict) else None,
+		payload.get("supplier") if isinstance(payload, dict) else None,
+	):
+		cleaned = str(candidate or "").strip()
+		if cleaned:
+			return cleaned
+
+	if not item_code:
+		return None
+
+	try:
+		sup = frappe.db.get_value("Item Supplier", {"parent": item_code}, "supplier")
+		if sup:
+			return str(sup).strip()
+	except Exception:
+		pass
+
+	try:
+		sup = frappe.db.get_value("Item Default", {"parent": item_code}, "default_supplier")
+		if sup:
+			return str(sup).strip()
+	except Exception:
+		pass
+
+	return None
+
+
 def _price_parts_internally(parts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
 	"""Compute internal CAD selling rates via ism.board.pricing when parts carry OEM price or cost."""
 	if not parts:
@@ -410,6 +494,8 @@ def _price_parts_internally(parts: list[dict[str, Any]] | None) -> list[dict[str
 		if not isinstance(raw, dict):
 			continue
 		entry = dict(raw)
+		if (entry.get("rate") is None or str(entry.get("rate")).strip() == "") and entry.get("sell_price") is not None:
+			entry["rate"] = flt(entry.get("sell_price"))
 		has_explicit_rate = entry.get("rate") is not None and str(entry.get("rate")).strip() != ""
 		tesla_oem_price = entry.get("tesla_oem_price")
 		cost = entry.get("cost")
@@ -553,14 +639,40 @@ def _exec_add_supplement_draft(payload: dict[str, Any], source_doc: Any) -> dict
 		raise BoardContractError("ADD_SUPPLEMENT_DRAFT requires 'service_title'.")
 
 	priced_parts = _price_parts_internally(payload.get("parts"))
+	catalog_parts: list[dict[str, Any]] = []
+	uncatalogued_notes: list[str] = []
+	for part in priced_parts:
+		resolved_code = _resolve_catalog_item_code(part)
+		if resolved_code:
+			normalized = dict(part)
+			normalized["item_code"] = resolved_code
+			catalog_parts.append(normalized)
+		else:
+			p_label = str(
+				part.get("part_name") or part.get("item_name") or part.get("item_code") or "Part"
+			).strip()
+			p_qty = flt(part.get("qty") or 1.0)
+			p_rate = part.get("rate")
+			if p_rate is not None and str(p_rate).strip() != "":
+				uncatalogued_notes.append(f"{p_label} x{p_qty:g} @ ${flt(p_rate):.2f}")
+			else:
+				uncatalogued_notes.append(f"{p_label} x{p_qty:g}")
+
+	base_notes = str(payload.get("notes") or "").strip()
+	if uncatalogued_notes:
+		uncat_line = f"Uncatalogued parts: {'; '.join(uncatalogued_notes)}"
+		merged_notes = f"{base_notes}\n{uncat_line}".strip() if base_notes else uncat_line
+	else:
+		merged_notes = base_notes or None
+
 	res = agent_quotes.add_supplement(
 		repair_order=ro_name,
 		service_title=service_title,
 		category=payload.get("category") or "Maintenance",
 		labor_hours=flt(payload.get("labor_hours", 1.0)),
 		labor_rate=flt(payload["labor_rate"]) if payload.get("labor_rate") is not None else None,
-		parts=priced_parts or None,
-		notes=payload.get("notes"),
+		parts=catalog_parts or None,
+		notes=merged_notes,
 	)
 
 	ro_mid = frappe.get_doc("Repair Order", ro_name)
@@ -646,7 +758,7 @@ def _exec_set_parts_hold(payload: dict[str, Any], source_doc: Any) -> dict[str, 
 				"reference_name": ro_name,
 				"item_code": payload.get("item_code"),
 				"dedup_key": dedup_key,
-				"reported_by": frappe.session.user,
+				"reported_by": payload.get("_actor_user") or (getattr(source_doc, "actor_user", None) if source_doc else None) or frappe.session.user,
 				"details": reason,
 			}
 		)
@@ -700,7 +812,7 @@ def _exec_clear_parts_hold(payload: dict[str, Any], source_doc: Any) -> dict[str
 		sai = frappe.get_doc("Shop Action Item", sai_name)
 		sai.status = "Resolved"
 		sai.resolution_notes = payload.get("notes") or "Parts hold cleared via Shop Board"
-		sai.resolved_by = frappe.session.user
+		sai.resolved_by = payload.get("_actor_user") or (getattr(source_doc, "actor_user", None) if source_doc else None) or frappe.session.user
 		sai.resolved_at = now_datetime()
 		sai.save(ignore_permissions=True)
 		resolved_items.append(sai_name)
@@ -727,20 +839,61 @@ def _exec_draft_purchase_order(payload: dict[str, Any], source_doc: Any) -> dict
 	from ism.api import agent_procurement
 
 	ro_name = payload.get("repair_order") or (getattr(source_doc, "repair_order", None) if source_doc else None)
-	parts_data = payload.get("parts_data") or payload.get("parts")
-	if not parts_data:
+	raw_parts = payload.get("parts_data") or payload.get("parts") or payload.get("items")
+	if isinstance(raw_parts, str):
+		raw_parts = _parse_json(raw_parts, [])
+	if isinstance(raw_parts, dict):
+		raw_parts = [raw_parts]
+	if not raw_parts or not isinstance(raw_parts, list):
 		raise BoardContractError("DRAFT_PURCHASE_ORDER requires non-empty 'parts_data'.")
 
-	# Autonomous PO drafts ALWAYS run with submit=False; Manager SUBMIT_PO gate commits them.
-	res = agent_procurement.submit_procurement_orders(
-		repair_order=ro_name,
-		parts_data=parts_data,
-		submit=False,
-		company=payload.get("company"),
-	)
-	data = res.get("data") or {}
-	created_pos = list(data.get("purchase_orders") or [])
-	created_rfqs = list(data.get("rfqs") or [])
+	po_ready_parts: list[dict[str, Any]] = []
+	pending_sourcing_parts: list[dict[str, Any]] = []
+
+	for raw_entry in raw_parts:
+		if not isinstance(raw_entry, dict):
+			continue
+		entry = dict(raw_entry)
+		resolved_code = _resolve_catalog_item_code(entry)
+		resolved_supplier = _resolve_default_supplier(entry, resolved_code, payload)
+		order_mode = str(entry.get("order_mode") or "Purchase Order").strip() or "Purchase Order"
+
+		if resolved_code and resolved_supplier:
+			entry["item_code"] = resolved_code
+			entry["supplier"] = resolved_supplier
+			entry["order_mode"] = order_mode
+			po_ready_parts.append(entry)
+		else:
+			if resolved_code:
+				entry["item_code"] = resolved_code
+			if resolved_supplier:
+				entry["supplier"] = resolved_supplier
+			pending_sourcing_parts.append(entry)
+
+	created_pos: list[str] = []
+	created_rfqs: list[str] = []
+	res: dict[str, Any] = {
+		"status": "pending_sourcing",
+		"data": {
+			"purchase_orders": [],
+			"rfqs": [],
+			"pending_sourcing_parts": pending_sourcing_parts,
+		},
+	}
+
+	if po_ready_parts:
+		# Autonomous PO drafts ALWAYS run with submit=False; Manager SUBMIT_PO gate commits them.
+		res = agent_procurement.submit_procurement_orders(
+			repair_order=ro_name,
+			parts_data=po_ready_parts,
+			submit=False,
+			company=payload.get("company"),
+		)
+		data = res.get("data") or {}
+		created_pos = list(data.get("purchase_orders") or [])
+		created_rfqs = list(data.get("rfqs") or [])
+		if pending_sourcing_parts and isinstance(data, dict):
+			data["pending_sourcing_parts"] = pending_sourcing_parts
 
 	extra_gates: list[dict[str, Any]] = []
 	if created_pos:
@@ -757,6 +910,32 @@ def _exec_draft_purchase_order(payload: dict[str, Any], source_doc: Any) -> dict
 				},
 			}
 		)
+
+	if pending_sourcing_parts and not created_pos and not created_rfqs:
+		part_labels = [
+			str(p.get("item_name") or p.get("part_name") or p.get("item_code") or "Uncatalogued Part").strip()
+			for p in pending_sourcing_parts
+		]
+		label_str = ", ".join(part_labels)
+		extra_gates.append(
+			{
+				"action_type": "SUBMIT_PO",
+				"title": f"Source & Submit PO ({label_str})",
+				"summary": f"Catalog SKU / supplier needed before submitting Purchase Order for: {label_str}.",
+				"target_role": "MANAGER",
+				"params": {
+					"repair_order": ro_name,
+					"parts_data": pending_sourcing_parts,
+					"needs_catalog_resolution": True,
+				},
+			}
+		)
+		return {
+			"summary": f"Catalog SKU / supplier needed to draft PO for {label_str}; staged Manager sourcing gate.",
+			"result": res,
+			"undo_spec": None,
+			"extra_gates": extra_gates,
+		}
 
 	return {
 		"summary": f"Created draft Purchase Order(s): {', '.join(created_pos) or 'RFQ only'}.",
@@ -881,7 +1060,11 @@ def _exec_add_deferred_services(payload: dict[str, Any], source_doc: Any) -> dic
 
 
 def _execute_autonomous_action(
-	action: str, payload: dict[str, Any], *, source_doc: Any = None
+	action: str,
+	payload: dict[str, Any],
+	*,
+	source_doc: Any = None,
+	actor_user: str | None = None,
 ) -> dict[str, Any]:
 	dispatch_map = {
 		"LOG_RO_NOTE": _exec_log_ro_note,
@@ -897,7 +1080,16 @@ def _execute_autonomous_action(
 	handler = dispatch_map.get(action)
 	if handler is None:
 		raise BoardContractError(f"Unsupported autonomous action: {action!r}")
-	return handler(payload, source_doc)
+	real_actor = (
+		actor_user
+		or (getattr(source_doc, "actor_user", None) if source_doc else None)
+		or getattr(frappe.session, "user", None)
+	)
+	exec_payload = dict(payload or {})
+	if real_actor and "_actor_user" not in exec_payload:
+		exec_payload["_actor_user"] = real_actor
+	with _as_system_user():
+		return handler(exec_payload, source_doc)
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +1122,25 @@ def _remove_unapproved_service_rows(ro_name: str, row_names: list[str]) -> list[
 	return removed
 
 
-def _execute_undo_action(action_type: str, undo_spec: dict[str, Any], *, reason: str | None = None) -> dict[str, Any]:
+def _execute_undo_action(
+	action_type: str,
+	undo_spec: dict[str, Any],
+	*,
+	reason: str | None = None,
+	actor_user: str | None = None,
+) -> dict[str, Any]:
+	real_actor = actor_user or getattr(frappe.session, "user", None) or "Administrator"
+	with _as_system_user():
+		return _execute_undo_action_impl(action_type, undo_spec, reason=reason, actor_user=real_actor)
+
+
+def _execute_undo_action_impl(
+	action_type: str,
+	undo_spec: dict[str, Any],
+	*,
+	reason: str | None = None,
+	actor_user: str | None = None,
+) -> dict[str, Any]:
 	if action_type == "LOG_RO_NOTE":
 		ro_name = undo_spec["repair_order"]
 		ro = frappe.get_doc("Repair Order", ro_name)
@@ -982,7 +1192,7 @@ def _execute_undo_action(action_type: str, undo_spec: dict[str, Any], *, reason:
 			if undo_spec.get("created_action_item"):
 				sai.status = "Resolved"
 				sai.resolution_notes = reason or "Parts hold undone via Shop Board"
-				sai.resolved_by = frappe.session.user
+				sai.resolved_by = actor_user or frappe.session.user
 				sai.resolved_at = now_datetime()
 			elif undo_spec.get("previous_action_item_status"):
 				sai.status = undo_spec["previous_action_item_status"]
@@ -1072,8 +1282,13 @@ def _format_slot_options(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 	for idx, slot in enumerate(slots[:5]):
 		s_date = slot.get("scheduled_date") or slot.get("date") or ""
 		s_time = slot.get("start_time") or slot.get("scheduled_time") or ""
-		bay = slot.get("service_bay") or slot.get("bay") or ""
-		tech = slot.get("technician") or slot.get("assigned_technician") or ""
+		avail_bays = slot.get("available_bay_ids")
+		bay = (
+			slot.get("service_bay")
+			or slot.get("bay")
+			or (avail_bays[0] if isinstance(avail_bays, list) and avail_bays else "")
+		)
+		tech = slot.get("technician") or slot.get("assigned_technician") or slot.get("matched_technician") or ""
 		label_parts = [f"{s_date} {s_time}".strip()]
 		if bay:
 			label_parts.append(str(bay))
@@ -1094,6 +1309,24 @@ def _format_slot_options(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _build_approval_gate_card(
+	action: str,
+	payload: dict[str, Any],
+	*,
+	source_doc: Any = None,
+	summary: str = "",
+	customer_comms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+	with _as_system_user():
+		return _build_approval_gate_card_impl(
+			action,
+			payload,
+			source_doc=source_doc,
+			summary=summary,
+			customer_comms=customer_comms,
+		)
+
+
+def _build_approval_gate_card_impl(
 	action: str,
 	payload: dict[str, Any],
 	*,
@@ -1192,12 +1425,13 @@ def _build_approval_gate_card(
 		params["candidate_slots"] = slots
 		if slots:
 			card["options"] = _format_slot_options(slots)
+			first_date = slots[0].get("scheduled_date") or slots[0].get("date") or ""
 			first_start = slots[0].get("start_time") or slots[0].get("scheduled_time")
 			customer_eta = _resolve_customer_arrival_time_safe(first_start)
 			drafted = _sanitize_and_draft_comms(
 				ro_doc,
 				finding_summary=params.get("finding_summary") or "We need to update your appointment timing.",
-				eta_window=f"{slots[0].get('scheduled_date', '')} at {customer_eta}".strip() if customer_eta else None,
+				eta_window=f"{first_date} at {customer_eta}".strip() if (first_date and customer_eta) else customer_eta,
 				channel="sms",
 			)
 			card["customer_eta_preview"] = drafted["body"]
@@ -1210,6 +1444,8 @@ def _build_approval_gate_card(
 		# Optionally price any parts in the intake services internally
 		if params.get("parts"):
 			params["parts"] = _price_parts_internally(params.get("parts"))
+		if params.get("odometer_in") is None or str(params.get("odometer_in")).strip() == "":
+			params["odometer_in"] = 0
 		slots = list(params.get("candidate_slots") or [])
 		if not slots:
 			try:
@@ -1246,10 +1482,13 @@ def _build_approval_gate_card(
 		card["editable_fields"] = ["bill_no", "bill_date", "update_stock", "also_receive_po"]
 
 	elif action == "PAY_PURCHASE":
+		if params.get("paid_amount") is None and params.get("amount") is not None:
+			params["paid_amount"] = params["amount"]
 		target = params.get("purchase_invoice") or params.get("purchase_order") or "Vendor"
 		card["title"] = summary or f"Record Supplier Payment for {target}"
 		card["options"] = [{"label": m, "value": m} for m in DEFAULT_PAYMENT_METHODS]
 		card["editable_fields"] = ["payment_method", "paid_amount", "reference_no", "reference_date"]
+		card["params"] = params
 
 	return validate_approval_gate_card(card)
 
@@ -1274,26 +1513,53 @@ def _resolve_chosen_slot(
 		idx_int = cint(slot_idx)
 		if 0 <= idx_int < len(slots):
 			chosen = dict(slots[idx_int])
+	elif (
+		slots
+		and not (form_patch.get("scheduled_date") or form_patch.get("date"))
+		and not (params.get("scheduled_date") or params.get("date"))
+	):
+		chosen = dict(slots[0])
 
-	if form_patch.get("scheduled_date"):
-		chosen["scheduled_date"] = form_patch["scheduled_date"]
-	elif not chosen.get("scheduled_date") and params.get("scheduled_date"):
-		chosen["scheduled_date"] = params["scheduled_date"]
+	# Normalize find_available_slots aliases ("date", "scheduled_time", "bay", "available_bay_ids")
+	if not chosen.get("scheduled_date") and chosen.get("date"):
+		chosen["scheduled_date"] = chosen["date"]
+	if not chosen.get("start_time") and chosen.get("scheduled_time"):
+		chosen["start_time"] = chosen["scheduled_time"]
+	if not chosen.get("service_bay"):
+		avail_bays = chosen.get("available_bay_ids")
+		chosen["service_bay"] = chosen.get("bay") or (
+			avail_bays[0] if isinstance(avail_bays, list) and avail_bays else None
+		)
+	if not chosen.get("technician"):
+		chosen["technician"] = chosen.get("assigned_technician") or chosen.get("matched_technician")
 
-	if form_patch.get("start_time"):
-		chosen["start_time"] = form_patch["start_time"]
-	elif not chosen.get("start_time") and params.get("start_time"):
-		chosen["start_time"] = params["start_time"]
+	patch_date = form_patch.get("scheduled_date") or form_patch.get("date")
+	param_date = params.get("scheduled_date") or params.get("date")
+	if patch_date:
+		chosen["scheduled_date"] = patch_date
+	elif not chosen.get("scheduled_date") and param_date:
+		chosen["scheduled_date"] = param_date
 
-	if form_patch.get("service_bay"):
-		chosen["service_bay"] = form_patch["service_bay"]
-	elif not chosen.get("service_bay") and params.get("service_bay"):
-		chosen["service_bay"] = params["service_bay"]
+	patch_time = form_patch.get("start_time") or form_patch.get("scheduled_time")
+	param_time = params.get("start_time") or params.get("scheduled_time")
+	if patch_time:
+		chosen["start_time"] = patch_time
+	elif not chosen.get("start_time") and param_time:
+		chosen["start_time"] = param_time
 
-	if form_patch.get("technician"):
-		chosen["technician"] = form_patch["technician"]
-	elif not chosen.get("technician") and params.get("technician"):
-		chosen["technician"] = params["technician"]
+	patch_bay = form_patch.get("service_bay") or form_patch.get("bay")
+	param_bay = params.get("service_bay") or params.get("bay")
+	if patch_bay:
+		chosen["service_bay"] = patch_bay
+	elif not chosen.get("service_bay") and param_bay:
+		chosen["service_bay"] = param_bay
+
+	patch_tech = form_patch.get("technician") or form_patch.get("assigned_technician")
+	param_tech = params.get("technician") or params.get("assigned_technician")
+	if patch_tech:
+		chosen["technician"] = patch_tech
+	elif not chosen.get("technician") and param_tech:
+		chosen["technician"] = param_tech
 
 	return chosen
 
@@ -1306,6 +1572,28 @@ def _detect_sms_opt_out(sms_result: dict[str, Any]) -> bool:
 
 
 def _execute_manager_gated_action(
+	action_type: str,
+	params: dict[str, Any],
+	*,
+	card_schema: dict[str, Any],
+	selected_option: Any = None,
+	edited_message: str | None = None,
+	form_patch: dict[str, Any] | None = None,
+	repair_order: str | None = None,
+) -> dict[str, Any]:
+	with _as_system_user():
+		return _execute_manager_gated_action_impl(
+			action_type,
+			params,
+			card_schema=card_schema,
+			selected_option=selected_option,
+			edited_message=edited_message,
+			form_patch=form_patch,
+			repair_order=repair_order,
+		)
+
+
+def _execute_manager_gated_action_impl(
 	action_type: str,
 	params: dict[str, Any],
 	*,
@@ -1336,7 +1624,7 @@ def _execute_manager_gated_action(
 			return {"success": True, "submitted_purchase_orders": submitted, "repair_order": ro_name}
 		return agent_procurement.submit_procurement_orders(
 			repair_order=ro_name,
-			parts_data=merged.get("parts_data") or merged.get("parts"),
+			parts_data=merged.get("parts_data") or merged.get("parts") or merged.get("items"),
 			submit=True,
 			company=merged.get("company"),
 			payment_method=merged.get("payment_method"),
@@ -1532,26 +1820,50 @@ def _execute_manager_gated_action(
 		from ism.api import agent_quotes, agent_scheduling
 
 		slot = _resolve_chosen_slot(params, selected_option, patch)
-		is_provisional = bool(merged.get("provisional", False))
+		veh_ident = merged.get("vehicle_identifier") or merged.get("vin")
+		veh_link = merged.get("vehicle")
+		is_provisional = bool(merged.get("provisional", False)) or (not veh_ident and not veh_link)
 		quote_res = None
 		created_ro = None
 		ro_thread = None
 
 		if not is_provisional:
 			priced_parts = _price_parts_internally(merged.get("parts"))
+			raw_services = merged.get("services")
+			if not raw_services:
+				pkg = merged.get("service_package")
+				req_svcs = merged.get("requested_services")
+				if pkg:
+					raw_services = [{"service_package": pkg}]
+				elif isinstance(req_svcs, list) and req_svcs:
+					raw_services = [
+						(item if isinstance(item, dict) else {"service_title": str(item), "labor_hours": 1.0})
+						for item in req_svcs
+						if item
+					]
+				elif isinstance(req_svcs, str) and req_svcs.strip():
+					raw_services = [{"service_title": req_svcs.strip(), "labor_hours": 1.0}]
+
+			raw_odo = merged.get("odometer_in")
+			odometer_in = cint(raw_odo) if (raw_odo is not None and str(raw_odo).strip() != "") else 0
+			notes_val = merged.get("notes")
+			concern_val = merged.get("concern") or merged.get("customer_concern")
+			if not raw_services and not notes_val and not concern_val:
+				notes_val = "Intake quote & booking"
+
 			quote_res = agent_quotes.create_quote(
-				customer_name=merged.get("customer_name"),
-				vehicle_identifier=merged.get("vehicle_identifier") or merged.get("vin"),
+				customer_name=merged.get("customer_name") or merged.get("customer") or "Walk-In Customer",
+				vehicle_identifier=veh_ident,
 				customer=merged.get("customer"),
-				vehicle=merged.get("vehicle"),
-				services=merged.get("services"),
+				vehicle=veh_link,
+				services=raw_services,
 				parts=priced_parts or None,
-				notes=merged.get("notes"),
-				concern=merged.get("concern") or merged.get("customer_concern"),
+				notes=notes_val,
+				concern=concern_val,
 				customer_phone=merged.get("customer_phone"),
 				customer_email=merged.get("customer_email"),
 				company=merged.get("company"),
-				odometer_in=merged.get("odometer_in"),
+				odometer_in=odometer_in,
 			)
 			created_ro = (quote_res.get("data") or {}).get("name") or (quote_res.get("data") or {}).get("repair_order")
 
@@ -1566,9 +1878,13 @@ def _execute_manager_gated_action(
 				entry_type=merged.get("entry_type"),
 				notes=merged.get("notes"),
 				estimated_duration=merged.get("duration_minutes") or merged.get("estimated_duration"),
-				provisional_customer_name=merged.get("customer_name") if is_provisional else None,
+				provisional_customer_name=(
+					merged.get("customer_name") or merged.get("customer") or "Walk-In Customer"
+				)
+				if is_provisional
+				else None,
 				provisional_vehicle_info=(
-					merged.get("provisional_vehicle_info") or merged.get("vehicle_identifier") or merged.get("vin")
+					merged.get("provisional_vehicle_info") or veh_ident or veh_link or "Pending Vehicle"
 				)
 				if is_provisional
 				else None,
@@ -1634,7 +1950,7 @@ def _execute_manager_gated_action(
 		pi_res = agent_procurement.create_purchase_invoice(
 			purchase_order=merged.get("purchase_order"),
 			supplier=merged.get("supplier"),
-			parts_data=merged.get("parts_data") or merged.get("parts"),
+			parts_data=merged.get("parts_data") or merged.get("parts") or merged.get("items"),
 			update_stock=update_stock,
 			company=merged.get("company"),
 			bill_no=merged.get("bill_no"),
@@ -1662,11 +1978,14 @@ def _execute_manager_gated_action(
 		method = patch.get("payment_method") or (
 			str(selected_option).strip() if selected_option else None
 		) or merged.get("payment_method")
+		paid_amt = merged.get("paid_amount")
+		if paid_amt is None or str(paid_amt).strip() == "":
+			paid_amt = merged.get("amount")
 		return agent_procurement.create_purchase_payment(
 			purchase_order=merged.get("purchase_order"),
 			purchase_invoice=merged.get("purchase_invoice"),
 			payment_method=method,
-			paid_amount=merged.get("paid_amount"),
+			paid_amount=paid_amt,
 			reference_no=merged.get("reference_no"),
 			reference_date=merged.get("reference_date"),
 		)
@@ -1743,6 +2062,17 @@ def _build_clarification_schema(
 
 def dispatch_orchestrator_decision(source_event: Any, decision: dict[str, Any]) -> dict[str, Any]:
 	"""Route an AI orchestrator decision into CLARIFICATION_CARD, AI_RECEIPT, or APPROVAL_GATE."""
+	caller_user = getattr(frappe.session, "user", None)
+	with _as_system_user():
+		return _dispatch_orchestrator_decision_impl(source_event, decision, actor_user=caller_user)
+
+
+def _dispatch_orchestrator_decision_impl(
+	source_event: Any,
+	decision: dict[str, Any],
+	*,
+	actor_user: str | None = None,
+) -> dict[str, Any]:
 	if isinstance(source_event, str):
 		source_doc = frappe.get_doc("Shop Board Event", source_event)
 	elif hasattr(source_event, "name") and hasattr(source_event, "thread"):
@@ -1874,7 +2204,12 @@ def dispatch_orchestrator_decision(source_event: Any, decision: dict[str, Any]) 
 		_publish_board_event(gate_ev)
 
 	def _run_autonomous(auto_action: str, auto_payload: dict[str, Any], auto_summary: str = ""):
-		exec_out = _execute_autonomous_action(auto_action, auto_payload, source_doc=source_doc)
+		exec_out = _execute_autonomous_action(
+			auto_action,
+			auto_payload,
+			source_doc=source_doc,
+			actor_user=getattr(source_doc, "actor_user", None) or actor_user,
+		)
 		receipt_schema = validate_receipt_card(
 			{
 				"action_type": auto_action,
@@ -2053,69 +2388,145 @@ def resolve_card_action(
 	resolved_at = now_datetime()
 
 	# Mark EXECUTING under row lock
-	frappe.db.set_value("Shop Board Event", event_name, "resolution_state", "EXECUTING", update_modified=True)
+	with _as_system_user():
+		frappe.db.set_value("Shop Board Event", event_name, "resolution_state", "EXECUTING", update_modified=True)
 
-	if decision_norm == "reject":
-		res_payload = {
-			"decision": "reject",
-			"notes": notes,
-			"resolved_by": actor_user,
-		}
-		frappe.db.set_value(
-			"Shop Board Event",
-			event_name,
-			{
-				"resolution_state": "REJECTED",
+		if decision_norm == "reject":
+			res_payload = {
+				"decision": "reject",
+				"notes": notes,
 				"resolved_by": actor_user,
-				"resolved_at": resolved_at,
-				"resolution_payload": json.dumps(res_payload, default=str),
-			},
-			update_modified=True,
-		)
-		res_ev = _insert_board_event(
-			thread_key=card.thread,
-			thread_type=card.thread_type,
-			repair_order=card.repair_order,
-			actor_type=actor_role,
-			actor_user=actor_user,
-			intent_tag="CARD_REJECTED",
-			payload_type="CARD_RESOLUTION",
-			target_role="ALL",
-			body_text=f"Rejected {card_schema.get('action_type') or card.payload_type}: {notes or 'Declined'}",
-			metadata=res_payload,
-			resolution_state="NONE",
-			parent_event=event_name,
-			idempotency_key=clean_idem,
-		)
-		projection = recompute_thread_projection(card.thread, publish=True)
-		_publish_board_event(res_ev)
-		return {
-			"already_resolved": False,
-			"event_name": event_name,
-			"thread_key": card.thread,
-			"payload_type": card.payload_type,
-			"resolution_state": "REJECTED",
-			"resolution_event": res_ev.name,
-			"resolution_payload": res_payload,
-			"projection": projection,
-		}
+			}
+			frappe.db.set_value(
+				"Shop Board Event",
+				event_name,
+				{
+					"resolution_state": "REJECTED",
+					"resolved_by": actor_user,
+					"resolved_at": resolved_at,
+					"resolution_payload": json.dumps(res_payload, default=str),
+				},
+				update_modified=True,
+			)
+			res_ev = _insert_board_event(
+				thread_key=card.thread,
+				thread_type=card.thread_type,
+				repair_order=card.repair_order,
+				actor_type=actor_role,
+				actor_user=actor_user,
+				intent_tag="CARD_REJECTED",
+				payload_type="CARD_RESOLUTION",
+				target_role="ALL",
+				body_text=f"Rejected {card_schema.get('action_type') or card.payload_type}: {notes or 'Declined'}",
+				metadata=res_payload,
+				resolution_state="NONE",
+				parent_event=event_name,
+				idempotency_key=clean_idem,
+			)
+			projection = recompute_thread_projection(card.thread, publish=True)
+			_publish_board_event(res_ev)
+			return {
+				"already_resolved": False,
+				"event_name": event_name,
+				"thread_key": card.thread,
+				"payload_type": card.payload_type,
+				"resolution_state": "REJECTED",
+				"resolution_event": res_ev.name,
+				"resolution_payload": res_payload,
+				"projection": projection,
+			}
 
-	if card.payload_type == "CLARIFICATION_CARD":
-		clarification_patch: dict[str, Any] = dict(patch)
-		if selected_option is not None:
-			clarification_patch["selected_option"] = selected_option
-			input_field = card_schema.get("input_field")
-			if input_field and input_field not in clarification_patch:
-				clarification_patch[input_field] = selected_option
-		if notes:
-			clarification_patch["notes"] = notes
+		if card.payload_type == "CLARIFICATION_CARD":
+			clarification_patch: dict[str, Any] = dict(patch)
+			if selected_option is not None:
+				clarification_patch["selected_option"] = selected_option
+				input_field = card_schema.get("input_field")
+				if input_field and input_field not in clarification_patch:
+					clarification_patch[input_field] = selected_option
+			if notes:
+				clarification_patch["notes"] = notes
+
+			res_payload = {
+				"decision": decision_norm,
+				"selected_option": selected_option,
+				"clarification_patch": clarification_patch,
+				"notes": notes,
+				"resolved_by": actor_user,
+			}
+			frappe.db.set_value(
+				"Shop Board Event",
+				event_name,
+				{
+					"resolution_state": "RESOLVED",
+					"resolved_by": actor_user,
+					"resolved_at": resolved_at,
+					"resolution_payload": json.dumps(res_payload, default=str),
+				},
+				update_modified=True,
+			)
+			res_ev = _insert_board_event(
+				thread_key=card.thread,
+				thread_type=card.thread_type,
+				repair_order=card.repair_order,
+				actor_type=actor_role,
+				actor_user=actor_user,
+				intent_tag="CLARIFICATION_RESOLVED",
+				payload_type="CARD_RESOLUTION",
+				target_role="ALL",
+				body_text=f"Clarified: {selected_option or json.dumps(clarification_patch, default=str)}",
+				metadata=res_payload,
+				resolution_state="NONE",
+				parent_event=event_name,
+				idempotency_key=clean_idem,
+			)
+			projection = recompute_thread_projection(card.thread, publish=True)
+			_publish_board_event(res_ev)
+
+			source_event_name = card_schema.get("source_event") or card.parent_event or event_name
+			re_enqueue_res = _lazy_enqueue_board_event(source_event_name, clarification_patch=clarification_patch)
+			if isinstance(re_enqueue_res, dict) and re_enqueue_res.get("synchronous"):
+				projection = recompute_thread_projection(card.thread, publish=True)
+			return {
+				"already_resolved": False,
+				"event_name": event_name,
+				"thread_key": card.thread,
+				"payload_type": card.payload_type,
+				"resolution_state": "RESOLVED",
+				"clarification_patch": clarification_patch,
+				"re_enqueued": re_enqueue_res,
+				"resolution_event": res_ev.name,
+				"resolution_payload": res_payload,
+				"projection": projection,
+			}
+
+		# APPROVAL_GATE approval path (RBAC already asserted above)
+		action_type = card_schema.get("action_type")
+		if action_type not in MANAGER_GATED_ACTIONS:
+			frappe.db.set_value("Shop Board Event", event_name, "resolution_state", "PENDING", update_modified=False)
+			raise BoardContractError(f"Invalid APPROVAL_GATE action_type: {action_type!r}.")
+
+		try:
+			exec_result = _execute_manager_gated_action(
+				action_type,
+				dict(card_schema.get("params") or {}),
+				card_schema=card_schema,
+				selected_option=selected_option,
+				edited_message=edited_message,
+				form_patch=patch,
+				repair_order=card.repair_order,
+			)
+		except Exception:
+			frappe.db.set_value("Shop Board Event", event_name, "resolution_state", "PENDING", update_modified=False)
+			raise
 
 		res_payload = {
-			"decision": decision_norm,
+			"decision": "approve",
+			"action_type": action_type,
 			"selected_option": selected_option,
-			"clarification_patch": clarification_patch,
+			"form_patch": patch,
 			"notes": notes,
 			"resolved_by": actor_user,
+			"execution_result": exec_result,
 		}
 		frappe.db.set_value(
 			"Shop Board Event",
@@ -2128,16 +2539,21 @@ def resolve_card_action(
 			},
 			update_modified=True,
 		)
+
+		delivery_suffix = ""
+		if isinstance(exec_result, dict) and exec_result.get("delivery_status") in ("FAILED", "OPTED_OUT"):
+			delivery_suffix = f" ({exec_result['delivery_status']}: {exec_result.get('error') or 'delivery failed'})"
+
 		res_ev = _insert_board_event(
 			thread_key=card.thread,
 			thread_type=card.thread_type,
 			repair_order=card.repair_order,
-			actor_type=actor_role,
+			actor_type="MANAGER",
 			actor_user=actor_user,
-			intent_tag="CLARIFICATION_RESOLVED",
+			intent_tag=action_type,
 			payload_type="CARD_RESOLUTION",
 			target_role="ALL",
-			body_text=f"Clarified: {selected_option or json.dumps(clarification_patch, default=str)}",
+			body_text=f"Approved {action_type}{delivery_suffix}",
 			metadata=res_payload,
 			resolution_state="NONE",
 			parent_event=event_name,
@@ -2146,96 +2562,18 @@ def resolve_card_action(
 		projection = recompute_thread_projection(card.thread, publish=True)
 		_publish_board_event(res_ev)
 
-		source_event_name = card_schema.get("source_event") or card.parent_event or event_name
-		re_enqueue_res = _lazy_enqueue_board_event(source_event_name, clarification_patch=clarification_patch)
 		return {
 			"already_resolved": False,
 			"event_name": event_name,
 			"thread_key": card.thread,
 			"payload_type": card.payload_type,
+			"action_type": action_type,
 			"resolution_state": "RESOLVED",
-			"clarification_patch": clarification_patch,
-			"re_enqueued": re_enqueue_res,
+			"execution_result": exec_result,
 			"resolution_event": res_ev.name,
 			"resolution_payload": res_payload,
 			"projection": projection,
 		}
-
-	# APPROVAL_GATE approval path (RBAC already asserted above)
-	action_type = card_schema.get("action_type")
-	if action_type not in MANAGER_GATED_ACTIONS:
-		frappe.db.set_value("Shop Board Event", event_name, "resolution_state", "PENDING", update_modified=False)
-		raise BoardContractError(f"Invalid APPROVAL_GATE action_type: {action_type!r}.")
-
-	try:
-		exec_result = _execute_manager_gated_action(
-			action_type,
-			dict(card_schema.get("params") or {}),
-			card_schema=card_schema,
-			selected_option=selected_option,
-			edited_message=edited_message,
-			form_patch=patch,
-			repair_order=card.repair_order,
-		)
-	except Exception:
-		frappe.db.set_value("Shop Board Event", event_name, "resolution_state", "PENDING", update_modified=False)
-		raise
-
-	res_payload = {
-		"decision": "approve",
-		"action_type": action_type,
-		"selected_option": selected_option,
-		"form_patch": patch,
-		"notes": notes,
-		"resolved_by": actor_user,
-		"execution_result": exec_result,
-	}
-	frappe.db.set_value(
-		"Shop Board Event",
-		event_name,
-		{
-			"resolution_state": "RESOLVED",
-			"resolved_by": actor_user,
-			"resolved_at": resolved_at,
-			"resolution_payload": json.dumps(res_payload, default=str),
-		},
-		update_modified=True,
-	)
-
-	delivery_suffix = ""
-	if isinstance(exec_result, dict) and exec_result.get("delivery_status") in ("FAILED", "OPTED_OUT"):
-		delivery_suffix = f" ({exec_result['delivery_status']}: {exec_result.get('error') or 'delivery failed'})"
-
-	res_ev = _insert_board_event(
-		thread_key=card.thread,
-		thread_type=card.thread_type,
-		repair_order=card.repair_order,
-		actor_type="MANAGER",
-		actor_user=actor_user,
-		intent_tag=action_type,
-		payload_type="CARD_RESOLUTION",
-		target_role="ALL",
-		body_text=f"Approved {action_type}{delivery_suffix}",
-		metadata=res_payload,
-		resolution_state="NONE",
-		parent_event=event_name,
-		idempotency_key=clean_idem,
-	)
-	projection = recompute_thread_projection(card.thread, publish=True)
-	_publish_board_event(res_ev)
-
-	return {
-		"already_resolved": False,
-		"event_name": event_name,
-		"thread_key": card.thread,
-		"payload_type": card.payload_type,
-		"action_type": action_type,
-		"resolution_state": "RESOLVED",
-		"execution_result": exec_result,
-		"resolution_event": res_ev.name,
-		"resolution_payload": res_payload,
-		"projection": projection,
-	}
 
 
 def undo_receipt_action(
@@ -2283,45 +2621,46 @@ def undo_receipt_action(
 	if not card_schema.get("reversible", True) or not isinstance(undo_spec, dict) or not action_type:
 		raise BoardContractError(f"AI receipt {event_name} does not have a reversible undo_spec.")
 
-	undo_result = _execute_undo_action(action_type, undo_spec, reason=reason)
-	resolved_at = now_datetime()
-	res_payload = {
-		"decision": "undo",
-		"action_type": action_type,
-		"reason": reason,
-		"undone_by": actor_user,
-		"undo_result": undo_result,
-	}
-	frappe.db.set_value(
-		"Shop Board Event",
-		event_name,
-		{
-			"resolution_state": "UNDONE",
-			"resolved_by": actor_user,
-			"resolved_at": resolved_at,
-			"resolution_payload": json.dumps(res_payload, default=str),
-		},
-		update_modified=True,
-	)
+	with _as_system_user():
+		undo_result = _execute_undo_action(action_type, undo_spec, reason=reason, actor_user=actor_user)
+		resolved_at = now_datetime()
+		res_payload = {
+			"decision": "undo",
+			"action_type": action_type,
+			"reason": reason,
+			"undone_by": actor_user,
+			"undo_result": undo_result,
+		}
+		frappe.db.set_value(
+			"Shop Board Event",
+			event_name,
+			{
+				"resolution_state": "UNDONE",
+				"resolved_by": actor_user,
+				"resolved_at": resolved_at,
+				"resolution_payload": json.dumps(res_payload, default=str),
+			},
+			update_modified=True,
+		)
 
-	clean_idem = idempotency_key.strip() if isinstance(idempotency_key, str) and idempotency_key.strip() else None
-	res_ev = _insert_board_event(
-		thread_key=receipt.thread,
-		thread_type=receipt.thread_type,
-		repair_order=receipt.repair_order,
-		actor_type=actor_role,
-		actor_user=actor_user,
-		intent_tag="UNDO",
-		payload_type="CARD_RESOLUTION",
-		target_role="ALL",
-		body_text=f"Undid {action_type}: {reason or 'Reverted via Shop Board'}",
-		metadata=res_payload,
-		resolution_state="NONE",
-		parent_event=event_name,
-		idempotency_key=clean_idem,
-	)
-	projection = recompute_thread_projection(receipt.thread, publish=True)
-	_publish_board_event(res_ev)
+		clean_idem = idempotency_key.strip() if isinstance(idempotency_key, str) and idempotency_key.strip() else None
+		res_ev = _insert_board_event(
+			thread_key=receipt.thread,
+			thread_type=receipt.thread_type,
+			repair_order=receipt.repair_order,
+			actor_type=actor_role,
+			actor_user=actor_user,
+			intent_tag="UNDO",
+			payload_type="CARD_RESOLUTION",
+			target_role="ALL",
+			body_text=f"Undid {action_type}: {reason or 'Reverted via Shop Board'}",
+			metadata=res_payload,
+			resolution_state="NONE",
+			parent_event=event_name,
+			idempotency_key=clean_idem,
+		)
+		projection = recompute_thread_projection(receipt.thread, publish=True)
+		_publish_board_event(res_ev)
 
 	return {
 		"already_undone": False,

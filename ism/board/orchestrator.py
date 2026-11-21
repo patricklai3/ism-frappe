@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any
 
@@ -33,6 +34,28 @@ _DELAY_HINT_RE = re.compile(
 	re.IGNORECASE,
 )
 _SECRET_SCRUB_RE = re.compile(r"(?:key|token|bearer|authorization)\s*[:=]\s*\S+", re.IGNORECASE)
+
+
+@contextmanager
+def _as_system_user():
+	"""Temporarily elevate to Administrator for verified internal ERP context & event writes."""
+	prev_user = getattr(frappe.session, "user", None) or "Administrator"
+	if prev_user == "Administrator":
+		yield prev_user
+		return
+	frappe.set_user("Administrator")
+	try:
+		yield prev_user
+	finally:
+		frappe.set_user(prev_user)
+
+
+def _is_mock_ai_provider() -> bool:
+	try:
+		raw = frappe.db.get_single_value("ISM Settings", "board_ai_provider")
+	except Exception:
+		raw = None
+	return str(raw or "").strip().lower() in ("mock", "mock (deterministic test)", "deterministic")
 
 
 def _safe_json_loads(raw: Any, default: Any) -> Any:
@@ -172,10 +195,11 @@ def _gather_repair_order_context(
 
 	# Candidate reschedule slots when delay/reschedule intent is present (strictly Internal Capacity T)
 	patch_str = json.dumps(clarification_patch or {}, default=str)
+	norm_intent = re.sub(r"[\s_-]+", " ", (intent_tag or "").strip().lower()).strip()
 	if (
 		_DELAY_HINT_RE.search(text or "")
 		or _DELAY_HINT_RE.search(patch_str)
-		or (intent_tag or "").strip().lower() in ("blocker", "reschedule", "delay")
+		or norm_intent in ("blocker", "reschedule", "delay")
 	):
 		try:
 			from ism.api.agent_scheduling import find_available_slots
@@ -410,20 +434,23 @@ def gather_thread_context(
 
 	text = str(getattr(event_doc, "body_text", "") or "")
 
-	if thread_type == "REPAIR_ORDER":
-		ro_name = getattr(event_doc, "repair_order", None) or getattr(thread_doc, "repair_order", None) or ""
-		base_context.update(
-			_gather_repair_order_context(
-				ro_name=ro_name,
-				text=text,
-				intent_tag=base_context["intent_tag"],
-				clarification_patch=clarification_patch,
+	with _as_system_user():
+		if thread_type == "REPAIR_ORDER":
+			ro_name = getattr(event_doc, "repair_order", None) or getattr(thread_doc, "repair_order", None) or ""
+			base_context.update(
+				_gather_repair_order_context(
+					ro_name=ro_name,
+					text=text,
+					intent_tag=base_context["intent_tag"],
+					clarification_patch=clarification_patch,
+				)
 			)
-		)
-	elif thread_type == "INTAKE":
-		base_context.update(_gather_intake_context(text=text, metadata=metadata, clarification_patch=clarification_patch))
-	elif thread_type == "AP_RECEIVING":
-		base_context.update(_gather_ap_receiving_context())
+		elif thread_type == "INTAKE":
+			base_context.update(
+				_gather_intake_context(text=text, metadata=metadata, clarification_patch=clarification_patch)
+			)
+		elif thread_type == "AP_RECEIVING":
+			base_context.update(_gather_ap_receiving_context())
 
 	return base_context
 
@@ -528,45 +555,46 @@ def enqueue_board_event(
 	event_name: str,
 	clarification_patch: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-	"""Enqueue a ``Shop Board Event`` for bounded AI orchestration (synchronous under ``in_test``)."""
+	"""Enqueue a ``Shop Board Event`` for bounded AI orchestration (synchronous under ``in_test`` or Mock provider)."""
 	if not isinstance(event_name, str) or not event_name.strip():
 		raise BoardContractError("event_name must be a non-empty string.")
 	clean_name = event_name.strip()
 
-	event_doc = frappe.get_doc("Shop Board Event", clean_name)
-	thread_doc = frappe.get_doc("Shop Board Thread", event_doc.thread)
+	with _as_system_user():
+		event_doc = frappe.get_doc("Shop Board Event", clean_name)
+		thread_doc = frappe.get_doc("Shop Board Thread", event_doc.thread)
 
-	event_doc.db_set({"ai_status": "QUEUED", "ai_error": ""}, update_modified=True)
-	_publish_ai_status(
-		event_doc=event_doc,
-		thread_key=thread_doc.name,
-		thread_type=thread_doc.thread_type,
-		repair_order=event_doc.repair_order or thread_doc.repair_order,
-		ai_status="QUEUED",
-		ai_error=None,
-	)
+		event_doc.db_set({"ai_status": "QUEUED", "ai_error": ""}, update_modified=True)
+		_publish_ai_status(
+			event_doc=event_doc,
+			thread_key=thread_doc.name,
+			thread_type=thread_doc.thread_type,
+			repair_order=event_doc.repair_order or thread_doc.repair_order,
+			ai_status="QUEUED",
+			ai_error=None,
+		)
 
-	if getattr(frappe.flags, "in_test", False):
-		result = process_board_event(clean_name, clarification_patch=clarification_patch)
-		result["queued"] = False
-		result["synchronous"] = True
-		return result
+		if getattr(frappe.flags, "in_test", False) or _is_mock_ai_provider():
+			result = process_board_event(clean_name, clarification_patch=clarification_patch)
+			result["queued"] = False
+			result["synchronous"] = True
+			return result
 
-	frappe.enqueue(
-		"ism.board.orchestrator.process_board_event",
-		queue="default",
-		enqueue_after_commit=True,
-		event_name=clean_name,
-		clarification_patch=clarification_patch,
-		job_name=f"ism_board_event:{clean_name}",
-	)
-	return {
-		"event_name": clean_name,
-		"thread_key": thread_doc.name,
-		"ai_status": "QUEUED",
-		"queued": True,
-		"synchronous": False,
-	}
+		frappe.enqueue(
+			"ism.board.orchestrator.process_board_event",
+			queue="default",
+			enqueue_after_commit=True,
+			event_name=clean_name,
+			clarification_patch=clarification_patch,
+			job_name=f"ism_board_event:{clean_name}",
+		)
+		return {
+			"event_name": clean_name,
+			"thread_key": thread_doc.name,
+			"ai_status": "QUEUED",
+			"queued": True,
+			"synchronous": False,
+		}
 
 
 def process_board_event(
@@ -581,105 +609,106 @@ def process_board_event(
 		raise BoardContractError("event_name must be a non-empty string.")
 	clean_name = event_name.strip()
 
-	event_doc = frappe.get_doc("Shop Board Event", clean_name)
-	thread_doc = frappe.get_doc("Shop Board Thread", event_doc.thread)
-	ro_name = event_doc.repair_order or thread_doc.repair_order
+	with _as_system_user():
+		event_doc = frappe.get_doc("Shop Board Event", clean_name)
+		thread_doc = frappe.get_doc("Shop Board Thread", event_doc.thread)
+		ro_name = event_doc.repair_order or thread_doc.repair_order
 
-	active_provider = provider if provider is not None else get_ai_provider()
-	if active_provider is None:
-		event_doc.db_set({"ai_status": "NONE", "ai_error": ""}, update_modified=True)
-		return {
-			"event_name": event_doc.name,
-			"thread_key": thread_doc.name,
-			"ai_status": "NONE",
-			"skipped": True,
-			"reason": "Board AI provider is disabled.",
-		}
+		active_provider = provider if provider is not None else get_ai_provider()
+		if active_provider is None:
+			event_doc.db_set({"ai_status": "NONE", "ai_error": ""}, update_modified=True)
+			return {
+				"event_name": event_doc.name,
+				"thread_key": thread_doc.name,
+				"ai_status": "NONE",
+				"skipped": True,
+				"reason": "Board AI provider is disabled.",
+			}
 
-	event_doc.db_set({"ai_status": "PROCESSING", "ai_error": ""}, update_modified=True)
-	_publish_ai_status(
-		event_doc=event_doc,
-		thread_key=thread_doc.name,
-		thread_type=thread_doc.thread_type,
-		repair_order=ro_name,
-		ai_status="PROCESSING",
-		ai_error=None,
-	)
-
-	try:
-		context = gather_thread_context(thread_doc, event_doc, clarification_patch=clarification_patch)
-		media_blobs = _load_event_media_blobs(event_doc)
-
-		raw_decision = active_provider.analyze_capture(
-			thread_type=thread_doc.thread_type,
-			context=context,
-			text=event_doc.body_text,
-			media_blobs=media_blobs,
-			clarification_patch=clarification_patch,
-		)
-		decision = normalize_decision(raw_decision)
-
-		# Persist transcript and confidence_score on the event (mutable fields)
-		persist_updates: dict[str, Any] = {
-			"confidence_score": decision["confidence"],
-		}
-		if decision["transcript"]:
-			persist_updates["transcript"] = decision["transcript"]
-		event_doc.db_set(persist_updates, update_modified=True)
-		event_doc.confidence_score = decision["confidence"]
-		if decision["transcript"]:
-			event_doc.transcript = decision["transcript"]
-
-		if decision_dispatcher is not None:
-			dispatch_fn = decision_dispatcher
-		else:
-			from ism.board.gateways import dispatch_orchestrator_decision
-
-			dispatch_fn = dispatch_orchestrator_decision
-
-		dispatch_result = dispatch_fn(event_doc, decision)
-
-		event_doc.db_set({"ai_status": "COMPLETED", "ai_error": ""}, update_modified=True)
+		event_doc.db_set({"ai_status": "PROCESSING", "ai_error": ""}, update_modified=True)
 		_publish_ai_status(
 			event_doc=event_doc,
 			thread_key=thread_doc.name,
 			thread_type=thread_doc.thread_type,
 			repair_order=ro_name,
-			ai_status="COMPLETED",
+			ai_status="PROCESSING",
 			ai_error=None,
 		)
-		return {
-			"event_name": event_doc.name,
-			"thread_key": thread_doc.name,
-			"ai_status": "COMPLETED",
-			"decision": decision,
-			"dispatch_result": dispatch_result,
-		}
-	except Exception as exc:
-		safe_err = _safe_error_text(exc)
-		event_doc.db_set({"ai_status": "FAILED", "ai_error": safe_err}, update_modified=True)
-		_append_ai_failure_event(thread_doc, event_doc, safe_err)
-		_publish_ai_status(
-			event_doc=event_doc,
-			thread_key=thread_doc.name,
-			thread_type=thread_doc.thread_type,
-			repair_order=ro_name,
-			ai_status="FAILED",
-			ai_error=safe_err,
-		)
+
 		try:
-			frappe.log_error(
-				title=f"Shop Board AI Orchestrator Failed: {event_doc.name}",
-				message=safe_err,
+			context = gather_thread_context(thread_doc, event_doc, clarification_patch=clarification_patch)
+			media_blobs = _load_event_media_blobs(event_doc)
+
+			raw_decision = active_provider.analyze_capture(
+				thread_type=thread_doc.thread_type,
+				context=context,
+				text=event_doc.body_text,
+				media_blobs=media_blobs,
+				clarification_patch=clarification_patch,
 			)
-		except Exception:
-			pass
-		return {
-			"event_name": event_doc.name,
-			"thread_key": thread_doc.name,
-			"ai_status": "FAILED",
-			"ai_error": safe_err,
-		}
+			decision = normalize_decision(raw_decision)
+
+			# Persist transcript and confidence_score on the event (mutable fields)
+			persist_updates: dict[str, Any] = {
+				"confidence_score": decision["confidence"],
+			}
+			if decision["transcript"]:
+				persist_updates["transcript"] = decision["transcript"]
+			event_doc.db_set(persist_updates, update_modified=True)
+			event_doc.confidence_score = decision["confidence"]
+			if decision["transcript"]:
+				event_doc.transcript = decision["transcript"]
+
+			if decision_dispatcher is not None:
+				dispatch_fn = decision_dispatcher
+			else:
+				from ism.board.gateways import dispatch_orchestrator_decision
+
+				dispatch_fn = dispatch_orchestrator_decision
+
+			dispatch_result = dispatch_fn(event_doc, decision)
+
+			event_doc.db_set({"ai_status": "COMPLETED", "ai_error": ""}, update_modified=True)
+			_publish_ai_status(
+				event_doc=event_doc,
+				thread_key=thread_doc.name,
+				thread_type=thread_doc.thread_type,
+				repair_order=ro_name,
+				ai_status="COMPLETED",
+				ai_error=None,
+			)
+			return {
+				"event_name": event_doc.name,
+				"thread_key": thread_doc.name,
+				"ai_status": "COMPLETED",
+				"decision": decision,
+				"dispatch_result": dispatch_result,
+			}
+		except Exception as exc:
+			safe_err = _safe_error_text(exc)
+			event_doc.db_set({"ai_status": "FAILED", "ai_error": safe_err}, update_modified=True)
+			_append_ai_failure_event(thread_doc, event_doc, safe_err)
+			_publish_ai_status(
+				event_doc=event_doc,
+				thread_key=thread_doc.name,
+				thread_type=thread_doc.thread_type,
+				repair_order=ro_name,
+				ai_status="FAILED",
+				ai_error=safe_err,
+			)
+			try:
+				frappe.log_error(
+					title=f"Shop Board AI Orchestrator Failed: {event_doc.name}",
+					message=safe_err,
+				)
+			except Exception:
+				pass
+			return {
+				"event_name": event_doc.name,
+				"thread_key": thread_doc.name,
+				"ai_status": "FAILED",
+				"ai_error": safe_err,
+			}
 
 
 __all__ = [

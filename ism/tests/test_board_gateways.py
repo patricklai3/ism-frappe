@@ -1064,3 +1064,310 @@ class TestBoardGateways(ISMTestCase):
 		self.assertEqual(int(frappe.db.get_value("Purchase Order", po_name, "docstatus")), 0)
 		rej2 = resolve_card_action(out["gates"][0], "reject")
 		self.assertTrue(rej2["already_resolved"])
+
+	def test_real_non_admin_tech_and_manager_end_to_end_and_slot_normalization(self):
+		ensure_singleton_shop_threads()
+		tech_email = self._create_user_with_roles("real_tech_e2e@example.com", ["ISM Technician"])
+		mgr_email = self._create_user_with_roles("real_mgr_e2e@example.com", ["ISM Manager"])
+		advisor_email = self._create_user_with_roles("real_advisor_e2e@example.com", ["ISM Service Advisor"])
+
+		# Enable Mock AI auto-processing in ISM Settings
+		settings = frappe.get_single("ISM Settings")
+		orig_provider = getattr(settings, "board_ai_provider", None)
+		orig_auto = getattr(settings, "board_ai_auto_process", None)
+		settings.board_ai_provider = "Mock (Deterministic Test)"
+		settings.board_ai_auto_process = 1
+		settings.flags.ignore_permissions = True
+		settings.save()
+		frappe.clear_cache(doctype="ISM Settings")
+
+		try:
+			ro, _cust, _veh = self._create_ro(approved=True)
+			ro.db_set("odometer_out", 12000, update_modified=False)
+			tkey = ensure_thread_for_ro(ro.name)
+
+			# 1. Real ISM Technician: post_board_capture (sync Mock) + clarification resolve + undo + strict gate denial
+			frappe.set_user(tech_email)
+			cap_fyi = board_api.post_board_capture(
+				repair_order=ro.name,
+				text="FYI inspected brake lines, all dry.",
+				intent_tag="FYI",
+			)
+			self.assertTrue(cap_fyi["ok"])
+			self.assertEqual(cap_fyi["event"]["actor_user"], tech_email)
+			self.assertEqual(cap_fyi["event"]["ai_status"], "COMPLETED")
+			self.track("Shop Board Event", cap_fyi["event"]["name"])
+
+			# Find autonomous AI_RECEIPT and undo as real ISM Technician
+			receipts = frappe.get_all(
+				"Shop Board Event",
+				filters={"parent_event": cap_fyi["event"]["name"], "payload_type": "AI_RECEIPT"},
+				pluck="name",
+			)
+			self.assertTrue(receipts)
+			undo_res = board_api.undo_board_receipt(receipts[0], reason="Typo")
+			self.assertTrue(undo_res["ok"])
+			self.assertEqual(
+				frappe.db.get_value("Shop Board Event", receipts[0], "resolved_by"),
+				tech_email,
+			)
+
+			# Ambiguous finding capture by real ISM Technician -> CLARIFICATION_CARD -> Tech clarifies -> COMPLETED
+			cap_ambig = board_api.post_board_capture(
+				repair_order=ro.name,
+				text="Found a control arm bushing torn on front suspension.",
+				intent_tag="Parts",
+			)
+			self.assertTrue(cap_ambig["ok"])
+			self.assertEqual(cap_ambig["event"]["ai_status"], "COMPLETED")
+			self.track("Shop Board Event", cap_ambig["event"]["name"])
+			clar_cards = frappe.get_all(
+				"Shop Board Event",
+				filters={"parent_event": cap_ambig["event"]["name"], "payload_type": "CLARIFICATION_CARD"},
+				pluck="name",
+			)
+			self.assertEqual(len(clar_cards), 1)
+			clar_res = board_api.resolve_board_card(clar_cards[0], "clarify", selected_option="Front Left")
+			self.assertTrue(clar_res["ok"])
+			self.assertEqual(clar_res["resolution_state"], "RESOLVED")
+			self.assertEqual(
+				frappe.db.get_value("Shop Board Event", clar_cards[0], "resolved_by"),
+				tech_email,
+			)
+			self.assertEqual(clar_res["re_enqueued"].get("ai_status"), "COMPLETED")
+
+			# Tech MUST still be rejected on newly generated APPROVAL_GATEs and Manager endpoints
+			gates = frappe.get_all(
+				"Shop Board Event",
+				filters={"parent_event": cap_ambig["event"]["name"], "payload_type": "APPROVAL_GATE"},
+				pluck="name",
+			)
+			self.assertGreaterEqual(len(gates), 1)
+			for g in gates:
+				with self.assertRaises(frappe.PermissionError):
+					board_api.resolve_board_card(g, "approve")
+			with self.assertRaises(frappe.PermissionError):
+				board_api.get_cockpit_dashboard()
+			with self.assertRaises(frappe.PermissionError):
+				board_api.sync_cockpit_action("board:tech-deny", "dismiss")
+			with self.assertRaises(frappe.PermissionError):
+				board_api.price_part(tesla_oem_price=120.0, cost=50.0)
+			with self.assertRaises(frappe.PermissionError):
+				board_api.test_media_storage()
+
+			# 2. Real ISM Manager: INTAKE_QUOTE_AND_BOOK with find_available_slots "date" + "available_bay_ids",
+			#    omitted odometer_in, requested_services alias, AND provisional fallback without VIN
+			frappe.set_user("Administrator")
+			bay = self.create_test_service_bay() if hasattr(self, "create_test_service_bay") else None
+			intake_cust = self.create_test_customer()
+			intake_veh = self.create_test_vehicle(customer=intake_cust.name, model="Model Y")
+			intake_src = self._insert_capture_event("SHOP:INTAKE", "Book Model Y intake")
+			slot_day = add_days(today(), 6)
+			raw_slot = {"date": slot_day, "start_time": "10:00"}
+			if bay:
+				raw_slot["available_bay_ids"] = [bay.name]
+
+			g_intake = dispatch_orchestrator_decision(
+				intake_src,
+				{
+					"confidence": 0.96,
+					"action": "INTAKE_QUOTE_AND_BOOK",
+					"action_payload": {
+						"customer": intake_cust.name,
+						"customer_name": intake_cust.customer_name,
+						"vin": intake_veh.vin,
+						"requested_services": ["Annual Brake Inspection"],
+						"candidate_slots": [raw_slot],
+					},
+				},
+			)
+			# Approve as REAL non-Admin ISM Manager (NOT Administrator)
+			frappe.set_user(mgr_email)
+			res_in = board_api.resolve_board_card(g_intake["gates"][0], "approve", selected_option="0")
+			self.assertTrue(res_in["ok"])
+			self.assertEqual(
+				frappe.db.get_value("Shop Board Event", g_intake["gates"][0], "resolved_by"),
+				mgr_email,
+			)
+			exec_in = res_in["execution_result"]
+			self.assertTrue(exec_in["repair_order"])
+			self.track("Repair Order", exec_in["repair_order"])
+			self.assertIsNotNone(exec_in["booking"])
+			self.assertEqual(exec_in["chosen_slot"]["scheduled_date"], slot_day)
+			if exec_in["booking"] and (exec_in["booking"].get("data") or {}).get("name"):
+				self.track("Schedule Entry", exec_in["booking"]["data"]["name"])
+
+			# Provisional intake booking when VIN / vehicle is absent
+			frappe.set_user("Administrator")
+			g_prov = dispatch_orchestrator_decision(
+				intake_src,
+				{
+					"confidence": 0.95,
+					"action": "INTAKE_QUOTE_AND_BOOK",
+					"action_payload": {
+						"customer_name": "Provisional Walk-In",
+						"requested_services": ["Diagnostic Check"],
+						"candidate_slots": [{"date": add_days(today(), 7), "start_time": "14:00"}],
+					},
+				},
+			)
+			frappe.set_user(advisor_email)
+			res_prov = board_api.resolve_board_card(g_prov["gates"][0], "approve", selected_option="0")
+			self.assertTrue(res_prov["ok"])
+			self.assertIsNone(res_prov["execution_result"]["repair_order"])
+			self.assertIsNotNone(res_prov["execution_result"]["booking"])
+			self.assertEqual(
+				frappe.db.get_value("Shop Board Event", g_prov["gates"][0], "resolved_by"),
+				advisor_email,
+			)
+			if (res_prov["execution_result"]["booking"].get("data") or {}).get("name"):
+				self.track("Schedule Entry", res_prov["execution_result"]["booking"]["data"]["name"])
+
+			# 3. Real ISM Manager: RESCHEDULE_APPOINTMENT (with "date" slot key), RECORD_DEPOSIT, CHECKOUT_REPAIR_ORDER,
+			#    SUBMIT_PO, RECEIVE_PO, POST_PURCHASE_INVOICE (with "items"), PAY_PURCHASE (with "amount")
+			frappe.set_user("Administrator")
+			ro_bill, _, _ = self._create_ro(approved=True)
+			ro_bill.db_set("odometer_out", 12000, update_modified=False)
+			bill_tkey = ensure_thread_for_ro(ro_bill.name)
+			se = self.create_test_schedule_entry(
+				repair_order=ro_bill.name,
+				scheduled_date=add_days(today(), 2),
+				scheduled_time="09:00:00",
+				estimated_duration=60,
+			)
+			src_ro = self._insert_capture_event(bill_tkey, "Manager gates non-admin")
+			new_resched_day = add_days(today(), 8)
+			g_rs = dispatch_orchestrator_decision(
+				src_ro,
+				{
+					"confidence": 0.96,
+					"action": "RESCHEDULE_APPOINTMENT",
+					"action_payload": {
+						"repair_order": ro_bill.name,
+						"schedule_entry": se.name,
+						"candidate_slots": [{"date": new_resched_day, "start_time": "11:00"}],
+					},
+				},
+			)
+			g_dep = dispatch_orchestrator_decision(
+				src_ro,
+				{
+					"confidence": 0.96,
+					"action": "RECORD_DEPOSIT",
+					"action_payload": {"repair_order": ro_bill.name, "amount": 25.0},
+				},
+			)
+			g_chk = dispatch_orchestrator_decision(
+				src_ro,
+				{
+					"confidence": 0.96,
+					"action": "CHECKOUT_REPAIR_ORDER",
+					"action_payload": {"repair_order": ro_bill.name, "odometer_out": 12050},
+				},
+			)
+			ap_item = self.create_test_item(
+				f"TEST-MGR-AP-{frappe.generate_hash(length=5)}", is_stock_item=1, standard_rate=60.0
+			)
+			ap_sup = self._create_supplier("MGRAP")
+			ap_src = self._insert_capture_event("SHOP:AP_RECEIVING", "Manager AP non-admin")
+			g_po = dispatch_orchestrator_decision(
+				ap_src,
+				{
+					"confidence": 0.96,
+					"action": "SUBMIT_PO",
+					"action_payload": {
+						"items": [
+							{
+								"item_code": ap_item.name,
+								"supplier": ap_sup,
+								"qty": 1,
+								"rate": 60.0,
+								"order_mode": "Purchase Order",
+							}
+						]
+					},
+				},
+			)
+
+			frappe.set_user(mgr_email)
+			r_rs = board_api.resolve_board_card(g_rs["gates"][0], "approve", selected_option="0")
+			self.assertTrue(r_rs["ok"])
+			se.reload()
+			self.assertEqual(str(se.scheduled_date), str(new_resched_day))
+
+			r_dep = board_api.resolve_board_card(g_dep["gates"][0], "approve", selected_option="Debit / Interac")
+			self.assertTrue(r_dep["ok"])
+			if (r_dep["execution_result"].get("data") or {}).get("payment_entry"):
+				self.track("Payment Entry", r_dep["execution_result"]["data"]["payment_entry"])
+
+			r_chk = board_api.resolve_board_card(g_chk["gates"][0], "approve", selected_option="Credit Card")
+			self.assertTrue(r_chk["ok"])
+			chk_data = r_chk["execution_result"]["data"]
+			if chk_data.get("sales_invoice"):
+				self.track("Sales Invoice", chk_data["sales_invoice"])
+			if chk_data.get("payment_entry"):
+				self.track("Payment Entry", chk_data["payment_entry"])
+
+			r_po = board_api.resolve_board_card(g_po["gates"][0], "approve")
+			self.assertTrue(r_po["ok"])
+			po_name = r_po["execution_result"]["data"]["purchase_orders"][0]
+			self.track("Purchase Order", po_name)
+
+			g_rec = dispatch_orchestrator_decision(
+				ap_src,
+				{"confidence": 0.96, "action": "RECEIVE_PO", "action_payload": {"purchase_order": po_name}},
+			)
+			r_rec = board_api.resolve_board_card(g_rec["gates"][0], "approve")
+			self.assertTrue(r_rec["ok"])
+			self.track("Purchase Receipt", r_rec["execution_result"]["data"]["purchase_receipt"])
+
+			g_pi = dispatch_orchestrator_decision(
+				ap_src,
+				{
+					"confidence": 0.96,
+					"action": "POST_PURCHASE_INVOICE",
+					"action_payload": {
+						"purchase_order": po_name,
+						"bill_no": f"MGR-INV-{frappe.generate_hash(length=5)}",
+						"bill_date": today(),
+						"update_stock": False,
+					},
+				},
+			)
+			r_pi = board_api.resolve_board_card(g_pi["gates"][0], "approve")
+			self.assertTrue(r_pi["ok"])
+			pi_name = r_pi["execution_result"]["purchase_invoice_result"]["data"]["purchase_invoice"]
+			self.track("Purchase Invoice", pi_name)
+
+			g_pay = dispatch_orchestrator_decision(
+				ap_src,
+				{
+					"confidence": 0.96,
+					"action": "PAY_PURCHASE",
+					"action_payload": {
+						"purchase_invoice": pi_name,
+						"amount": 60.0,
+						"reference_no": "MGR-CHQ-1",
+						"reference_date": today(),
+					},
+				},
+			)
+			r_pay = board_api.resolve_board_card(g_pay["gates"][0], "approve", selected_option="E-Transfer")
+			self.assertTrue(r_pay["ok"])
+			self.track("Payment Entry", r_pay["execution_result"]["data"]["payment_entry"])
+			self.assertEqual(
+				frappe.db.get_value("Shop Board Event", g_pay["gates"][0], "resolved_by"),
+				mgr_email,
+			)
+
+			# Cockpit dashboard accessible for real non-Admin Manager
+			cockpit = board_api.get_cockpit_dashboard()
+			self.assertTrue(cockpit["ok"])
+		finally:
+			frappe.set_user("Administrator")
+			settings = frappe.get_single("ISM Settings")
+			settings.board_ai_provider = orig_provider
+			settings.board_ai_auto_process = orig_auto
+			settings.flags.ignore_permissions = True
+			settings.save()
+			frappe.clear_cache(doctype="ISM Settings")

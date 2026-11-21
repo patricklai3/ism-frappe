@@ -31,6 +31,7 @@ from ism.board.contracts import (
 	THREAD_TYPES,
 )
 from ism.board.gateways import (
+	_as_system_user,
 	_lazy_enqueue_board_event,
 	_publish_board_event,
 	assert_can_commit_approval_gate,
@@ -215,11 +216,12 @@ def _should_auto_enqueue_ai(metadata: dict[str, Any]) -> bool:
 	if coerce_bool(metadata.get("skip_ai"), default=False):
 		return False
 	try:
-		settings = frappe.get_single("ISM Settings")
+		with _as_system_user():
+			settings = frappe.get_single("ISM Settings")
+			provider = (getattr(settings, "board_ai_provider", None) or "Disabled").strip()
+			auto_process = cint(getattr(settings, "board_ai_auto_process", 0))
 	except Exception:
 		return False
-	provider = (getattr(settings, "board_ai_provider", None) or "Disabled").strip()
-	auto_process = cint(getattr(settings, "board_ai_auto_process", 0))
 	return provider != "Disabled" and auto_process == 1
 
 
@@ -302,7 +304,9 @@ def list_board_threads(
 ) -> dict[str, Any]:
 	"""List active and singleton Shop Board Threads with Andon projection badges."""
 	actor_role = resolve_actor_role()
-	ensure_singleton_shop_threads()
+	caller_user = frappe.session.user
+	with _as_system_user():
+		ensure_singleton_shop_threads()
 
 	safe_limit = optional_int(limit, "limit", min_val=1, max_val=200, default=50)
 	clean_type = optional_str(thread_type, "thread_type")
@@ -338,7 +342,7 @@ def list_board_threads(
 			values.append(clean_status)
 
 	if only_assigned:
-		emp_name = frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "name")
+		emp_name = frappe.db.get_value("Employee", {"user_id": caller_user}, "name")
 		if not emp_name:
 			return {
 				"ok": True,
@@ -397,67 +401,68 @@ def get_board_thread(
 ) -> dict[str, Any]:
 	"""Return a thread's projection, paginated chronological timeline, and Seam 6 pin_state."""
 	actor_role = resolve_actor_role()
-	canonical_key = resolve_thread_key(
-		thread_key=optional_str(thread_key, "thread_key"),
-		repair_order=optional_str(repair_order, "repair_order"),
-	)
 	safe_limit = optional_int(limit, "limit", min_val=1, max_val=500, default=100)
 	clean_before = optional_str(before_event, "before_event")
 
-	thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
+	with _as_system_user():
+		canonical_key = resolve_thread_key(
+			thread_key=optional_str(thread_key, "thread_key"),
+			repair_order=optional_str(repair_order, "repair_order"),
+		)
+		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
 
-	conditions = ["thread = %s"]
-	values: list[Any] = [canonical_key]
-	if clean_before:
-		ref = frappe.db.get_value(
-			"Shop Board Event",
-			clean_before,
-			["event_timestamp", "creation", "name"],
+		conditions = ["thread = %s"]
+		values: list[Any] = [canonical_key]
+		if clean_before:
+			ref = frappe.db.get_value(
+				"Shop Board Event",
+				clean_before,
+				["event_timestamp", "creation", "name"],
+				as_dict=True,
+			)
+			if ref:
+				conditions.append("(event_timestamp, creation, name) < (%s, %s, %s)")
+				values.extend([ref.event_timestamp, ref.creation, ref.name])
+
+		where_sql = " AND ".join(conditions)
+		values.append(safe_limit + 1)
+		cols_sql = ", ".join(_EVENT_FIELDS)
+		raw_rows = frappe.db.sql(
+			f"""
+			SELECT {cols_sql}
+			FROM `tabShop Board Event`
+			WHERE {where_sql}
+			ORDER BY event_timestamp DESC, creation DESC, name DESC
+			LIMIT %s
+			""",
+			tuple(values),
 			as_dict=True,
 		)
-		if ref:
-			conditions.append("(event_timestamp, creation, name) < (%s, %s, %s)")
-			values.extend([ref.event_timestamp, ref.creation, ref.name])
 
-	where_sql = " AND ".join(conditions)
-	values.append(safe_limit + 1)
-	cols_sql = ", ".join(_EVENT_FIELDS)
-	raw_rows = frappe.db.sql(
-		f"""
-		SELECT {cols_sql}
-		FROM `tabShop Board Event`
-		WHERE {where_sql}
-		ORDER BY event_timestamp DESC, creation DESC, name DESC
-		LIMIT %s
-		""",
-		tuple(values),
-		as_dict=True,
-	)
+		has_more = len(raw_rows) > safe_limit
+		page_rows = raw_rows[:safe_limit]
+		page_rows.reverse()  # Chronological ascending
+		events = [_serialize_event(r) for r in page_rows]
+		next_before_event = events[0]["name"] if (has_more and events) else None
 
-	has_more = len(raw_rows) > safe_limit
-	page_rows = raw_rows[:safe_limit]
-	page_rows.reverse()  # Chronological ascending
-	events = [_serialize_event(r) for r in page_rows]
-	next_before_event = events[0]["name"] if (has_more and events) else None
+		open_card_rows = frappe.get_all(
+			"Shop Board Event",
+			filters={
+				"thread": canonical_key,
+				"payload_type": ["in", list(PENDING_DECISION_PAYLOAD_TYPES)],
+				"resolution_state": "PENDING",
+			},
+			fields=_EVENT_FIELDS,
+			order_by="event_timestamp asc, creation asc",
+		)
+		open_cards = [_serialize_event(r) for r in open_card_rows]
 
-	open_card_rows = frappe.get_all(
-		"Shop Board Event",
-		filters={
-			"thread": canonical_key,
-			"payload_type": ["in", list(PENDING_DECISION_PAYLOAD_TYPES)],
-			"resolution_state": "PENDING",
-		},
-		fields=_EVENT_FIELDS,
-		order_by="event_timestamp asc, creation asc",
-	)
-	open_cards = [_serialize_event(r) for r in open_card_rows]
-
-	pin_state = _get_ro_pin_state_safe(
-		thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
-	)
-	ro_summary = _get_ro_summary(
-		thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
-	)
+		pin_state = _get_ro_pin_state_safe(
+			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
+		)
+		ro_summary = _get_ro_summary(
+			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
+		)
 
 	return {
 		"ok": True,
@@ -482,60 +487,61 @@ def get_thread_delta(
 ) -> dict[str, Any]:
 	"""Return incremental events & updated projection state for reconnect/catch-up sync."""
 	actor_role = resolve_actor_role()
-	canonical_key = resolve_thread_key(
-		thread_key=optional_str(thread_key, "thread_key"),
-		repair_order=optional_str(repair_order, "repair_order"),
-	)
 	known_ver = optional_int(known_projection_version, "known_projection_version", min_val=0, default=0)
 	clean_after = optional_str(after_event, "after_event")
 
-	thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
-	cols_sql = ", ".join(_EVENT_FIELDS)
+	with _as_system_user():
+		canonical_key = resolve_thread_key(
+			thread_key=optional_str(thread_key, "thread_key"),
+			repair_order=optional_str(repair_order, "repair_order"),
+		)
+		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
+		cols_sql = ", ".join(_EVENT_FIELDS)
 
-	conditions = ["thread = %s"]
-	values: list[Any] = [canonical_key]
-	if clean_after:
-		ref = frappe.db.get_value(
-			"Shop Board Event",
-			clean_after,
-			["event_timestamp", "creation", "name"],
+		conditions = ["thread = %s"]
+		values: list[Any] = [canonical_key]
+		if clean_after:
+			ref = frappe.db.get_value(
+				"Shop Board Event",
+				clean_after,
+				["event_timestamp", "creation", "name"],
+				as_dict=True,
+			)
+			if ref:
+				conditions.append("(event_timestamp, creation, name) > (%s, %s, %s)")
+				values.extend([ref.event_timestamp, ref.creation, ref.name])
+
+		where_sql = " AND ".join(conditions)
+		raw_rows = frappe.db.sql(
+			f"""
+			SELECT {cols_sql}
+			FROM `tabShop Board Event`
+			WHERE {where_sql}
+			ORDER BY event_timestamp ASC, creation ASC, name ASC
+			LIMIT 200
+			""",
+			tuple(values),
 			as_dict=True,
 		)
-		if ref:
-			conditions.append("(event_timestamp, creation, name) > (%s, %s, %s)")
-			values.extend([ref.event_timestamp, ref.creation, ref.name])
+		new_events = [_serialize_event(r) for r in raw_rows]
 
-	where_sql = " AND ".join(conditions)
-	raw_rows = frappe.db.sql(
-		f"""
-		SELECT {cols_sql}
-		FROM `tabShop Board Event`
-		WHERE {where_sql}
-		ORDER BY event_timestamp ASC, creation ASC, name ASC
-		LIMIT 200
-		""",
-		tuple(values),
-		as_dict=True,
-	)
-	new_events = [_serialize_event(r) for r in raw_rows]
+		open_card_rows = frappe.get_all(
+			"Shop Board Event",
+			filters={
+				"thread": canonical_key,
+				"payload_type": ["in", list(PENDING_DECISION_PAYLOAD_TYPES)],
+				"resolution_state": "PENDING",
+			},
+			fields=_EVENT_FIELDS,
+			order_by="event_timestamp asc, creation asc",
+		)
+		open_cards = [_serialize_event(r) for r in open_card_rows]
 
-	open_card_rows = frappe.get_all(
-		"Shop Board Event",
-		filters={
-			"thread": canonical_key,
-			"payload_type": ["in", list(PENDING_DECISION_PAYLOAD_TYPES)],
-			"resolution_state": "PENDING",
-		},
-		fields=_EVENT_FIELDS,
-		order_by="event_timestamp asc, creation asc",
-	)
-	open_cards = [_serialize_event(r) for r in open_card_rows]
-
-	current_ver = cint(thread_doc.projection_version or 1)
-	changed = current_ver > known_ver or bool(new_events)
-	pin_state = _get_ro_pin_state_safe(
-		thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
-	)
+		current_ver = cint(thread_doc.projection_version or 1)
+		changed = current_ver > known_ver or bool(new_events)
+		pin_state = _get_ro_pin_state_safe(
+			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
+		)
 
 	return {
 		"ok": True,
@@ -561,10 +567,7 @@ def post_board_capture(
 ) -> dict[str, Any]:
 	"""Append an immutable text/media capture event, persist media, update projection, and enqueue AI."""
 	actor_role = resolve_actor_role()
-	canonical_key = resolve_thread_key(
-		thread_key=optional_str(thread_key, "thread_key"),
-		repair_order=optional_str(repair_order, "repair_order"),
-	)
+	caller_user = frappe.session.user
 	clean_text = optional_str(text, "text")
 	clean_intent = optional_str(intent_tag, "intent_tag")
 	clean_idem = optional_str(idempotency_key, "idempotency_key")
@@ -572,80 +575,20 @@ def post_board_capture(
 	if not isinstance(parsed_meta, dict):
 		frappe.throw(_("metadata must be a JSON object."), frappe.ValidationError)
 
-	# Idempotency short-circuit before storing media or creating events
-	if clean_idem:
-		existing_name = frappe.db.get_value("Shop Board Event", {"idempotency_key": clean_idem}, "name")
-		if existing_name:
-			existing_doc = frappe.get_doc("Shop Board Event", existing_name)
-			thread_doc = frappe.get_doc("Shop Board Thread", existing_doc.thread)
-			return {
-				"ok": True,
-				"duplicate": True,
-				"event": _serialize_event(existing_doc),
-				"thread": _serialize_thread(thread_doc),
-				"ai_enqueued": False,
-			}
-
-	thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
 	uploaded = _extract_uploaded_files()
 
-	if not clean_text and not uploaded:
-		frappe.throw(
-			_("Either text or at least one media file is required."),
-			frappe.ValidationError,
+	with _as_system_user():
+		canonical_key = resolve_thread_key(
+			thread_key=optional_str(thread_key, "thread_key"),
+			repair_order=optional_str(repair_order, "repair_order"),
 		)
 
-	stored_attachments: list[dict[str, Any]] = []
-	for filename, content_type, data_bytes in uploaded:
-		stored = media_storage.store_media_payload(
-			filename=filename,
-			content_type=content_type,
-			data_bytes=data_bytes,
-			thread_key=canonical_key,
-			repair_order=thread_doc.repair_order,
-			thread_name=thread_doc.name,
-		)
-		stored_attachments.append(stored)
-
-	# Server-verified metadata (never trust client actor_type or file_refs)
-	verified_meta = dict(parsed_meta)
-	verified_meta.pop("actor_type", None)
-	verified_meta.pop("media_attachments", None)
-	verified_meta["verified_actor_role"] = actor_role
-	verified_meta["verified_actor_user"] = frappe.session.user
-	verified_meta["media_count"] = len(stored_attachments)
-
-	payload_type = "MEDIA_CAPTURE" if stored_attachments else "TEXT"
-	enqueue_ai = _should_auto_enqueue_ai(verified_meta)
-	initial_ai_status = "QUEUED" if enqueue_ai else "NONE"
-
-	try:
-		ev = frappe.get_doc(
-			{
-				"doctype": "Shop Board Event",
-				"thread": canonical_key,
-				"thread_type": thread_doc.thread_type,
-				"repair_order": thread_doc.repair_order,
-				"event_timestamp": now_datetime(),
-				"actor_type": actor_role,
-				"actor_user": frappe.session.user,
-				"intent_tag": clean_intent,
-				"payload_type": payload_type,
-				"target_role": "ALL",
-				"body_text": clean_text or "",
-				"metadata_json": json.dumps(verified_meta, default=str),
-				"media_attachments": json.dumps(stored_attachments, default=str) if stored_attachments else None,
-				"resolution_state": "NONE",
-				"idempotency_key": clean_idem,
-				"ai_status": initial_ai_status,
-			}
-		)
-		ev.insert(ignore_permissions=True)
-	except (frappe.DuplicateEntryError, frappe.UniqueValidationError):
+		# Idempotency short-circuit before storing media or creating events
 		if clean_idem:
 			existing_name = frappe.db.get_value("Shop Board Event", {"idempotency_key": clean_idem}, "name")
 			if existing_name:
 				existing_doc = frappe.get_doc("Shop Board Event", existing_name)
+				thread_doc = frappe.get_doc("Shop Board Thread", existing_doc.thread)
 				return {
 					"ok": True,
 					"duplicate": True,
@@ -653,14 +596,84 @@ def post_board_capture(
 					"thread": _serialize_thread(thread_doc),
 					"ai_enqueued": False,
 				}
-		raise
 
-	projection = recompute_thread_projection(canonical_key, publish=True)
-	_publish_board_event(ev)
+		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
 
-	ai_enqueue_result: dict[str, Any] | None = None
-	if enqueue_ai:
-		ai_enqueue_result = _lazy_enqueue_board_event(ev.name)
+		if not clean_text and not uploaded:
+			frappe.throw(
+				_("Either text or at least one media file is required."),
+				frappe.ValidationError,
+			)
+
+		stored_attachments: list[dict[str, Any]] = []
+		for filename, content_type, data_bytes in uploaded:
+			stored = media_storage.store_media_payload(
+				filename=filename,
+				content_type=content_type,
+				data_bytes=data_bytes,
+				thread_key=canonical_key,
+				repair_order=thread_doc.repair_order,
+				thread_name=thread_doc.name,
+			)
+			stored_attachments.append(stored)
+
+		# Server-verified metadata (never trust client actor_type or file_refs)
+		verified_meta = dict(parsed_meta)
+		verified_meta.pop("actor_type", None)
+		verified_meta.pop("media_attachments", None)
+		verified_meta["verified_actor_role"] = actor_role
+		verified_meta["verified_actor_user"] = caller_user
+		verified_meta["media_count"] = len(stored_attachments)
+
+		payload_type = "MEDIA_CAPTURE" if stored_attachments else "TEXT"
+		enqueue_ai = _should_auto_enqueue_ai(verified_meta)
+		initial_ai_status = "QUEUED" if enqueue_ai else "NONE"
+
+		try:
+			ev = frappe.get_doc(
+				{
+					"doctype": "Shop Board Event",
+					"thread": canonical_key,
+					"thread_type": thread_doc.thread_type,
+					"repair_order": thread_doc.repair_order,
+					"event_timestamp": now_datetime(),
+					"actor_type": actor_role,
+					"actor_user": caller_user,
+					"intent_tag": clean_intent,
+					"payload_type": payload_type,
+					"target_role": "ALL",
+					"body_text": clean_text or "",
+					"metadata_json": json.dumps(verified_meta, default=str),
+					"media_attachments": json.dumps(stored_attachments, default=str) if stored_attachments else None,
+					"resolution_state": "NONE",
+					"idempotency_key": clean_idem,
+					"ai_status": initial_ai_status,
+				}
+			)
+			ev.insert(ignore_permissions=True)
+		except (frappe.DuplicateEntryError, frappe.UniqueValidationError):
+			if clean_idem:
+				existing_name = frappe.db.get_value("Shop Board Event", {"idempotency_key": clean_idem}, "name")
+				if existing_name:
+					existing_doc = frappe.get_doc("Shop Board Event", existing_name)
+					return {
+						"ok": True,
+						"duplicate": True,
+						"event": _serialize_event(existing_doc),
+						"thread": _serialize_thread(thread_doc),
+						"ai_enqueued": False,
+					}
+			raise
+
+		projection = recompute_thread_projection(canonical_key, publish=True)
+		_publish_board_event(ev)
+
+		ai_enqueue_result: dict[str, Any] | None = None
+		if enqueue_ai:
+			ai_enqueue_result = _lazy_enqueue_board_event(ev.name)
+			if isinstance(ai_enqueue_result, dict) and ai_enqueue_result.get("synchronous"):
+				ev.reload()
+				projection = recompute_thread_projection(canonical_key, publish=True)
 
 	return {
 		"ok": True,
@@ -723,6 +736,7 @@ def undo_board_receipt(
 def get_media(event_name: str, file_ref: str):
 	"""Authenticated streaming media proxy with file_ref IDOR validation and Range passthrough."""
 	resolve_actor_role()
+	caller_user = frappe.session.user
 	clean_event = require_str(event_name, "event_name")
 	clean_ref = require_str(file_ref, "file_ref")
 	event_row = frappe.db.get_value(
@@ -736,12 +750,13 @@ def get_media(event_name: str, file_ref: str):
 	media_refs = _parse_json_safe(event_row.media_attachments, [])
 	req = _get_bound_request()
 	range_header = req.headers.get("Range") if (req is not None and getattr(req, "headers", None)) else None
-	stream_result = media_storage.stream_event_media(
-		{"name": clean_event, "media_refs": media_refs},
-		clean_ref,
-		range_header=range_header,
-		user=frappe.session.user,
-	)
+	with _as_system_user():
+		stream_result = media_storage.stream_event_media(
+			{"name": clean_event, "media_refs": media_refs},
+			clean_ref,
+			range_header=range_header,
+			user=caller_user,
+		)
 	return media_storage.build_media_http_response(stream_result)
 
 
@@ -787,7 +802,8 @@ def get_cockpit_dashboard(date: str | None = None) -> dict[str, Any]:
 	"""Return merged executive & dispatch cockpit view (Manager / Advisor / System Manager ONLY)."""
 	assert_can_commit_approval_gate()
 	clean_date = optional_str(date, "date")
-	view = cockpit_view.get_cockpit_view(date=clean_date)
+	with _as_system_user():
+		view = cockpit_view.get_cockpit_view(date=clean_date)
 	return {"ok": True, **view}
 
 
@@ -802,12 +818,13 @@ def sync_cockpit_action(
 	assert_can_commit_approval_gate()
 	from ism.api import agent_fleet
 
-	res = agent_fleet.sync_action_item_state(
-		dedup_key=require_str(dedup_key, "dedup_key"),
-		action=require_str(action, "action"),
-		snooze_minutes=snooze_minutes,
-		notes=optional_str(notes, "notes"),
-	)
+	with _as_system_user():
+		res = agent_fleet.sync_action_item_state(
+			dedup_key=require_str(dedup_key, "dedup_key"),
+			action=require_str(action, "action"),
+			snooze_minutes=snooze_minutes,
+			notes=optional_str(notes, "notes"),
+		)
 	if isinstance(res, dict):
 		return {"ok": True, **res}
 	return {"ok": True, "result": res}
@@ -826,15 +843,16 @@ def price_part(
 	"""Internal-only CAD parts pricing calculator (Manager / Advisor / System Manager ONLY)."""
 	assert_can_commit_approval_gate()
 	try:
-		res = pricing.calculate_part_price(
-			tesla_oem_price=optional_flt(tesla_oem_price, "tesla_oem_price", positive=True, default=None),
-			cost=optional_flt(cost, "cost", positive=True, default=None),
-			part_source=optional_str(part_source, "part_source") or "Aftermarket",
-			part_condition=optional_str(part_condition, "part_condition") or "New",
-			override_rate=optional_flt(override_rate, "override_rate", positive=True, default=None),
-			part_number=optional_str(part_number, "part_number"),
-			part_name=optional_str(part_name, "part_name"),
-		)
+		with _as_system_user():
+			res = pricing.calculate_part_price(
+				tesla_oem_price=optional_flt(tesla_oem_price, "tesla_oem_price", positive=True, default=None),
+				cost=optional_flt(cost, "cost", positive=True, default=None),
+				part_source=optional_str(part_source, "part_source") or "Aftermarket",
+				part_condition=optional_str(part_condition, "part_condition") or "New",
+				override_rate=optional_flt(override_rate, "override_rate", positive=True, default=None),
+				part_number=optional_str(part_number, "part_number"),
+				part_name=optional_str(part_name, "part_name"),
+			)
 	except ValueError as exc:
 		frappe.throw(_(str(exc)), frappe.ValidationError)
 	return {"ok": True, **res}
@@ -844,7 +862,9 @@ def price_part(
 def test_media_storage() -> dict[str, Any]:
 	"""Verify Google Drive media storage connectivity (ISM Manager / System Manager ONLY)."""
 	assert_can_manage_media_storage()
-	res = media_storage.test_google_drive_connection(user=frappe.session.user)
+	caller_user = frappe.session.user
+	with _as_system_user():
+		res = media_storage.test_google_drive_connection(user=caller_user)
 	return {"ok": True, **res}
 
 

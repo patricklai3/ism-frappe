@@ -796,3 +796,90 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		self.assertEqual(mock_oa_post.call_args.kwargs["headers"]["Authorization"], "Bearer test-openai-key")
 		self.assertEqual(mock_oa_post.call_args.kwargs["json"]["response_format"], {"type": "json_object"})
 		self.assertIn(oa_result["action"], ALL_ACTIONS)
+
+	def test_mock_synchronous_execution_outside_in_test_and_intent_pill_aliases(self):
+		ro, _cust, _veh = self._create_ro()
+		tkey = ensure_thread_for_ro(ro.name)
+		ev_sync_prod = self._insert_capture_event(tkey, body_text="FYI torqued bolts to spec.", intent_tag="FYI")
+
+		# 1. With in_test=False and Mock provider, enqueue_board_event STILL executes synchronously
+		orig_in_test = getattr(frappe.flags, "in_test", False)
+		try:
+			frappe.flags.in_test = False
+			self._set_ai_provider("Mock (Deterministic Test)")
+			res_mock = enqueue_board_event(ev_sync_prod.name)
+			self.assertTrue(res_mock.get("synchronous"))
+			self.assertFalse(res_mock.get("queued"))
+			self.assertEqual(res_mock.get("ai_status"), "COMPLETED")
+
+			# With Gemini REST API and in_test=False, enqueue_board_event uses frappe.enqueue asynchronously
+			ev_async_gemini = self._insert_capture_event(tkey, body_text="FYI async gemini test.")
+			self._set_ai_provider("Gemini REST API")
+			with patch("frappe.enqueue") as mock_enq:
+				res_gem = enqueue_board_event(ev_async_gemini.name)
+				mock_enq.assert_called_once()
+				self.assertTrue(res_gem.get("queued"))
+				self.assertFalse(res_gem.get("synchronous"))
+				self.assertEqual(res_gem.get("ai_status"), "QUEUED")
+		finally:
+			frappe.flags.in_test = orig_in_test
+			self._set_ai_provider("Mock (Deterministic Test)")
+
+		# 2. Intent pill normalization: WALK_IN, PACKING_SLIP, VENDOR_BILL, NEW_QUOTE, VIN_PHOTO
+		mock_provider = MockMultimodalProvider()
+		d_walkin = mock_provider.analyze_capture(
+			"INTAKE",
+			{"intent_tag": "WALK_IN", "open_appointments": [{"name": "SE-001"}]},
+			"Customer is here at the counter.",
+			[],
+		)
+		self.assertEqual(d_walkin["action"], "CONVERT_APPOINTMENT_TO_RO")
+		self.assertIn("odometer_in", d_walkin["missing_fields"])
+
+		d_new_quote = mock_provider.analyze_capture(
+			"INTAKE",
+			{
+				"intent_tag": "NEW_QUOTE",
+				"candidate_slots": [{"date": add_days(today(), 2), "start_time": "09:00", "available_bay_ids": ["Bay 1"]}],
+			},
+			"Need a brake inspection quote please.",
+			[],
+		)
+		self.assertEqual(d_new_quote["action"], "INTAKE_QUOTE_AND_BOOK")
+		self.assertEqual(d_new_quote["action_payload"]["odometer_in"], 0)
+		self.assertTrue(d_new_quote["action_payload"]["services"])
+		self.assertEqual(d_new_quote["action_payload"]["candidate_slots"][0]["scheduled_date"], add_days(today(), 2))
+		self.assertEqual(d_new_quote["action_payload"]["candidate_slots"][0]["service_bay"], "Bay 1")
+
+		d_pack = mock_provider.analyze_capture(
+			"AP_RECEIVING",
+			{"intent_tag": "PACKING_SLIP", "open_purchase_orders": [{"name": "PO-101", "supplier": "Acme", "items": []}]},
+			"Box dropped at loading dock.",
+			[],
+		)
+		self.assertEqual(d_pack["action"], "RECEIVE_PO")
+		self.assertIn("parts_data", d_pack["action_payload"])
+
+		d_bill = mock_provider.analyze_capture(
+			"AP_RECEIVING",
+			{
+				"intent_tag": "VENDOR_BILL",
+				"event_metadata": {"bill_no": "INV-5512"},
+				"open_purchase_orders": [{"name": "PO-101", "supplier": "Acme", "items": [{"item_code": "X"}]}],
+			},
+			"Paperwork attached from vendor.",
+			[],
+		)
+		self.assertEqual(d_bill["action"], "POST_PURCHASE_INVOICE")
+		self.assertEqual(d_bill["action_payload"]["bill_no"], "INV-5512")
+		self.assertEqual(d_bill["action_payload"]["parts_data"], [{"item_code": "X"}])
+
+		d_paid = mock_provider.analyze_capture(
+			"AP_RECEIVING",
+			{"intent_tag": "PAID", "open_purchase_orders": [{"name": "PO-101", "supplier": "Acme", "grand_total": 250.0, "items": []}]},
+			"Paid vendor via E-Transfer.",
+			[],
+		)
+		self.assertEqual(d_paid["action"], "PAY_PURCHASE")
+		self.assertEqual(d_paid["action_payload"]["amount"], 250.0)
+		self.assertEqual(d_paid["action_payload"]["paid_amount"], 250.0)

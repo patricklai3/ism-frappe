@@ -625,7 +625,7 @@ class MockMultimodalProvider:
 		if not raw_text and metadata.get("mock_transcript"):
 			raw_text = str(metadata["mock_transcript"]).strip()
 		lowered = raw_text.lower()
-		intent_tag = str(ctx.get("intent_tag") or "").strip().lower()
+		intent_tag = re.sub(r"[\s_-]+", " ", str(ctx.get("intent_tag") or "").strip().lower()).strip()
 		norm_thread_type = str(thread_type or "REPAIR_ORDER").strip().upper()
 
 		# 1. Noisy audio detection (applies across all thread types unless already clarified)
@@ -944,6 +944,42 @@ class MockMultimodalProvider:
 			)
 			comms_draft = draft_customer_message(sanitized_payload, channel="sms", provider=self)
 
+			part_label = f"Front Control Arm ({side})"
+			matched_item_code: str | None = None
+			matched_supplier: str | None = None
+			parts_stock = ctx.get("parts_stock") or {}
+			stock_rows = parts_stock.get("parts") or parts_stock.get("items") or []
+			if isinstance(stock_rows, list):
+				for row in stock_rows:
+					if not isinstance(row, dict):
+						continue
+					row_name = str(row.get("item_name") or row.get("part_name") or row.get("item_code") or "").lower()
+					if "control arm" in row_name and row.get("item_code"):
+						matched_item_code = str(row["item_code"]).strip()
+						if row.get("supplier") or row.get("default_supplier"):
+							matched_supplier = str(row.get("supplier") or row.get("default_supplier")).strip()
+						break
+
+			supp_part_entry: dict[str, Any] = {
+				"part_name": part_label,
+				"qty": qty,
+				"rate": unit_sell,
+				"sell_price": unit_sell,
+				"internal_cost": pricing_result["cost"],
+				"pricing_regime": pricing_result["pricing_regime"],
+			}
+			po_part_entry: dict[str, Any] = {
+				"item_name": part_label,
+				"part_name": part_label,
+				"qty": qty,
+				"rate": pricing_result["cost"],
+			}
+			if matched_item_code:
+				supp_part_entry["item_code"] = matched_item_code
+				po_part_entry["item_code"] = matched_item_code
+			if matched_supplier:
+				po_part_entry["supplier"] = matched_supplier
+
 			return normalize_decision(
 				{
 					"intent": "supplement_finding_resolved",
@@ -959,15 +995,7 @@ class MockMultimodalProvider:
 						"side": side,
 						"duplicate_opposite_side": side == "Both",
 						"labor_hours": labor_hours,
-						"parts": [
-							{
-								"part_name": f"Front Control Arm ({side})",
-								"qty": qty,
-								"sell_price": unit_sell,
-								"internal_cost": pricing_result["cost"],
-								"pricing_regime": pricing_result["pricing_regime"],
-							}
-						],
+						"parts": [supp_part_entry],
 					},
 					"missing_fields": [],
 					"clarification": None,
@@ -977,13 +1005,7 @@ class MockMultimodalProvider:
 							"action": "DRAFT_PURCHASE_ORDER",
 							"action_payload": {
 								"repair_order": ro_name,
-								"items": [
-									{
-										"item_name": f"Front Control Arm ({side})",
-										"qty": qty,
-										"rate": pricing_result["cost"],
-									}
-								],
+								"parts_data": [po_part_entry],
 								"notes": f"Supplement draft PO for {service_title}",
 							},
 						},
@@ -1031,7 +1053,7 @@ class MockMultimodalProvider:
 		metadata: dict[str, Any],
 	) -> dict[str, Any]:
 		# Walk-in appointment conversion
-		if intent_tag == "walk-in" or any(kw in lowered for kw in ("walk-in", "walk in", "convert appointment", "arrived for appointment")):
+		if intent_tag == "walk in" or any(kw in lowered for kw in ("walk-in", "walk in", "convert appointment", "arrived for appointment")):
 			odometer_in = _extract_odometer(raw_text, patch, metadata)
 			pending_appts = list(ctx.get("open_appointments") or [])
 			matched_appt = pending_appts[0] if pending_appts else {}
@@ -1091,6 +1113,13 @@ class MockMultimodalProvider:
 			if not isinstance(slot, dict):
 				continue
 			enriched = dict(slot)
+			if not enriched.get("scheduled_date") and enriched.get("date"):
+				enriched["scheduled_date"] = enriched["date"]
+			if not enriched.get("service_bay"):
+				avail_bays = enriched.get("available_bay_ids")
+				enriched["service_bay"] = enriched.get("bay") or (
+					avail_bays[0] if isinstance(avail_bays, list) and avail_bays else None
+				)
 			if slot.get("start_time"):
 				enriched["customer_arrival_time"] = resolve_customer_arrival_time(slot["start_time"])
 			candidate_slots.append(enriched)
@@ -1140,6 +1169,30 @@ class MockMultimodalProvider:
 		)
 		comms_draft = draft_customer_message(sanitized, channel="sms", provider=self)
 
+		intake_odometer = _extract_odometer(raw_text, patch, metadata)
+		intake_services = (
+			[{"service_package": matched_pkg["name"]}]
+			if matched_pkg and matched_pkg.get("name")
+			else [{"service_title": quoted_service, "labor_hours": labor_hours}]
+		)
+		intake_payload: dict[str, Any] = {
+			"vin": vin,
+			"decoded_vehicle": decoded,
+			"vehicle": matched_vehicles[0].get("name") if matched_vehicles else None,
+			"customer": customer,
+			"customer_name": customer_name,
+			"service_package": matched_pkg.get("name") if matched_pkg else None,
+			"services": intake_services,
+			"requested_services": [quoted_service],
+			"odometer_in": intake_odometer if intake_odometer is not None else 0,
+			"notes": raw_text or quoted_service,
+			"estimated_total": estimated_total,
+			"candidate_slots": candidate_slots,
+		}
+		if not vin and not matched_vehicles:
+			intake_payload["provisional"] = True
+			intake_payload["provisional_vehicle_info"] = vehicle_summary
+
 		return normalize_decision(
 			{
 				"intent": "intake_quote_and_book",
@@ -1148,17 +1201,7 @@ class MockMultimodalProvider:
 				"transcript": raw_text,
 				"summary": f"Intake quote & booking for {vehicle_summary} ({quoted_service}, ${estimated_total:.2f})",
 				"action": "INTAKE_QUOTE_AND_BOOK",
-				"action_payload": {
-					"vin": vin,
-					"decoded_vehicle": decoded,
-					"vehicle": matched_vehicles[0].get("name") if matched_vehicles else None,
-					"customer": customer,
-					"customer_name": customer_name,
-					"service_package": matched_pkg.get("name") if matched_pkg else None,
-					"requested_services": [quoted_service],
-					"estimated_total": estimated_total,
-					"candidate_slots": candidate_slots,
-				},
+				"action_payload": intake_payload,
 				"missing_fields": [],
 				"clarification": None,
 				"customer_comms": comms_draft,
@@ -1228,6 +1271,7 @@ class MockMultimodalProvider:
 						"supplier": supplier,
 						"bill_no": bill_no,
 						"amount": amount,
+						"paid_amount": amount,
 						"payment_method": _extract_payment_method(raw_text, patch),
 					},
 					"missing_fields": [],
@@ -1266,6 +1310,7 @@ class MockMultimodalProvider:
 							"purchase_order": po_name,
 							"supplier": supplier,
 							"items": items,
+							"parts_data": items,
 							"grand_total": grand_total,
 						},
 						"missing_fields": ["bill_no"],
@@ -1309,6 +1354,7 @@ class MockMultimodalProvider:
 						"bill_no": bill_no,
 						"bill_date": bill_date,
 						"items": items,
+						"parts_data": items,
 						"grand_total": grand_total,
 						"update_stock": bool(is_packing_slip),
 					},
@@ -1332,6 +1378,7 @@ class MockMultimodalProvider:
 					"purchase_order": po_name,
 					"supplier": supplier,
 					"items": items,
+					"parts_data": items,
 					"grand_total": grand_total,
 				},
 				"missing_fields": [],
@@ -1363,31 +1410,39 @@ def get_ai_provider(
 	provider_override: str | None = None,
 ) -> MultimodalProvider | None:
 	"""Resolve the configured ``MultimodalProvider`` from ``ISM Settings`` (or ``None`` if Disabled)."""
-	cfg = settings
-	if cfg is None:
-		try:
-			cfg = frappe.get_cached_doc("ISM Settings")
-		except Exception:
-			cfg = None
+	prev_user = getattr(frappe.session, "user", None) or "Administrator"
+	elevated = prev_user != "Administrator"
+	if elevated:
+		frappe.set_user("Administrator")
+	try:
+		cfg = settings
+		if cfg is None:
+			try:
+				cfg = frappe.get_cached_doc("ISM Settings")
+			except Exception:
+				cfg = None
 
-	raw_provider = (
-		provider_override
-		if provider_override is not None
-		else (getattr(cfg, "board_ai_provider", None) if cfg is not None else None)
-	)
-	norm = str(raw_provider or PROVIDER_DISABLED).strip()
-	lowered = norm.lower()
+		raw_provider = (
+			provider_override
+			if provider_override is not None
+			else (getattr(cfg, "board_ai_provider", None) if cfg is not None else None)
+		)
+		norm = str(raw_provider or PROVIDER_DISABLED).strip()
+		lowered = norm.lower()
 
-	if not norm or lowered == "disabled":
-		return None
+		if not norm or lowered == "disabled":
+			return None
 
-	if lowered in ("mock", "mock (deterministic test)", "deterministic"):
-		return MockMultimodalProvider()
+		if lowered in ("mock", "mock (deterministic test)", "deterministic"):
+			return MockMultimodalProvider()
 
-	api_key = _read_setting_password(cfg, "board_ai_api_key")
-	endpoint = str(getattr(cfg, "board_ai_endpoint", "") or "").strip() or None
-	orchestrator_model = str(getattr(cfg, "board_ai_orchestrator_model", "") or "").strip() or None
-	comms_model = str(getattr(cfg, "board_ai_comms_model", "") or "").strip() or None
+		api_key = _read_setting_password(cfg, "board_ai_api_key")
+		endpoint = str(getattr(cfg, "board_ai_endpoint", "") or "").strip() or None
+		orchestrator_model = str(getattr(cfg, "board_ai_orchestrator_model", "") or "").strip() or None
+		comms_model = str(getattr(cfg, "board_ai_comms_model", "") or "").strip() or None
+	finally:
+		if elevated:
+			frappe.set_user(prev_user)
 
 	if lowered in ("gemini", "gemini rest api", "gemini_rest"):
 		return GeminiRestProvider(
