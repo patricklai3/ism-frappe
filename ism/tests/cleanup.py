@@ -387,6 +387,18 @@ def _cleanup_shop_action_items(test_customers, test_ros, log, errors):
 			or _is_test_customer_party(sai.get("customer"), test_customers)
 			or _is_test_vin(sai.get("vehicle"))
 		):
+			if frappe.db.exists("DocType", "Shop Board Event"):
+				prev_board_td = getattr(frappe.flags, "in_board_teardown", False)
+				frappe.flags.in_board_teardown = True
+				try:
+					for ev_name in frappe.get_all(
+						"Shop Board Event",
+						filters={"idempotency_key": f"action_item:{sai.name}"},
+						pluck="name",
+					):
+						_delete_doc_safe("Shop Board Event", ev_name, log, errors)
+				finally:
+					frappe.flags.in_board_teardown = prev_board_td
 			_delete_doc_safe("Shop Action Item", sai.name, log, errors)
 
 

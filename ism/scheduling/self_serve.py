@@ -127,7 +127,10 @@ def _normalize_phone(phone: str) -> str:
 	except ImportError:
 		return _normalize_phone_fallback(phone)
 
-	normalized = normalize_phone_e164(phone)
+	try:
+		normalized = normalize_phone_e164(phone)
+	except ValueError as exc:
+		frappe.throw(_("Please provide a valid phone number: {0}").format(str(exc)), frappe.ValidationError)
 	if not normalized:
 		frappe.throw(_("Please provide a valid phone number."), frappe.ValidationError)
 	return normalized

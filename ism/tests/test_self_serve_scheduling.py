@@ -1534,6 +1534,18 @@ class TestSelfServeScheduling(ISMTestCase):
 				if frappe.db.exists("Schedule Entry", se_name):
 					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
 			for sai_name in created_sai_names:
+				if frappe.db.exists("DocType", "Shop Board Event"):
+					prev_board_td = getattr(frappe.flags, "in_board_teardown", False)
+					frappe.flags.in_board_teardown = True
+					try:
+						for ev_name in frappe.get_all(
+							"Shop Board Event",
+							filters={"idempotency_key": f"action_item:{sai_name}"},
+							pluck="name",
+						):
+							frappe.delete_doc("Shop Board Event", ev_name, force=True, ignore_permissions=True)
+					finally:
+						frappe.flags.in_board_teardown = prev_board_td
 				if frappe.db.exists("Shop Action Item", sai_name):
 					frappe.delete_doc("Shop Action Item", sai_name, force=True, ignore_permissions=True)
 			frappe.db.commit()

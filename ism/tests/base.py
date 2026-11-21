@@ -276,6 +276,7 @@ class ISMTestCase(unittest.TestCase):
 		handlers = {
 			"Repair Order": self._teardown_repair_order,
 			"Shop Board Event": self._teardown_shop_board_event,
+			"Shop Action Item": self._teardown_shop_action_item,
 			"Sales Invoice": self._teardown_sales_invoice,
 			"Purchase Invoice": self._teardown_purchase_invoice,
 			"Purchase Receipt": self._teardown_purchase_receipt,
@@ -302,6 +303,25 @@ class ISMTestCase(unittest.TestCase):
 			_cancel_and_delete("Shop Board Event", doc.name)
 		finally:
 			frappe.flags.in_board_teardown = prev
+
+	def _delete_board_events_for_action_item(self, sai_name):
+		if not sai_name or not frappe.db.exists("DocType", "Shop Board Event"):
+			return
+		prev = getattr(frappe.flags, "in_board_teardown", False)
+		frappe.flags.in_board_teardown = True
+		try:
+			for ev_name in frappe.get_all(
+				"Shop Board Event",
+				filters={"idempotency_key": f"action_item:{sai_name}"},
+				pluck="name",
+			):
+				_cancel_and_delete("Shop Board Event", ev_name)
+		finally:
+			frappe.flags.in_board_teardown = prev
+
+	def _teardown_shop_action_item(self, doc):
+		self._delete_board_events_for_action_item(doc.name)
+		_cancel_and_delete("Shop Action Item", doc.name)
 
 	def _delete_referencing_schedule_entries(self, filter_field, filter_value):
 		if not frappe.db.exists("DocType", "Schedule Entry"):
@@ -379,6 +399,7 @@ class ISMTestCase(unittest.TestCase):
 				filters={"reference_doctype": "Repair Order", "reference_name": doc.name},
 				pluck="name",
 			):
+				self._delete_board_events_for_action_item(sai)
 				_cancel_and_delete("Shop Action Item", sai)
 
 		si_name = getattr(doc, "sales_invoice", None)
