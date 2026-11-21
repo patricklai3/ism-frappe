@@ -14,6 +14,7 @@ function recalculate_service_rate(frm) {
 frappe.ui.form.on("Service Package", {
 	refresh(frm) {
 		frm.trigger("toggle_flat_rate_display");
+		frm.trigger("toggle_self_serve_guidance");
 
 		frm.add_custom_button(__("Tesla Manual"), () => {
 			frm.trigger("open_tesla_manual");
@@ -131,5 +132,62 @@ frappe.ui.form.on("Service Package", {
 			frm.set_df_property("service_rate", "description", __("Calculated as FRT × Hourly Rate."));
 			frm.set_df_property("hourly_rate", "description", "");
 		}
+	},
+
+	allow_self_serve_booking(frm) {
+		frm.trigger("toggle_self_serve_guidance");
+	},
+
+	customer_price_display_mode(frm) {
+		frm.trigger("toggle_self_serve_guidance");
+	},
+
+	toggle_self_serve_guidance(frm) {
+		if (!frm.doc.allow_self_serve_booking) {
+			frm.set_df_property("customer_title", "description", "");
+			frm.set_df_property("customer_price_display_mode", "description", "");
+			frm.set_df_property("customer_estimate_min", "description", "");
+			frm.set_df_property("customer_estimate_max", "description", "");
+			frm.set_df_property("self_serve_duration_minutes", "description", "");
+			frm.set_df_property("self_serve_required_tags", "description", "");
+			return;
+		}
+
+		frm.set_df_property(
+			"customer_title",
+			"description",
+			__("Shown on the public booking page. Falls back to Service / Job Title when blank.")
+		);
+		frm.set_df_property(
+			"self_serve_duration_minutes",
+			"description",
+			__("Leave 0 to compute shop duration automatically from FRT.")
+		);
+		frm.set_df_property(
+			"self_serve_required_tags",
+			"description",
+			__("Comma-separated Equipment Tag names (e.g., Lift, Alignment Rack) used for bay gating.")
+		);
+
+		const mode = frm.doc.customer_price_display_mode || "Exact Price";
+		const mode_help = {
+			"Exact Price": __("Displays a single fixed price (falls back to Service Rate + default parts if 0)."),
+			"Starting At": __("Displays 'Starting at $X' using Customer Estimate Min (or calculated rate if 0)."),
+			"Estimate Range": __("Displays a min–max estimate range; Max must be >= Min."),
+			"Contact for Quote": __("Hides numeric pricing and prompts the customer to request a quote."),
+		};
+		frm.set_df_property("customer_price_display_mode", "description", mode_help[mode] || "");
+		frm.set_df_property(
+			"customer_estimate_min",
+			"description",
+			mode === "Estimate Range"
+				? __("Lower bound of the customer estimate (CAD).")
+				: __("Customer-facing price (CAD). Leave 0 to derive from Service Rate + default parts.")
+		);
+		frm.set_df_property(
+			"customer_estimate_max",
+			"description",
+			__("Upper bound of the customer estimate (CAD). Must be >= Min.")
+		);
 	},
 });
