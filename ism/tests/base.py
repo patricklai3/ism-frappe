@@ -29,6 +29,7 @@ __all__ = [
 ]
 
 _TEARDOWN_ORDER = {
+	"ISM Payment Transaction": 1,
 	"Schedule Entry": 1,
 	"Payment Entry": 2,
 	"Purchase Receipt": 3,
@@ -308,6 +309,17 @@ class ISMTestCase(unittest.TestCase):
 			_cancel_and_delete("Payment Entry", pe_name)
 
 	def _teardown_repair_order(self, doc):
+		if frappe.db.exists("DocType", "ISM Payment Transaction"):
+			if getattr(doc, "deposit_request_transaction", None):
+				doc.db_set("deposit_request_transaction", None)
+				doc.reload()
+			for tx_name in frappe.get_all(
+				"ISM Payment Transaction",
+				filters={"repair_order": doc.name},
+				pluck="name",
+			):
+				_cancel_and_delete("ISM Payment Transaction", tx_name)
+
 		self._delete_referencing_schedule_entries("repair_order", doc.name)
 		if frappe.db.exists("DocType", "Shop Action Item") and frappe.db.has_column("Shop Action Item", "reference_name"):
 			for sai in frappe.get_all(

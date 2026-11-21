@@ -6,6 +6,14 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import flt
 
+from ism.payments.contracts import (
+	SQUARE_CURRENCY,
+	SQUARE_ENV_DISABLED,
+	SQUARE_ENV_PRODUCTION,
+	SQUARE_ENV_SANDBOX,
+	SQUARE_ENVIRONMENTS,
+	assert_cad_currency,
+)
 from ism.scheduling.time_utils import to_timedelta
 
 
@@ -18,6 +26,7 @@ class ISMSettings(Document):
 		self._validate_break_hours()
 		self._validate_estimation_parameters()
 		self._validate_pricing_parameters()
+		self._validate_square_settings()
 
 	def _normalize_sms_settings(self):
 		# Twilio support was removed; coerce legacy values so existing sites save cleanly.
@@ -75,3 +84,84 @@ class ISMSettings(Document):
 	def _validate_pricing_parameters(self):
 		if self.default_labor_rate is not None and flt(self.default_labor_rate) <= 0:
 			frappe.throw(_("Default Labor Rate must be greater than 0."))
+
+	def _validate_square_settings(self):
+		if not self.square_environment:
+			self.square_environment = SQUARE_ENV_DISABLED
+		if self.square_environment not in SQUARE_ENVIRONMENTS:
+			frappe.throw(
+				_("Invalid Square Environment: {0}.").format(self.square_environment),
+				frappe.ValidationError,
+			)
+
+		if not self.square_currency:
+			self.square_currency = SQUARE_CURRENCY
+		assert_cad_currency(self.square_currency, context="ISM Settings Square")
+
+		if self.square_bank_account:
+			acc = frappe.db.get_value(
+				"Account",
+				self.square_bank_account,
+				["name", "is_group", "disabled", "account_type", "account_currency"],
+				as_dict=True,
+			)
+			if not acc:
+				frappe.throw(
+					_("Square Bank Account {0} does not exist.").format(self.square_bank_account),
+					frappe.ValidationError,
+				)
+			if acc.is_group:
+				frappe.throw(
+					_("Square Bank Account {0} must be a leaf account (not a group account).").format(
+						self.square_bank_account
+					),
+					frappe.ValidationError,
+				)
+			if acc.disabled:
+				frappe.throw(
+					_("Square Bank Account {0} is disabled.").format(self.square_bank_account),
+					frappe.ValidationError,
+				)
+			if acc.account_type != "Bank":
+				frappe.throw(
+					_("Square Bank Account {0} must have Account Type 'Bank' (got '{1}').").format(
+						self.square_bank_account, acc.account_type or ""
+					),
+					frappe.ValidationError,
+				)
+			if acc.account_currency and acc.account_currency != SQUARE_CURRENCY:
+				frappe.throw(
+					_("Square Bank Account {0} must have CAD currency (got '{1}').").format(
+						self.square_bank_account, acc.account_currency
+					),
+					frappe.ValidationError,
+				)
+
+		if self.square_environment in (SQUARE_ENV_SANDBOX, SQUARE_ENV_PRODUCTION):
+			missing = []
+			if not (self.square_application_id or "").strip():
+				missing.append("Square Application ID")
+			if not (self.square_location_id or "").strip():
+				missing.append("Square Location ID")
+			has_token = bool((self.square_access_token or "").strip()) or bool(
+				self.get_password("square_access_token", raise_exception=False)
+			)
+			if not has_token:
+				missing.append("Square Access Token")
+			if not (self.square_mode_of_payment or "").strip():
+				missing.append("Square Mode of Payment")
+			if missing:
+				frappe.throw(
+					_("Square {0} mode requires: {1}.").format(
+						self.square_environment, ", ".join(missing)
+					),
+					frappe.ValidationError,
+				)
+
+			webhook_url = (self.square_webhook_notification_url or "").strip()
+			if self.square_environment == SQUARE_ENV_PRODUCTION and webhook_url:
+				if not webhook_url.lower().startswith("https://"):
+					frappe.throw(
+						_("Square Webhook Notification URL must start with https:// in Production."),
+						frappe.ValidationError,
+					)
