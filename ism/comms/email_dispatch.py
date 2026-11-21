@@ -153,20 +153,6 @@ def dispatch_transactional_email(
 
 	if not bypass_rate_limit:
 		rcpt_limit, ip_limit = _get_email_rate_limits()
-		rcpt_hash = hashlib.sha256(clean_recipient.lower().encode("utf-8")).hexdigest()[:24]
-		rcpt_key = f"{_EMAIL_RATE_LIMIT_PREFIX}:rcpt:{rcpt_hash}"
-		allowed, retry_after = _check_and_increment_rate_limit(rcpt_key, rcpt_limit)
-		if not allowed:
-			return EmailDispatchResult(
-				success=False,
-				recipient=clean_recipient,
-				email_type=clean_email_type,
-				rate_limited=True,
-				retry_after_seconds=retry_after,
-				error=_("Email rate limit exceeded for this recipient. Please try again later."),
-				error_code="RATE_LIMITED",
-			)
-
 		resolved_ip = get_client_ip(client_ip)
 		ip_key = f"{_EMAIL_RATE_LIMIT_PREFIX}:ip:{resolved_ip}"
 		allowed, retry_after = _check_and_increment_rate_limit(ip_key, ip_limit)
@@ -178,6 +164,20 @@ def dispatch_transactional_email(
 				rate_limited=True,
 				retry_after_seconds=retry_after,
 				error=_("Email rate limit exceeded for this IP address. Please try again later."),
+				error_code="RATE_LIMITED",
+			)
+
+		rcpt_hash = hashlib.sha256(clean_recipient.lower().encode("utf-8")).hexdigest()[:24]
+		rcpt_key = f"{_EMAIL_RATE_LIMIT_PREFIX}:rcpt:{rcpt_hash}"
+		allowed, retry_after = _check_and_increment_rate_limit(rcpt_key, rcpt_limit)
+		if not allowed:
+			return EmailDispatchResult(
+				success=False,
+				recipient=clean_recipient,
+				email_type=clean_email_type,
+				rate_limited=True,
+				retry_after_seconds=retry_after,
+				error=_("Email rate limit exceeded for this recipient. Please try again later."),
 				error_code="RATE_LIMITED",
 			)
 

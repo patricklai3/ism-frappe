@@ -198,6 +198,40 @@ class TestCommsEmailDispatch(ISMTestCase):
 		self.assertGreater(blocked.retry_after_seconds, 0)
 		self.assertTrue(other_ip.success)
 
+	def test_ip_blocked_request_does_not_consume_recipient_quota(self) -> None:
+		settings = frappe.get_single("ISM Settings")
+		settings.transactional_email_rate_limit_per_hour = 1
+		settings.transactional_email_ip_rate_limit_per_hour = 1
+		settings.save(ignore_permissions=True)
+
+		with patch("frappe.sendmail") as mock_sendmail:
+			res0 = dispatch_transactional_email(
+				recipient="user0@example.com",
+				subject="Hello",
+				html_body="<p>First</p>",
+				client_ip="203.0.113.42",
+			)
+			blocked = dispatch_transactional_email(
+				recipient="user1@example.com",
+				subject="Hello",
+				html_body="<p>Blocked</p>",
+				client_ip="203.0.113.42",
+			)
+			other_ip = dispatch_transactional_email(
+				recipient="user1@example.com",
+				subject="Hello",
+				html_body="<p>Allowed</p>",
+				client_ip="203.0.113.99",
+			)
+
+		self.assertTrue(res0.success)
+		self.assertFalse(blocked.success)
+		self.assertTrue(blocked.rate_limited)
+		self.assertEqual(blocked.error_code, "RATE_LIMITED")
+		self.assertGreater(blocked.retry_after_seconds, 0)
+		self.assertTrue(other_ip.success)
+		self.assertEqual(mock_sendmail.call_count, 2)
+
 	def test_bypass_rate_limit_allows_staff_emails(self) -> None:
 		settings = frappe.get_single("ISM Settings")
 		settings.transactional_email_rate_limit_per_hour = 1
