@@ -31,14 +31,17 @@ __all__ = [
 
 
 def build_ro_urls(ro_name: str, approval_url: Optional[str] = None) -> Dict[str, str]:
-	"""Build canonical Desk and Print URLs for a Repair Order."""
+	"""Build canonical Desk, Print, Shop Board, and Cockpit URLs for a Repair Order."""
 	from frappe.utils import get_url
 
 	base = get_url()
 	encoded_ro = quote(str(ro_name), safe="")
+	encoded_thread = quote(f"RO:{ro_name}", safe="")
 	urls = {
 		"desk": f"{base}/app/repair-order/{encoded_ro}",
 		"print": f"{base}/printview?doctype=Repair+Order&name={encoded_ro}&format=Automotive+Repair+Invoice",
+		"board_url": f"{base}/board?thread={encoded_thread}",
+		"cockpit_url": f"{base}/cockpit",
 	}
 	if approval_url:
 		urls["approval"] = approval_url
