@@ -11,6 +11,7 @@ from frappe import _
 from frappe.utils import cint, escape_html, flt, get_datetime, get_url, now_datetime
 
 from ism.api.sms import dispatch_sms, get_sms_unconfigured_reason
+from ism.comms.email_dispatch import dispatch_transactional_email
 
 _MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 _ALLOWED_SIGNATURE_PREFIXES = (
@@ -472,8 +473,20 @@ def _dispatch_sms_approval(
 	sms_text = _("Hello {0}, please review and authorize the repair estimate for your {1}: {2}").format(
 		customer_name, vehicle_display, approval_url
 	)
-	res = dispatch_sms(phone, sms_text)
+	res = dispatch_sms(
+		phone,
+		sms_text,
+		message_type="Approval Link",
+		reference_doctype="Repair Order",
+		reference_name=doc.name,
+	)
 	if not res.get("success"):
+		if res.get("opted_out"):
+			frappe.throw(
+				_(
+					"Customer has opted out of SMS messages. Please send the approval via Email or use Copy Link Only."
+				)
+			)
 		frappe.throw(res.get("error") or _("Failed to dispatch SMS."))
 
 	return {
@@ -519,7 +532,17 @@ def _dispatch_email_approval(
 		"<p><a href='{2}' class='btn btn-primary'>Review & Authorize Estimate</a></p>"
 	).format(safe_customer, safe_vehicle, safe_url)
 
-	frappe.sendmail(recipients=[email], subject=subject, message=message, now=True)
+	email_res = dispatch_transactional_email(
+		recipient=email,
+		subject=subject,
+		html_body=message,
+		email_type="approval_link",
+		reference_doctype="Repair Order",
+		reference_name=doc.name,
+		bypass_rate_limit=True,
+	)
+	if not email_res.success:
+		frappe.throw(email_res.error or _("Failed to dispatch approval email."))
 	return {
 		"success": True,
 		"channel": "email",

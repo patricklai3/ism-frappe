@@ -555,7 +555,13 @@ def _maybe_send_ready_for_pickup_sms(ro) -> None:
 		sms_text = _("Hello {0}, your {1} (Repair Order {2}) is ready for pickup.").format(
 			customer_name, vehicle_display, ro.name
 		)
-		dispatch_sms(phone, sms_text)
+		dispatch_sms(
+			phone,
+			sms_text,
+			message_type="Ready For Pickup",
+			reference_doctype="Repair Order",
+			reference_name=ro.name,
+		)
 	except Exception:
 		frappe.log_error(
 			message=frappe.get_traceback(),
