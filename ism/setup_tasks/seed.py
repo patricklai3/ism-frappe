@@ -92,7 +92,6 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("transactional_email_ip_rate_limit_per_hour", 20),
 	("square_environment", "Disabled"),
 	("square_currency", "CAD"),
-	("self_serve_default_entry_type", "Diagnostic"),
 	("self_serve_horizon_days", 30),
 	("media_storage_backend", "Frappe Private File"),
 	("gdrive_auth_mode", "OAuth2 Refresh Token"),
@@ -161,6 +160,10 @@ def setup_default_ism_settings():
 		if settings.get(fieldname) is None or fieldname not in persisted_fields:
 			settings.set(fieldname, default_val)
 			changed = True
+
+	if not settings.self_serve_default_entry_type and frappe.db.exists("Schedule Entry Type", "Diagnostic"):
+		settings.self_serve_default_entry_type = "Diagnostic"
+		changed = True
 
 	if not settings.sms_gateway_provider or settings.sms_gateway_provider == "Twilio":
 		settings.sms_gateway_provider = "Disabled"

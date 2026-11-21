@@ -32,9 +32,9 @@ from ism.setup_tasks import (
 def _run_setup_tasks(full=False):
 	"""Execute idempotent setup steps; full=True forces tax and custom field refresh."""
 	ensure_ism_roles()
-	setup_default_ism_settings()
 	seed_equipment_tags()
 	seed_schedule_entry_types()
+	setup_default_ism_settings()
 	create_standard_inspection_template()
 	ensure_doctype_creation_enabled()
 	setup_default_taxes_and_payments(only_if_missing=not full)

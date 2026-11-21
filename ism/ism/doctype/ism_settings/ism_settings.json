@@ -546,7 +546,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "default": "Diagnostic",
    "description": "Default Schedule Entry Type assigned to website provisional bookings (must not require a Repair Order).",
    "fieldname": "self_serve_default_entry_type",
    "fieldtype": "Link",
