@@ -1364,6 +1364,180 @@ class TestSelfServeScheduling(ISMTestCase):
 					frappe.delete_doc("Repair Order", ro_name, force=True, ignore_permissions=True)
 			frappe.db.commit()
 
+	def test_er_checkread_1020_does_not_rollback_outer_uncommitted_writes_or_callbacks(self):
+		"""ER_CHECKREAD (1020) must NOT rollback when outer caller has uncommitted writes or pending callbacks."""
+		frappe.db.rollback()
+		site = frappe.local.site
+		appt_date = str(add_days(today(), 17))
+		created_se_names = []
+		created_sai_names = []
+
+		try:
+			self._set_ism_settings(
+				operating_hours_start="08:00:00",
+				operating_hours_end="17:00:00",
+				break_start="12:00:00",
+				break_end="12:30:00",
+				default_slot_interval=30,
+				enable_technician_capacity=1,
+				holiday_list=None,
+				customer_arrival_offset_minutes=15,
+				reschedule_cutoff_hours=24,
+				max_self_reschedules=5,
+				self_serve_min_lead_time_minutes=120,
+				self_serve_horizon_days=30,
+			)
+
+			se_outer = frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": "Scheduled",
+				"scheduled_date": appt_date,
+				"scheduled_time": "09:00:00",
+				"estimated_duration": 60,
+				"service_bay": self.bay1,
+				"provisional_customer_name": "Outer Tx User",
+				"provisional_phone": "+16045550195",
+				"booking_source": "Website Self-Serve",
+				"reschedule_count": 0,
+			}).insert(ignore_permissions=True)
+			created_se_names.append(se_outer.name)
+
+			probe_sai = frappe.get_doc({
+				"doctype": "Shop Action Item",
+				"title": f"{TEST_PREFIX}OuterTxProbe",
+				"category": "General",
+				"priority": "Low",
+				"status": "Open",
+				"source": "Agent",
+				"reported_by": "Administrator",
+				"details": "initial_state",
+			}).insert(ignore_permissions=True)
+			created_sai_names.append(probe_sai.name)
+			frappe.db.commit()
+
+			def _commit_concurrent_reschedule(target_hhmm: str):
+				out = []
+
+				def _worker():
+					frappe.init(site=site)
+					frappe.connect()
+					frappe.set_user("Administrator")
+					try:
+						reschedule_self_serve_appointment(
+							se_outer.name,
+							appt_date,
+							target_hhmm,
+							now_dt=self.now_anchor,
+							emit_notification=False,
+						)
+						frappe.db.commit()
+						out.append(("ok", None))
+					except Exception as exc:
+						frappe.db.rollback()
+						out.append(("err", exc))
+					finally:
+						frappe.destroy()
+
+				t = threading.Thread(target=_worker)
+				t.start()
+				t.join(timeout=30)
+				self.assertEqual(len(out), 1)
+				if out[0][0] == "err":
+					raise out[0][1]
+
+			# Case 1: Outer caller has an uncommitted write (transaction_writes > 0) before ER_CHECKREAD (1020)
+			frappe.db.rollback()
+			self.assertEqual(frappe.db.transaction_writes, 0)
+			frappe.get_doc("Schedule Entry", se_outer.name)
+			frappe.db.set_value("Shop Action Item", probe_sai.name, "details", "outer_otp_consumed")
+			self.assertGreater(frappe.db.transaction_writes, 0)
+
+			_commit_concurrent_reschedule("10:45")
+
+			with patch.object(frappe.db, "rollback", wraps=frappe.db.rollback) as rollback_spy:
+				with self.assertRaises(frappe.QueryDeadlockError) as ctx_1020:
+					reschedule_self_serve_appointment(
+						se_outer.name,
+						appt_date,
+						"13:45",
+						now_dt=self.now_anchor,
+						emit_notification=False,
+					)
+				self.assertIn("1020", str(ctx_1020.exception))
+				self.assertEqual(rollback_spy.call_count, 0)
+
+			# Outer transaction aborted cleanly by MariaDB 1020 (NOT swallowed to commit reschedule without outer write):
+			# neither the outer write nor the second reschedule committed; DB retains worker's 11:00:00 / count=1 state.
+			frappe.db.rollback()
+			self.assertEqual(
+				frappe.db.get_value("Shop Action Item", probe_sai.name, "details"),
+				"initial_state",
+			)
+			se_after_case1 = frappe.db.get_value(
+				"Schedule Entry",
+				se_outer.name,
+				["scheduled_time", "reschedule_count"],
+				as_dict=True,
+			)
+			self.assertEqual(se_after_case1.scheduled_time, timedelta(hours=11))
+			self.assertEqual(se_after_case1.reschedule_count, 1)
+
+			# Case 2: transaction_writes == 0 but pending after_commit callback registered -> must NOT rollback
+			frappe.db.rollback()
+			self.assertEqual(frappe.db.transaction_writes, 0)
+			frappe.get_doc("Schedule Entry", se_outer.name)
+			sentinel_called = []
+			frappe.db.after_commit.add(lambda: sentinel_called.append(True))
+			self.assertGreater(len(frappe.db.after_commit), 0)
+
+			_commit_concurrent_reschedule("11:15")
+
+			with patch.object(frappe.db, "rollback", wraps=frappe.db.rollback) as rollback_spy_cb:
+				with self.assertRaises(frappe.QueryDeadlockError) as ctx_cb:
+					reschedule_self_serve_appointment(
+						se_outer.name,
+						appt_date,
+						"14:45",
+						now_dt=self.now_anchor,
+						emit_notification=False,
+					)
+				self.assertIn("1020", str(ctx_cb.exception))
+				self.assertEqual(rollback_spy_cb.call_count, 0)
+
+			self.assertGreater(len(frappe.db.after_commit), 0)
+			frappe.db.after_commit.reset()
+			frappe.db.rollback()
+			se_after_case2 = frappe.db.get_value(
+				"Schedule Entry",
+				se_outer.name,
+				["scheduled_time", "reschedule_count"],
+				as_dict=True,
+			)
+			self.assertEqual(se_after_case2.scheduled_time, timedelta(hours=11, minutes=30))
+			self.assertEqual(se_after_case2.reschedule_count, 2)
+
+			# Case 3: _disable_transaction_control=True blocks restart even when transaction_writes == 0
+			import ism.scheduling.self_serve as ss_mod
+
+			frappe.db.rollback()
+			self.assertTrue(ss_mod._can_safely_restart_read_transaction())
+			orig_dtc = frappe.db._disable_transaction_control
+			try:
+				frappe.db._disable_transaction_control = True
+				self.assertFalse(ss_mod._can_safely_restart_read_transaction())
+			finally:
+				frappe.db._disable_transaction_control = orig_dtc
+		finally:
+			frappe.db.rollback()
+			for se_name in created_se_names:
+				if frappe.db.exists("Schedule Entry", se_name):
+					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
+			for sai_name in created_sai_names:
+				if frappe.db.exists("Shop Action Item", sai_name):
+					frappe.delete_doc("Shop Action Item", sai_name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
 	def test_constants_exported(self):
 		self.assertEqual(ALLOWED_RESCHEDULE_ENTRY_STATUSES, ("Scheduled", "Confirmed"))
 		self.assertEqual(ALLOWED_RESCHEDULE_RO_STATUSES, ("Draft Estimate", "Pending Authorization"))
