@@ -585,8 +585,13 @@ async function loadOlderEvents() {
 }
 
 async function syncThreadDelta() {
-	if (!state.activeThreadKey || state.isLoadingThread || state.isSyncingDelta) return;
+	if (!state.activeThreadKey || state.isLoadingThread) return;
+	if (state.isSyncingDelta) {
+		state.pendingDeltaSync = true;
+		return;
+	}
 	state.isSyncingDelta = true;
+	state.pendingDeltaSync = false;
 	try {
 		const lastEv = state.events.length ? state.events[state.events.length - 1].name : null;
 		const knownVer = state.activeThread ? Number(state.activeThread.projection_version || 0) : 0;
@@ -615,6 +620,10 @@ async function syncThreadDelta() {
 		// Offline banner is already managed by api.js
 	} finally {
 		state.isSyncingDelta = false;
+		if (state.pendingDeltaSync) {
+			state.pendingDeltaSync = false;
+			syncThreadDelta();
+		}
 	}
 }
 
@@ -641,7 +650,23 @@ async function handleResolveCard(params) {
 				params.decision === "reject" ? "warn" : "success"
 			);
 		}
-		await syncThreadDelta();
+		if (res && res.re_enqueued) {
+			const reEnq = res.re_enqueued;
+			const syncDone = Boolean(
+				typeof reEnq === "object" &&
+					(reEnq.synchronous || reEnq.mode === "sync" || reEnq.result)
+			);
+			if (!syncDone && el.aiStatusBar) {
+				el.aiStatusBar.textContent = "AI Orchestrator processing clarification...";
+				el.aiStatusBar.classList.remove("is-hidden");
+			}
+			await syncThreadDelta();
+			if (syncDone && el.aiStatusBar) {
+				el.aiStatusBar.classList.add("is-hidden");
+			}
+		} else {
+			await syncThreadDelta();
+		}
 		return res;
 	} catch (err) {
 		showToast(err.message || "Failed to resolve card.", "error");
@@ -775,8 +800,30 @@ function init() {
 				renderTimeline({ scrollToBottom: true });
 			}
 			if (res && res.ai_enqueued) {
-				el.aiStatusBar.textContent = "AI Orchestrator analyzing capture...";
-				el.aiStatusBar.classList.remove("is-hidden");
+				const aiInfo = res.ai_enqueue_info || {};
+				const evStatus = res.event && res.event.ai_status ? res.event.ai_status : null;
+				const syncDone = Boolean(
+					aiInfo.synchronous ||
+						aiInfo.mode === "sync" ||
+						aiInfo.result ||
+						(evStatus && evStatus !== "QUEUED" && evStatus !== "PROCESSING")
+				);
+				if (evStatus === "FAILED") {
+					el.aiStatusBar.textContent = `AI note: ${(res.event && res.event.ai_error) || "Processing failed"}`;
+					el.aiStatusBar.classList.remove("is-hidden");
+				} else if (syncDone) {
+					el.aiStatusBar.classList.add("is-hidden");
+				} else {
+					el.aiStatusBar.textContent = "AI Orchestrator analyzing capture...";
+					el.aiStatusBar.classList.remove("is-hidden");
+				}
+				// Immediately sync delta so synchronous AI cards (CLARIFICATION_CARD, AI_RECEIPT, APPROVAL_GATE) render right away
+				const prevCount = state.events.length;
+				syncThreadDelta().then(() => {
+					if (state.events.length > prevCount && evStatus !== "FAILED" && el.aiStatusBar) {
+						el.aiStatusBar.classList.add("is-hidden");
+					}
+				});
 			}
 		},
 		onToast: showToast,

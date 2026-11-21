@@ -1,47 +1,11 @@
 /**
  * Native Frappe Socket.IO realtime subscription & delta catch-up sync for /board.
- * Degrades gracefully when Socket.IO client/server is unavailable.
+ * Reuses window.frappe.realtime or window.io if already loaded, and degrades
+ * cleanly to visibilitychange + periodic visible-tab delta sync without injecting
+ * failing <script> tags.
  */
 
-const SOCKETIO_LOAD_TIMEOUT_MS = 3500;
 const FALLBACK_POLL_MS = 15000;
-
-function loadScriptOnce(src, timeoutMs = SOCKETIO_LOAD_TIMEOUT_MS) {
-	return new Promise((resolve) => {
-		if (typeof window.io === "function") {
-			resolve(window.io);
-			return;
-		}
-		const existing = document.querySelector(`script[data-ism-sio="${src}"]`);
-		if (existing) {
-			resolve(typeof window.io === "function" ? window.io : null);
-			return;
-		}
-
-		let settled = false;
-		const finish = (val) => {
-			if (!settled) {
-				settled = true;
-				resolve(val);
-			}
-		};
-
-		const timer = setTimeout(() => finish(null), timeoutMs);
-		const script = document.createElement("script");
-		script.src = src;
-		script.async = true;
-		script.dataset.ismSio = src;
-		script.onload = () => {
-			clearTimeout(timer);
-			finish(typeof window.io === "function" ? window.io : null);
-		};
-		script.onerror = () => {
-			clearTimeout(timer);
-			finish(null);
-		};
-		document.head.appendChild(script);
-	});
-}
 
 export class BoardRealtimeClient {
 	constructor({
@@ -64,6 +28,8 @@ export class BoardRealtimeClient {
 		this.onConnectionChange = onConnectionChange;
 
 		this.socket = null;
+		this._usingFrappeRealtime = false;
+		this._frappeRealtimeBound = [];
 		this.connected = false;
 		this.subscribedThreadKey = null;
 		this._syncDebounceTimer = null;
@@ -76,71 +42,98 @@ export class BoardRealtimeClient {
 		document.addEventListener("visibilitychange", this._boundVisibility);
 		window.addEventListener("online", this._boundOnline);
 
-		const ioFn = await this._resolveSocketIo();
-		if (!ioFn) {
-			this._startFallbackPolling();
-			return;
-		}
-
-		const { baseUrl, namespace } = this._buildSocketTarget();
-		try {
-			this.socket = ioFn(`${baseUrl}/${namespace}`, {
-				withCredentials: true,
-				transports: ["websocket", "polling"],
-				reconnection: true,
-				reconnectionDelay: 1500,
-				reconnectionDelayMax: 10000,
-			});
-		} catch (_err) {
-			this._startFallbackPolling();
-			return;
-		}
-
-		this.socket.on("connect", () => {
+		// 1. Reuse Frappe's realtime wrapper if already loaded on window
+		if (
+			window.frappe &&
+			window.frappe.realtime &&
+			typeof window.frappe.realtime.on === "function"
+		) {
+			this._usingFrappeRealtime = true;
 			this.connected = true;
-			this._stopFallbackPolling();
+			const handlers = [
+				["ism_board_event", (payload) => this.onBoardEvent && payload && this.onBoardEvent(payload)],
+				["ism_board_projection", (payload) => this.onProjection && payload && this.onProjection(payload)],
+				["ism_board_ai_status", (payload) => this.onAiStatus && payload && this.onAiStatus(payload)],
+				["ism_board_thread_summary", (payload) => this.onThreadSummary && payload && this.onThreadSummary(payload)],
+			];
+			for (const [evt, fn] of handlers) {
+				window.frappe.realtime.on(evt, fn);
+				this._frappeRealtimeBound.push([evt, fn]);
+			}
 			if (this.subscribedThreadKey) {
 				this._emitSubscribe(this.subscribedThreadKey);
 			}
 			if (this.onConnectionChange) this.onConnectionChange(true);
-			this._scheduleCatchUpSync(200);
-		});
+			return;
+		}
 
-		this.socket.on("disconnect", () => {
-			this.connected = false;
-			if (this.onConnectionChange) this.onConnectionChange(false);
-			this._startFallbackPolling();
-		});
+		// 2. Direct Socket.IO connection only if window.io is already available
+		if (typeof window.io === "function") {
+			const { baseUrl, namespace } = this._buildSocketTarget();
+			try {
+				this.socket = window.io(`${baseUrl}/${namespace}`, {
+					withCredentials: true,
+					transports: ["websocket", "polling"],
+					reconnection: true,
+					reconnectionAttempts: 5,
+					reconnectionDelay: 1500,
+					reconnectionDelayMax: 10000,
+				});
+			} catch (_err) {
+				this._startFallbackPolling();
+				return;
+			}
 
-		this.socket.on("connect_error", () => {
-			this.connected = false;
-			this._startFallbackPolling();
-		});
+			this.socket.on("connect", () => {
+				this.connected = true;
+				this._stopFallbackPolling();
+				if (this.subscribedThreadKey) {
+					this._emitSubscribe(this.subscribedThreadKey);
+				}
+				if (this.onConnectionChange) this.onConnectionChange(true);
+				this._scheduleCatchUpSync(200);
+			});
 
-		this.socket.on("ism_board_event", (payload) => {
-			if (this.onBoardEvent && payload) this.onBoardEvent(payload);
-		});
+			this.socket.on("disconnect", () => {
+				this.connected = false;
+				if (this.onConnectionChange) this.onConnectionChange(false);
+				this._startFallbackPolling();
+			});
 
-		this.socket.on("ism_board_projection", (payload) => {
-			if (this.onProjection && payload) this.onProjection(payload);
-		});
+			this.socket.on("connect_error", () => {
+				this.connected = false;
+				this._startFallbackPolling();
+			});
 
-		this.socket.on("ism_board_ai_status", (payload) => {
-			if (this.onAiStatus && payload) this.onAiStatus(payload);
-		});
+			this.socket.on("ism_board_event", (payload) => {
+				if (this.onBoardEvent && payload) this.onBoardEvent(payload);
+			});
 
-		this.socket.on("ism_board_thread_summary", (payload) => {
-			if (this.onThreadSummary && payload) this.onThreadSummary(payload);
-		});
+			this.socket.on("ism_board_projection", (payload) => {
+				if (this.onProjection && payload) this.onProjection(payload);
+			});
+
+			this.socket.on("ism_board_ai_status", (payload) => {
+				if (this.onAiStatus && payload) this.onAiStatus(payload);
+			});
+
+			this.socket.on("ism_board_thread_summary", (payload) => {
+				if (this.onThreadSummary && payload) this.onThreadSummary(payload);
+			});
+			return;
+		}
+
+		// 3. Graceful fallback: visibilitychange + periodic visible-tab delta sync
+		this._startFallbackPolling();
 	}
 
 	subscribeThread(threadKey) {
 		if (this.subscribedThreadKey === threadKey) return;
-		if (this.subscribedThreadKey && this.socket && this.connected) {
-			this.socket.emit("doc_unsubscribe", "Shop Board Thread", this.subscribedThreadKey);
+		if (this.subscribedThreadKey && this.connected) {
+			this._emitUnsubscribe(this.subscribedThreadKey);
 		}
 		this.subscribedThreadKey = threadKey || null;
-		if (this.subscribedThreadKey && this.socket && this.connected) {
+		if (this.subscribedThreadKey && this.connected) {
 			this._emitSubscribe(this.subscribedThreadKey);
 		}
 	}
@@ -153,10 +146,31 @@ export class BoardRealtimeClient {
 			clearTimeout(this._syncDebounceTimer);
 			this._syncDebounceTimer = null;
 		}
+		if (this._usingFrappeRealtime) {
+			if (this.subscribedThreadKey) {
+				this._emitUnsubscribe(this.subscribedThreadKey);
+			}
+			if (
+				window.frappe &&
+				window.frappe.realtime &&
+				typeof window.frappe.realtime.off === "function"
+			) {
+				for (const [evt, fn] of this._frappeRealtimeBound) {
+					try {
+						window.frappe.realtime.off(evt, fn);
+					} catch (_err) {
+						// ignore
+					}
+				}
+			}
+			this._frappeRealtimeBound = [];
+			this._usingFrappeRealtime = false;
+			this.connected = false;
+		}
 		if (this.socket) {
 			try {
 				if (this.subscribedThreadKey) {
-					this.socket.emit("doc_unsubscribe", "Shop Board Thread", this.subscribedThreadKey);
+					this._emitUnsubscribe(this.subscribedThreadKey);
 				}
 				this.socket.disconnect();
 			} catch (_err) {
@@ -168,7 +182,31 @@ export class BoardRealtimeClient {
 
 	_emitSubscribe(threadKey) {
 		try {
-			this.socket.emit("doc_subscribe", "Shop Board Thread", threadKey);
+			if (this._usingFrappeRealtime && window.frappe && window.frappe.realtime) {
+				if (typeof window.frappe.realtime.doc_subscribe === "function") {
+					window.frappe.realtime.doc_subscribe("Shop Board Thread", threadKey);
+				} else if (window.frappe.realtime.socket) {
+					window.frappe.realtime.socket.emit("doc_subscribe", "Shop Board Thread", threadKey);
+				}
+			} else if (this.socket) {
+				this.socket.emit("doc_subscribe", "Shop Board Thread", threadKey);
+			}
+		} catch (_err) {
+			// ignore
+		}
+	}
+
+	_emitUnsubscribe(threadKey) {
+		try {
+			if (this._usingFrappeRealtime && window.frappe && window.frappe.realtime) {
+				if (typeof window.frappe.realtime.doc_unsubscribe === "function") {
+					window.frappe.realtime.doc_unsubscribe("Shop Board Thread", threadKey);
+				} else if (window.frappe.realtime.socket) {
+					window.frappe.realtime.socket.emit("doc_unsubscribe", "Shop Board Thread", threadKey);
+				}
+			} else if (this.socket) {
+				this.socket.emit("doc_unsubscribe", "Shop Board Thread", threadKey);
+			}
 		} catch (_err) {
 			// ignore
 		}
@@ -214,16 +252,5 @@ export class BoardRealtimeClient {
 			? `${proto}//${host}:${this.socketioPort}`
 			: `${proto}//${window.location.host}`;
 		return { baseUrl, namespace: this.sitename };
-	}
-
-	async _resolveSocketIo() {
-		if (typeof window.io === "function") return window.io;
-		const local = await loadScriptOnce("/socket.io/socket.io.js");
-		if (local) return local;
-		const { baseUrl } = this._buildSocketTarget();
-		if (baseUrl !== window.location.origin) {
-			return loadScriptOnce(`${baseUrl}/socket.io/socket.io.js`);
-		}
-		return null;
 	}
 }

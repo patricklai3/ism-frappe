@@ -406,13 +406,51 @@ function renderClarificationCard(event, { onResolveCard }) {
 	return el;
 }
 
+function normalizeSlotOption(opt, fallbackSlot, idx) {
+	const src = opt && typeof opt === "object" ? opt : {};
+	const fb = fallbackSlot && typeof fallbackSlot === "object" ? fallbackSlot : {};
+	const scheduledDate = src.scheduled_date || src.date || fb.scheduled_date || fb.date || "";
+	const startTime = src.start_time || src.scheduled_time || fb.start_time || fb.scheduled_time || "";
+	const serviceBay =
+		src.service_bay ||
+		src.bay ||
+		(Array.isArray(src.available_bay_ids) && src.available_bay_ids[0]) ||
+		fb.service_bay ||
+		fb.bay ||
+		(Array.isArray(fb.available_bay_ids) && fb.available_bay_ids[0]) ||
+		"";
+	const technician = src.technician || src.assigned_technician || fb.technician || fb.assigned_technician || "";
+
+	const labelParts = [];
+	const dt = `${scheduledDate} ${startTime}`.trim();
+	if (dt) labelParts.push(dt);
+	if (serviceBay) labelParts.push(String(serviceBay));
+	if (technician) labelParts.push(String(technician));
+	const computedLabel = labelParts.join(" · ");
+	const rawLabel = typeof src.label === "string" ? src.label.trim() : "";
+	const label =
+		rawLabel && (!scheduledDate || rawLabel.includes(scheduledDate))
+			? rawLabel
+			: computedLabel || rawLabel || `Slot ${idx + 1}`;
+
+	return {
+		value: src.value ?? src.slot_index ?? idx,
+		label,
+		scheduled_date: scheduledDate || undefined,
+		start_time: startTime || undefined,
+		service_bay: serviceBay || undefined,
+		technician: technician || undefined,
+	};
+}
+
 function buildGateSummaryHtml(actionType, schema, params) {
 	const items = [];
 	if (actionType === "SUBMIT_PO") {
 		const pos = params.purchase_orders || (params.purchase_order ? [params.purchase_order] : []);
 		if (pos.length) items.push(["Purchase Order(s)", pos.join(", ")]);
 		if (params.supplier) items.push(["Supplier", params.supplier]);
-		if (params.total_amount !== undefined) items.push(["Total", formatMoney(params.total_amount)]);
+		const poTotal = params.total_amount ?? params.grand_total ?? params.amount;
+		if (poTotal !== undefined && poTotal !== null) items.push(["Total", formatMoney(poTotal)]);
 	} else if (actionType === "AMEND_QUOTE") {
 		if (schema.current_grand_total !== undefined) items.push(["Current Total", formatMoney(schema.current_grand_total)]);
 		if (params.discount_amount !== undefined) items.push(["Discount", formatMoney(params.discount_amount)]);
@@ -425,14 +463,22 @@ function buildGateSummaryHtml(actionType, schema, params) {
 	} else if (actionType === "INTAKE_QUOTE_AND_BOOK") {
 		if (params.customer_name) items.push(["Customer", params.customer_name]);
 		if (params.vin || params.vehicle_identifier) items.push(["Vehicle / VIN", params.vin || params.vehicle_identifier]);
+		if (params.service_package) items.push(["Service Package", params.service_package]);
 		if (params.concern || params.customer_concern) items.push(["Concern", params.concern || params.customer_concern]);
+		if (params.odometer_in !== undefined && params.odometer_in !== null && params.odometer_in !== "") {
+			items.push(["Odometer In", String(params.odometer_in)]);
+		}
 	} else if (actionType === "CONVERT_APPOINTMENT_TO_RO") {
 		if (params.schedule_entry) items.push(["Appointment", params.schedule_entry]);
 	} else if (actionType === "RECEIVE_PO" || actionType === "POST_PURCHASE_INVOICE" || actionType === "PAY_PURCHASE") {
 		if (params.supplier) items.push(["Supplier", params.supplier]);
 		if (params.purchase_order) items.push(["Purchase Order", params.purchase_order]);
 		if (params.purchase_invoice) items.push(["Purchase Invoice", params.purchase_invoice]);
-		if (params.paid_amount !== undefined) items.push(["Amount", formatMoney(params.paid_amount)]);
+		const apAmount =
+			actionType === "PAY_PURCHASE"
+				? (params.paid_amount ?? params.amount)
+				: (params.paid_amount ?? params.total_amount ?? params.grand_total ?? params.amount);
+		if (apAmount !== undefined && apAmount !== null) items.push(["Amount", formatMoney(apAmount)]);
 	} else if (actionType === "DISPATCH_CUSTOMER_SMS" || actionType === "SEND_QUOTE_APPROVAL") {
 		if (params.phone_number) items.push(["Phone", params.phone_number]);
 	} else if (actionType === "DISPATCH_CUSTOMER_EMAIL") {
@@ -450,20 +496,29 @@ function buildGateSummaryHtml(actionType, schema, params) {
 			.join("")}</div>`;
 	}
 
-	const listItems = params.add_services || params.services || params.parts_data || params.parts || [];
-	if (Array.isArray(listItems) && listItems.length) {
+	const rawList =
+		params.add_services ||
+		params.services ||
+		params.requested_services ||
+		params.parts_data ||
+		params.parts ||
+		params.items ||
+		[];
+	const listItems = Array.isArray(rawList)
+		? rawList
+		: typeof rawList === "string" && rawList.trim()
+			? [rawList.trim()]
+			: [];
+	if (listItems.length) {
 		html += `<ul class="gate-items-list">${listItems
 			.slice(0, 8)
 			.map((row) => {
 				if (typeof row === "string") return `<li>${escapeHtml(row)}</li>`;
-				const name = row.service_name || row.item_name || row.part_name || row.item_code || "Item";
+				const name = row.service_name || row.item_name || row.part_name || row.description || row.item_code || "Item";
 				const qty = row.qty !== undefined ? ` ×${row.qty}` : "";
+				const unitPrice = row.sell_price ?? row.rate ?? row.unit_price ?? row.price;
 				const price =
-					row.sell_price !== undefined
-						? ` — ${formatMoney(row.sell_price)}`
-						: row.rate !== undefined
-							? ` — ${formatMoney(row.rate)}`
-							: "";
+					unitPrice !== undefined && unitPrice !== null ? ` — ${formatMoney(unitPrice)}` : "";
 				return `<li>${escapeHtml(name)}${escapeHtml(qty)}${escapeHtml(price)}</li>`;
 			})
 			.join("")}</ul>`;
@@ -621,20 +676,36 @@ function renderApprovalGateCard(event, { canApprove, onResolveCard, onJumpThread
 	}
 
 	// 3. Slot picker for RESCHEDULE_APPOINTMENT / INTAKE_QUOTE_AND_BOOK
+	let normalizedSlots = [];
 	if (actionType === "RESCHEDULE_APPOINTMENT" || actionType === "INTAKE_QUOTE_AND_BOOK") {
-		const slotOptions = Array.isArray(schema.options) ? schema.options : [];
-		if (slotOptions.length) {
+		const candidateSlots = Array.isArray(params.candidate_slots) ? params.candidate_slots : [];
+		const rawSlotOptions =
+			Array.isArray(schema.options) && schema.options.length ? schema.options : candidateSlots;
+		normalizedSlots = rawSlotOptions.map((opt, idx) =>
+			normalizeSlotOption(opt, candidateSlots[idx], idx)
+		);
+		if (normalizedSlots.length) {
 			interactiveHtml += `
 				<div class="gate-field-group">
 					<span class="gate-field-label">Select Time Slot (1-Tap)</span>
 					<div class="gate-pill-group" data-choice-group="slot_index">
-						${slotOptions
+						${normalizedSlots
 							.map(
 								(opt, idx) =>
-									`<button type="button" class="gate-choice-pill ${idx === 0 ? "is-selected" : ""}" data-choice-val="${escapeHtml(opt.value ?? idx)}">${escapeHtml(opt.label)}</button>`
+									`<button type="button" class="gate-choice-pill ${idx === 0 ? "is-selected" : ""}" data-choice-val="${escapeHtml(opt.value)}" data-slot-idx="${idx}">${escapeHtml(opt.label)}</button>`
 							)
 							.join("")}
 					</div>
+				</div>
+			`;
+		}
+
+		if (actionType === "INTAKE_QUOTE_AND_BOOK") {
+			const odoVal = params.odometer_in ?? "";
+			interactiveHtml += `
+				<div class="gate-field-group">
+					<label class="gate-field-label">Odometer In (Optional)</label>
+					<input type="number" inputmode="numeric" min="0" class="gate-input" data-patch="odometer_in" value="${escapeHtml(odoVal)}" placeholder="0 (pre-arrival)" />
 				</div>
 			`;
 		}
@@ -747,12 +818,31 @@ function renderApprovalGateCard(event, { canApprove, onResolveCard, onJumpThread
 				const val = active.dataset.choiceVal;
 				if (key === "slot_index") {
 					formPatch.slot_index = Number.isNaN(Number(val)) ? val : Number(val);
+					const slotPos = Number(active.dataset.slotIdx);
+					const chosenSlot =
+						!Number.isNaN(slotPos) && normalizedSlots[slotPos]
+							? normalizedSlots[slotPos]
+							: null;
+					if (chosenSlot) {
+						if (chosenSlot.scheduled_date) formPatch.scheduled_date = chosenSlot.scheduled_date;
+						if (chosenSlot.start_time) formPatch.start_time = chosenSlot.start_time;
+						if (chosenSlot.service_bay) formPatch.service_bay = chosenSlot.service_bay;
+						if (chosenSlot.technician) formPatch.technician = chosenSlot.technician;
+					}
 					selectedOption = val;
 				} else {
 					formPatch[key] = val;
 					selectedOption = val;
 				}
 			}
+		}
+
+		if (
+			actionType === "INTAKE_QUOTE_AND_BOOK" &&
+			formPatch.odometer_in === undefined &&
+			(params.odometer_in === undefined || params.odometer_in === null || params.odometer_in === "")
+		) {
+			formPatch.odometer_in = 0;
 		}
 
 		_inFlightCards.add(event.name);
