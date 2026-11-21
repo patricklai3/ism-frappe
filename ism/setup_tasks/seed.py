@@ -4,8 +4,14 @@
 import secrets
 
 import frappe
+from cryptography.fernet import Fernet
 
 from ism.ism.doctype.schedule_entry_type.schedule_entry_type import STANDARD_SCHEDULE_ENTRY_TYPES
+from ism.portal.contracts import (
+	DEFAULT_PIN_PROMPT_DISCLAIMER,
+	PORTAL_BOOKING_TOKEN_DEFAULT_TTL_DAYS,
+	PORTAL_DEFAULT_INVOICE_PRINT_FORMAT,
+)
 
 STANDARD_INSPECTION_ITEMS = [
 	{"inspection_description": "Manufacturing Certification Label"},
@@ -107,6 +113,9 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 		"parts_pricing_tesla_search_url_template",
 		"https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
 	),
+	("portal_booking_token_ttl_days", PORTAL_BOOKING_TOKEN_DEFAULT_TTL_DAYS),
+	("portal_invoice_print_format", PORTAL_DEFAULT_INVOICE_PRINT_FORMAT),
+	("portal_pin_prompt_disclaimer", DEFAULT_PIN_PROMPT_DISCLAIMER),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
@@ -127,6 +136,7 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("parts_pricing_min_cost_markup_pct", 25.0),
 	("parts_pricing_min_cost_margin_dollars", 5.0),
 	("parts_pricing_fallback_cost_markup_pct", 40.0),
+	("enable_customer_portal", 1),
 )
 
 
@@ -173,6 +183,12 @@ def setup_default_ism_settings():
 		"portal_session_signing_secret", raise_exception=False
 	):
 		settings.portal_session_signing_secret = secrets.token_urlsafe(48)
+		changed = True
+
+	if not settings.portal_pin_encryption_key and not settings.get_password(
+		"portal_pin_encryption_key", raise_exception=False
+	):
+		settings.portal_pin_encryption_key = Fernet.generate_key().decode("ascii")
 		changed = True
 
 	if changed or settings.is_new():

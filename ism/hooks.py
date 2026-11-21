@@ -138,6 +138,7 @@ after_migrate = "ism.setup.after_migrate"
 
 website_route_rules = [
 	{"from_route": "/quote-approval", "to_route": "quote_approval"},
+	{"from_route": "/portal", "to_route": "portal"},
 	{"from_route": "/board/<thread_key>", "to_route": "board"},
 	{"from_route": "/board", "to_route": "board"},
 	{"from_route": "/cockpit", "to_route": "cockpit"},
@@ -177,6 +178,7 @@ doc_events = {
 		"after_insert": "ism.board.projections.on_repair_order_after_insert",
 		"on_update": [
 			"ism.board.projections.on_repair_order_update",
+			"ism.portal.pin_vault.on_repair_order_update_purge_pin",
 		],
 	},
 	"Schedule Entry": {
@@ -194,6 +196,7 @@ scheduler_events = {
 	"daily": [
 		"ism.comms.otp.cleanup_expired_otp_challenges",
 		"ism.comms.sessions.cleanup_expired_portal_sessions",
+		"ism.portal.pin_vault.purge_stale_closed_ro_pins",
 	],
 }
 

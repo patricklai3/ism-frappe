@@ -16,6 +16,10 @@ from ism.payments.contracts import (
 	SQUARE_ENVIRONMENTS,
 	assert_cad_currency,
 )
+from ism.portal.contracts import (
+	PORTAL_BOOKING_TOKEN_TTL_MAX_DAYS,
+	PORTAL_BOOKING_TOKEN_TTL_MIN_DAYS,
+)
 from ism.scheduling.time_utils import to_timedelta
 
 _DEFAULT_COUNTRY_CODE_RE = re.compile(r"^\+\d{1,3}$")
@@ -33,6 +37,7 @@ class ISMSettings(Document):
 		self._validate_pricing_parameters()
 		self._validate_comms_and_otp_settings()
 		self._validate_square_settings()
+		self._validate_customer_portal_parameters()
 
 	def _normalize_sms_settings(self):
 		# Twilio support was removed; coerce legacy values so existing sites save cleanly.
@@ -239,3 +244,14 @@ class ISMSettings(Document):
 						_("Square Webhook Notification URL must start with https:// in Production."),
 						frappe.ValidationError,
 					)
+
+	def _validate_customer_portal_parameters(self):
+		if self.portal_booking_token_ttl_days is not None:
+			ttl_days = cint(self.portal_booking_token_ttl_days)
+			if ttl_days < PORTAL_BOOKING_TOKEN_TTL_MIN_DAYS or ttl_days > PORTAL_BOOKING_TOKEN_TTL_MAX_DAYS:
+				frappe.throw(
+					_("Booking Portal Link TTL must be between {0} and {1} days.").format(
+						PORTAL_BOOKING_TOKEN_TTL_MIN_DAYS, PORTAL_BOOKING_TOKEN_TTL_MAX_DAYS
+					),
+					frappe.ValidationError,
+				)

@@ -113,7 +113,17 @@
   "parts_pricing_fallback_cost_markup_pct",
   "parts_pricing_rounding_increment",
   "parts_pricing_condition_overrides_json",
-  "parts_pricing_tesla_search_url_template"
+  "parts_pricing_tesla_search_url_template",
+  "sb_customer_portal",
+  "enable_customer_portal",
+  "portal_brand_name",
+  "portal_support_phone",
+  "portal_pickup_hours_text",
+  "cb_customer_portal",
+  "portal_booking_token_ttl_days",
+  "portal_invoice_print_format",
+  "portal_pin_encryption_key",
+  "portal_pin_prompt_disclaimer"
  ],
  "fields": [
   {
@@ -760,11 +770,65 @@
    "fieldname": "parts_pricing_tesla_search_url_template",
    "fieldtype": "Data",
    "label": "Tesla Parts Search URL Template"
+  },
+  {
+   "fieldname": "sb_customer_portal",
+   "fieldtype": "Section Break",
+   "label": "Customer Portal Settings"
+  },
+  {
+   "default": "1",
+   "fieldname": "enable_customer_portal",
+   "fieldtype": "Check",
+   "label": "Enable Customer Portal"
+  },
+  {
+   "fieldname": "portal_brand_name",
+   "fieldtype": "Data",
+   "label": "Portal Brand Name"
+  },
+  {
+   "fieldname": "portal_support_phone",
+   "fieldtype": "Data",
+   "label": "Portal Support Phone"
+  },
+  {
+   "fieldname": "portal_pickup_hours_text",
+   "fieldtype": "Small Text",
+   "label": "Portal Pickup Hours Text"
+  },
+  {
+   "fieldname": "cb_customer_portal",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "30",
+   "fieldname": "portal_booking_token_ttl_days",
+   "fieldtype": "Int",
+   "label": "Booking Portal Link TTL (Days)"
+  },
+  {
+   "default": "Standard",
+   "fieldname": "portal_invoice_print_format",
+   "fieldtype": "Data",
+   "label": "Portal Invoice Print Format"
+  },
+  {
+   "fieldname": "portal_pin_encryption_key",
+   "fieldtype": "Password",
+   "label": "PIN-to-Drive Encryption Key",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "portal_pin_prompt_disclaimer",
+   "fieldtype": "Small Text",
+   "label": "PIN-to-Drive Prompt Disclaimer"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-21 08:20:00.000000",
+ "modified": "2026-11-21 09:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",
