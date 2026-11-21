@@ -138,6 +138,9 @@ after_migrate = "ism.setup.after_migrate"
 
 website_route_rules = [
 	{"from_route": "/quote-approval", "to_route": "quote_approval"},
+	{"from_route": "/board/<thread_key>", "to_route": "board"},
+	{"from_route": "/board", "to_route": "board"},
+	{"from_route": "/cockpit", "to_route": "cockpit"},
 ]
 
 doc_events = {
@@ -169,6 +172,18 @@ doc_events = {
 	"Payment Entry": {
 		"on_submit": "ism.ism.doctype.repair_order.billing.on_payment_entry_submit",
 		"on_cancel": "ism.ism.doctype.repair_order.billing.on_payment_entry_cancel",
+	},
+	"Repair Order": {
+		"after_insert": "ism.board.projections.on_repair_order_after_insert",
+		"on_update": [
+			"ism.board.projections.on_repair_order_update",
+		],
+	},
+	"Schedule Entry": {
+		"on_update": "ism.board.projections.on_schedule_entry_update",
+	},
+	"Shop Action Item": {
+		"after_insert": "ism.board.projections.on_shop_action_item_after_insert",
 	},
 }
 

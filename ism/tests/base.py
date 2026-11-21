@@ -43,6 +43,8 @@ _TEARDOWN_ORDER = {
 	"Purchase Order": 7,
 	"Request for Quotation": 8,
 	"Sales Order": 9,
+	"Shop Board Event": 9,
+	"Shop Board Thread": 10,
 	"Shop Health Snapshot": 10,
 	"Shop Action Item": 11,
 	"Repair Order": 13,
@@ -273,6 +275,7 @@ class ISMTestCase(unittest.TestCase):
 	def _dispatch_teardown(self, doc):
 		handlers = {
 			"Repair Order": self._teardown_repair_order,
+			"Shop Board Event": self._teardown_shop_board_event,
 			"Sales Invoice": self._teardown_sales_invoice,
 			"Purchase Invoice": self._teardown_purchase_invoice,
 			"Purchase Receipt": self._teardown_purchase_receipt,
@@ -291,6 +294,14 @@ class ISMTestCase(unittest.TestCase):
 			handler(doc)
 		else:
 			_cancel_and_delete(doc.doctype, doc.name)
+
+	def _teardown_shop_board_event(self, doc):
+		prev = getattr(frappe.flags, "in_board_teardown", False)
+		frappe.flags.in_board_teardown = True
+		try:
+			_cancel_and_delete("Shop Board Event", doc.name)
+		finally:
+			frappe.flags.in_board_teardown = prev
 
 	def _delete_referencing_schedule_entries(self, filter_field, filter_value):
 		if not frappe.db.exists("DocType", "Schedule Entry"):
@@ -325,6 +336,43 @@ class ISMTestCase(unittest.TestCase):
 				_cancel_and_delete("ISM Payment Transaction", tx_name)
 
 		self._delete_referencing_schedule_entries("repair_order", doc.name)
+		if frappe.db.exists("DocType", "Shop Board Event"):
+			prev = getattr(frappe.flags, "in_board_teardown", False)
+			frappe.flags.in_board_teardown = True
+			try:
+				event_names = set(
+					frappe.get_all(
+						"Shop Board Event",
+						filters={"repair_order": doc.name},
+						pluck="name",
+					)
+				)
+				event_names.update(
+					frappe.get_all(
+						"Shop Board Event",
+						filters={"thread": f"RO:{doc.name}"},
+						pluck="name",
+					)
+				)
+				for ev_name in event_names:
+					_cancel_and_delete("Shop Board Event", ev_name)
+			finally:
+				frappe.flags.in_board_teardown = prev
+
+		if frappe.db.exists("DocType", "Shop Board Thread"):
+			thread_names = set(
+				frappe.get_all(
+					"Shop Board Thread",
+					filters={"repair_order": doc.name},
+					pluck="name",
+				)
+			)
+			ro_key = f"RO:{doc.name}"
+			if frappe.db.exists("Shop Board Thread", ro_key):
+				thread_names.add(ro_key)
+			for thread_name in thread_names:
+				_cancel_and_delete("Shop Board Thread", thread_name)
+
 		if frappe.db.exists("DocType", "Shop Action Item") and frappe.db.has_column("Shop Action Item", "reference_name"):
 			for sai in frappe.get_all(
 				"Shop Action Item",

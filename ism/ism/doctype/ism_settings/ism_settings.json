@@ -81,7 +81,39 @@
   "self_serve_default_entry_type",
   "self_serve_min_lead_time_minutes",
   "self_serve_horizon_days",
-  "enable_waiter_preference"
+  "enable_waiter_preference",
+  "sb_media_storage",
+  "media_storage_backend",
+  "gdrive_auth_mode",
+  "gdrive_client_id",
+  "gdrive_client_secret",
+  "gdrive_refresh_token",
+  "cb_media_storage",
+  "gdrive_service_account_json",
+  "gdrive_root_folder_id",
+  "media_max_audio_mb",
+  "media_max_image_mb",
+  "sb_board_ai",
+  "board_ai_provider",
+  "board_ai_api_key",
+  "board_ai_endpoint",
+  "cb_board_ai",
+  "board_ai_orchestrator_model",
+  "board_ai_comms_model",
+  "board_ai_confidence_threshold",
+  "board_ai_auto_process",
+  "sb_parts_pricing",
+  "parts_pricing_baseline_discount_pct",
+  "parts_pricing_small_ticket_max_tesla_price",
+  "parts_pricing_small_ticket_discount_pct",
+  "parts_pricing_min_sell_price",
+  "parts_pricing_min_cost_markup_pct",
+  "cb_parts_pricing",
+  "parts_pricing_min_cost_margin_dollars",
+  "parts_pricing_fallback_cost_markup_pct",
+  "parts_pricing_rounding_increment",
+  "parts_pricing_condition_overrides_json",
+  "parts_pricing_tesla_search_url_template"
  ],
  "fields": [
   {
@@ -541,6 +573,194 @@
    "fieldname": "enable_waiter_preference",
    "fieldtype": "Check",
    "label": "Enable Waiter Preference"
+  },
+  {
+   "fieldname": "sb_media_storage",
+   "fieldtype": "Section Break",
+   "label": "Media Storage Settings"
+  },
+  {
+   "default": "Frappe Private File",
+   "fieldname": "media_storage_backend",
+   "fieldtype": "Select",
+   "label": "Media Storage Backend",
+   "options": "Frappe Private File\nGoogle Drive"
+  },
+  {
+   "default": "OAuth2 Refresh Token",
+   "fieldname": "gdrive_auth_mode",
+   "fieldtype": "Select",
+   "label": "Google Drive Auth Mode",
+   "options": "OAuth2 Refresh Token\nService Account JSON"
+  },
+  {
+   "fieldname": "gdrive_client_id",
+   "fieldtype": "Data",
+   "label": "Google Drive OAuth Client ID"
+  },
+  {
+   "fieldname": "gdrive_client_secret",
+   "fieldtype": "Password",
+   "label": "Google Drive OAuth Client Secret"
+  },
+  {
+   "fieldname": "gdrive_refresh_token",
+   "fieldtype": "Password",
+   "label": "Google Drive OAuth Refresh Token"
+  },
+  {
+   "fieldname": "cb_media_storage",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "gdrive_service_account_json",
+   "fieldtype": "Password",
+   "label": "Google Drive Service Account JSON"
+  },
+  {
+   "fieldname": "gdrive_root_folder_id",
+   "fieldtype": "Data",
+   "label": "Google Drive Root Folder ID"
+  },
+  {
+   "default": "15",
+   "fieldname": "media_max_audio_mb",
+   "fieldtype": "Int",
+   "label": "Max Audio Size (MB)"
+  },
+  {
+   "default": "10",
+   "fieldname": "media_max_image_mb",
+   "fieldtype": "Int",
+   "label": "Max Image Size (MB)"
+  },
+  {
+   "fieldname": "sb_board_ai",
+   "fieldtype": "Section Break",
+   "label": "Shop Board AI Settings"
+  },
+  {
+   "default": "Disabled",
+   "fieldname": "board_ai_provider",
+   "fieldtype": "Select",
+   "label": "Board AI Provider",
+   "options": "Disabled\nMock (Deterministic Test)\nGemini REST API\nOpenAI Compatible"
+  },
+  {
+   "fieldname": "board_ai_api_key",
+   "fieldtype": "Password",
+   "label": "Board AI API Key"
+  },
+  {
+   "fieldname": "board_ai_endpoint",
+   "fieldtype": "Data",
+   "label": "Board AI Endpoint URL"
+  },
+  {
+   "fieldname": "cb_board_ai",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "gemini-2.5-flash",
+   "fieldname": "board_ai_orchestrator_model",
+   "fieldtype": "Data",
+   "label": "Board AI Orchestrator Model"
+  },
+  {
+   "default": "gemini-2.5-flash",
+   "fieldname": "board_ai_comms_model",
+   "fieldtype": "Data",
+   "label": "Board AI Comms Model"
+  },
+  {
+   "default": "0.90",
+   "fieldname": "board_ai_confidence_threshold",
+   "fieldtype": "Float",
+   "label": "Board AI Confidence Threshold",
+   "precision": "2"
+  },
+  {
+   "default": "0",
+   "fieldname": "board_ai_auto_process",
+   "fieldtype": "Check",
+   "label": "Auto-Process Board Captures"
+  },
+  {
+   "fieldname": "sb_parts_pricing",
+   "fieldtype": "Section Break",
+   "label": "Parts Pricing Policy (Internal)"
+  },
+  {
+   "default": "30.0",
+   "fieldname": "parts_pricing_baseline_discount_pct",
+   "fieldtype": "Float",
+   "label": "Baseline Tesla Discount (%)",
+   "precision": "2"
+  },
+  {
+   "default": "20.0",
+   "fieldname": "parts_pricing_small_ticket_max_tesla_price",
+   "fieldtype": "Float",
+   "label": "Small-Ticket Max Tesla Price ($)",
+   "precision": "2"
+  },
+  {
+   "default": "0.0",
+   "fieldname": "parts_pricing_small_ticket_discount_pct",
+   "fieldtype": "Float",
+   "label": "Small-Ticket Discount (%)",
+   "precision": "2"
+  },
+  {
+   "default": "5.0",
+   "fieldname": "parts_pricing_min_sell_price",
+   "fieldtype": "Float",
+   "label": "Minimum Sell Price ($)",
+   "precision": "2"
+  },
+  {
+   "default": "25.0",
+   "fieldname": "parts_pricing_min_cost_markup_pct",
+   "fieldtype": "Float",
+   "label": "Minimum Cost Markup (%)",
+   "precision": "2"
+  },
+  {
+   "fieldname": "cb_parts_pricing",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "5.0",
+   "fieldname": "parts_pricing_min_cost_margin_dollars",
+   "fieldtype": "Float",
+   "label": "Minimum Cost Margin ($)",
+   "precision": "2"
+  },
+  {
+   "default": "40.0",
+   "fieldname": "parts_pricing_fallback_cost_markup_pct",
+   "fieldtype": "Float",
+   "label": "Fallback Cost Markup (%)",
+   "precision": "2"
+  },
+  {
+   "default": "0.01",
+   "fieldname": "parts_pricing_rounding_increment",
+   "fieldtype": "Float",
+   "label": "Price Rounding Increment ($)",
+   "precision": "2"
+  },
+  {
+   "default": "{\"New\": null, \"Used\": null, \"Reconditioned\": null}",
+   "fieldname": "parts_pricing_condition_overrides_json",
+   "fieldtype": "Small Text",
+   "label": "Condition Discount Overrides (JSON)"
+  },
+  {
+   "default": "https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
+   "fieldname": "parts_pricing_tesla_search_url_template",
+   "fieldtype": "Data",
+   "label": "Tesla Parts Search URL Template"
   }
  ],
  "issingle": 1,

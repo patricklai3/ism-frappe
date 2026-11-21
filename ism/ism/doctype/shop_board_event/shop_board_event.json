@@ -1,0 +1,282 @@
+{
+ "actions": [],
+ "autoname": "naming_series:",
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_header",
+  "naming_series",
+  "thread",
+  "thread_type",
+  "repair_order",
+  "event_timestamp",
+  "cb_actor",
+  "actor_type",
+  "actor_user",
+  "intent_tag",
+  "payload_type",
+  "target_role",
+  "sec_content",
+  "body_text",
+  "transcript",
+  "confidence_score",
+  "metadata_json",
+  "media_attachments",
+  "card_schema",
+  "sec_resolution",
+  "resolution_state",
+  "resolved_by",
+  "resolved_at",
+  "resolution_payload",
+  "cb_links",
+  "parent_event",
+  "idempotency_key",
+  "ai_status",
+  "ai_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_header",
+   "fieldtype": "Section Break",
+   "label": "Event Header"
+  },
+  {
+   "default": "BE-.YYYY.-.######",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "hidden": 1,
+   "label": "Series",
+   "options": "BE-.YYYY.-.######",
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "thread",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Thread",
+   "options": "Shop Board Thread",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "thread_type",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Thread Type",
+   "search_index": 1
+  },
+  {
+   "fieldname": "repair_order",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Repair Order",
+   "options": "Repair Order",
+   "search_index": 1
+  },
+  {
+   "fieldname": "event_timestamp",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Event Timestamp",
+   "reqd": 1
+  },
+  {
+   "fieldname": "cb_actor",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "SYSTEM",
+   "fieldname": "actor_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Actor Type",
+   "options": "TECH\nMANAGER\nAI\nSYSTEM"
+  },
+  {
+   "fieldname": "actor_user",
+   "fieldtype": "Link",
+   "label": "Actor User",
+   "options": "User"
+  },
+  {
+   "fieldname": "intent_tag",
+   "fieldtype": "Data",
+   "label": "Intent Tag"
+  },
+  {
+   "default": "TEXT",
+   "fieldname": "payload_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Payload Type",
+   "options": "MEDIA_CAPTURE\nTEXT\nAI_RECEIPT\nCLARIFICATION_CARD\nAPPROVAL_GATE\nSTATE_MUTATION\nCARD_RESOLUTION",
+   "reqd": 1
+  },
+  {
+   "default": "ALL",
+   "fieldname": "target_role",
+   "fieldtype": "Select",
+   "label": "Target Role",
+   "options": "TECH\nMANAGER\nALL"
+  },
+  {
+   "fieldname": "sec_content",
+   "fieldtype": "Section Break",
+   "label": "Event Payload"
+  },
+  {
+   "fieldname": "body_text",
+   "fieldtype": "Long Text",
+   "label": "Body Text"
+  },
+  {
+   "fieldname": "transcript",
+   "fieldtype": "Long Text",
+   "label": "Transcript"
+  },
+  {
+   "fieldname": "confidence_score",
+   "fieldtype": "Float",
+   "label": "Confidence Score"
+  },
+  {
+   "fieldname": "metadata_json",
+   "fieldtype": "Code",
+   "label": "Metadata JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "media_attachments",
+   "fieldtype": "Code",
+   "label": "Media Attachments",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "card_schema",
+   "fieldtype": "Code",
+   "label": "Card Schema",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "sec_resolution",
+   "fieldtype": "Section Break",
+   "label": "Resolution & AI Lifecycle"
+  },
+  {
+   "default": "NONE",
+   "fieldname": "resolution_state",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Resolution State",
+   "options": "NONE\nPENDING\nEXECUTING\nRESOLVED\nREJECTED\nUNDONE\nEXPIRED",
+   "search_index": 1
+  },
+  {
+   "fieldname": "resolved_by",
+   "fieldtype": "Link",
+   "label": "Resolved By",
+   "options": "User"
+  },
+  {
+   "fieldname": "resolved_at",
+   "fieldtype": "Datetime",
+   "label": "Resolved At"
+  },
+  {
+   "fieldname": "resolution_payload",
+   "fieldtype": "Code",
+   "label": "Resolution Payload",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "cb_links",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "parent_event",
+   "fieldtype": "Link",
+   "label": "Parent Event",
+   "options": "Shop Board Event"
+  },
+  {
+   "fieldname": "idempotency_key",
+   "fieldtype": "Data",
+   "label": "Idempotency Key",
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "default": "NONE",
+   "fieldname": "ai_status",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "AI Status",
+   "options": "NONE\nQUEUED\nPROCESSING\nCOMPLETED\nFAILED"
+  },
+  {
+   "fieldname": "ai_error",
+   "fieldtype": "Small Text",
+   "label": "AI Error"
+  }
+ ],
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Shop Board Event",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Technician"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "event_timestamp",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

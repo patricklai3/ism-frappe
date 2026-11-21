@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+	<meta name="theme-color" content="#0b0f17" />
+	<meta name="apple-mobile-web-app-capable" content="yes" />
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+	<meta name="mobile-web-app-capable" content="yes" />
+	<title>{{ title or "ISM Shop Floor Blackboard" }}</title>
+	<link rel="icon" href="data:," />
+	<link rel="stylesheet" href="/assets/ism/board/board.css" />
+</head>
+<body class="shop-os-body">
+	<header class="shop-os-nav" role="banner">
+		<div class="shop-os-nav__left">
+			{% if authorized %}
+			<button
+				type="button"
+				id="rail-toggle-btn"
+				class="board-mobile-menu-btn"
+				aria-label="Toggle threads menu"
+				aria-expanded="false"
+				aria-controls="board-rail"
+			>
+				<span aria-hidden="true">&#9776;</span>
+			</button>
+			{% endif %}
+			<a class="shop-os-nav__brand" href="/board">ISM Shop OS</a>
+			<nav class="shop-os-nav__tabs" aria-label="Shop OS views">
+				<a class="shop-os-nav__tab is-active" href="/board" aria-current="page">Board</a>
+				{% if can_access_cockpit %}
+				<a class="shop-os-nav__tab" href="/cockpit">Cockpit</a>
+				{% endif %}
+			</nav>
+		</div>
+		<div class="shop-os-nav__right">
+			<div class="shop-os-nav__shortcuts" aria-label="Quick channels">
+				<a class="shop-os-nav__pill" href="/board?thread=SHOP%3AINTAKE" data-quick-thread="SHOP:INTAKE">+ Intake</a>
+				<a class="shop-os-nav__pill" href="/board?thread=SHOP%3AAP_RECEIVING" data-quick-thread="SHOP:AP_RECEIVING">Receiving / AP</a>
+				<a class="shop-os-nav__pill" href="/app/ism">Desk</a>
+			</div>
+			<div class="shop-os-nav__user" title="{{ user_full_name }}">
+				<span class="shop-os-nav__user-name">{{ user_full_name }}</span>
+				<span class="shop-os-nav__role-badge">{{ actor_role }}</span>
+			</div>
+		</div>
+	</header>
+
+	{% if not authorized %}
+	<main class="board-unauth">
+		<section class="board-unauth__card" role="alert">
+			<h1>Access Restricted</h1>
+			<p>{{ error_message or "Your account does not have permission to open the Shop Floor Blackboard." }}</p>
+			<div class="board-unauth__actions">
+				<a class="btn btn-primary" href="/app">Go to Desk</a>
+				<a class="btn btn-ghost" href="/login">Switch Account</a>
+			</div>
+		</section>
+	</main>
+	{% else %}
+	<div id="offline-banner" class="board-offline-banner is-hidden" role="status" aria-live="polite">
+		<span id="offline-banner-text">Connection interrupted. Retrying sync...</span>
+		<button type="button" id="offline-retry-btn" class="btn btn-sm btn-amber">Retry</button>
+	</div>
+
+	<div class="board-shell">
+		<div id="rail-backdrop" class="board-rail-backdrop is-hidden" aria-hidden="true"></div>
+
+		<aside id="board-rail" class="board-rail" aria-label="Shop Board Threads">
+			<div class="board-rail__controls">
+				<input
+					type="search"
+					id="thread-search-input"
+					class="board-search-input"
+					placeholder="Search RO, VIN, bay, customer..."
+					autocomplete="off"
+				/>
+				<div class="board-filter-row" id="thread-filter-row" role="tablist" aria-label="Thread filters">
+					<button type="button" class="filter-chip is-active" data-filter="ALL">All</button>
+					<button type="button" class="filter-chip" data-filter="MY_BAYS">My Bays</button>
+					<button type="button" class="filter-chip" data-filter="NEEDS_APPROVAL">Needs Approval</button>
+					<button type="button" class="filter-chip" data-filter="BLOCKED">Blocked</button>
+				</div>
+			</div>
+
+			<div class="board-rail__scroll">
+				<section class="rail-section" aria-label="Shop Channels">
+					<h2 class="rail-section__heading">Shop Channels</h2>
+					<div id="shop-channels-list" class="thread-list"></div>
+				</section>
+
+				<section class="rail-section" aria-label="Active Repair Orders">
+					<h2 class="rail-section__heading">
+						<span>Active ROs</span>
+						<span id="active-ro-count" class="rail-count">0</span>
+					</h2>
+					<div id="ro-threads-list" class="thread-list"></div>
+				</section>
+			</div>
+		</aside>
+
+		<main class="board-main" id="board-main">
+			<section id="andon-header" class="andon-header" aria-label="Thread status">
+				<div class="andon-header__top">
+					<div class="andon-header__title-group">
+						<div class="andon-header__status-row">
+							<span id="andon-status-badge" class="andon-badge andon-badge--ACTIVE">ACTIVE</span>
+							<span id="andon-blocked-timer" class="andon-timer is-hidden" aria-live="off"></span>
+							<span id="pin-pill-slot" class="pin-pill-slot"></span>
+						</div>
+						<h1 id="andon-title" class="andon-title">Select a Thread</h1>
+						<div id="andon-meta" class="andon-meta"></div>
+					</div>
+					<div class="andon-header__actions">
+						<a id="andon-desk-link" class="btn btn-sm btn-ghost is-hidden" href="#" target="_blank" rel="noopener">Open in Desk</a>
+						<button type="button" id="refresh-thread-btn" class="btn btn-sm btn-ghost" title="Sync thread">Sync</button>
+					</div>
+				</div>
+				<div id="andon-blocked-reason" class="andon-blocked-reason is-hidden"></div>
+			</section>
+
+			<section id="timeline-scroll" class="board-timeline-scroll" aria-label="Thread timeline">
+				<div id="load-more-wrap" class="load-more-wrap is-hidden">
+					<button type="button" id="load-more-btn" class="btn btn-sm btn-ghost">Load Earlier Events</button>
+				</div>
+				<div id="timeline-list" class="timeline-list">
+					<div class="timeline-empty">Loading Shop Floor Blackboard...</div>
+				</div>
+				<div id="ai-status-bar" class="ai-status-bar is-hidden" role="status" aria-live="polite"></div>
+			</section>
+
+			<section id="capture-dock" class="capture-dock" aria-label="Capture note, voice, or photo">
+				<div id="intent-pills" class="intent-pills" role="group" aria-label="Quick intent tags"></div>
+				<div id="capture-notice" class="capture-notice is-hidden" role="status"></div>
+				<div id="photo-tray" class="photo-tray is-hidden" aria-label="Staged photos"></div>
+				<div id="upload-progress" class="upload-progress is-hidden">
+					<div id="upload-progress-fill" class="upload-progress__fill"></div>
+					<span id="upload-progress-label" class="upload-progress__label">Uploading 0%</span>
+				</div>
+				<div id="ptt-recording-bar" class="ptt-recording-bar is-hidden" role="status" aria-live="polite">
+					<span class="ptt-dot" aria-hidden="true"></span>
+					<span id="ptt-timer" class="ptt-timer">00:00</span>
+					<span class="ptt-hint">Recording voice note...</span>
+					<button type="button" id="ptt-cancel-btn" class="btn btn-sm btn-danger">Cancel</button>
+					<button type="button" id="ptt-stop-send-btn" class="btn btn-sm btn-primary">Send Voice</button>
+				</div>
+				<div class="capture-row">
+					<button
+						type="button"
+						id="ptt-btn"
+						class="capture-btn capture-btn--ptt"
+						title="Hold or tap to record voice note"
+						aria-label="Push to talk voice note"
+					>
+						<span class="capture-btn__icon" aria-hidden="true">&#127908;</span>
+						<span class="capture-btn__label">PTT</span>
+					</button>
+
+					<label class="capture-btn capture-btn--cam" for="camera-input" title="Take or attach photos">
+						<span class="capture-btn__icon" aria-hidden="true">&#128247;</span>
+						<span class="capture-btn__label">Cam</span>
+						<input
+							type="file"
+							id="camera-input"
+							accept="image/*"
+							capture="environment"
+							multiple
+							class="sr-only"
+						/>
+					</label>
+
+					<textarea
+						id="capture-text"
+						class="capture-input"
+						rows="1"
+						placeholder="Type update, VIN, or odometer..."
+						aria-label="Message text"
+					></textarea>
+
+					<button
+						type="button"
+						id="send-btn"
+						class="capture-btn capture-btn--send"
+						aria-label="Send capture"
+					>
+						Send
+					</button>
+				</div>
+			</section>
+		</main>
+	</div>
+
+	<div id="photo-lightbox" class="lightbox is-hidden" role="dialog" aria-modal="true" aria-label="Photo preview">
+		<button type="button" id="lightbox-close" class="lightbox__close" aria-label="Close photo">&times;</button>
+		<img id="lightbox-img" class="lightbox__img" src="" alt="Captured inspection media" />
+	</div>
+
+	<div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+	<script>
+		window.ISM_BOARD_BOOT = {{ boot_json | safe }};
+	</script>
+	<script type="module" src="/assets/ism/board/app.js"></script>
+	{% endif %}
+</body>
+</html>

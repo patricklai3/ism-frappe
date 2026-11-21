@@ -94,6 +94,20 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("square_currency", "CAD"),
 	("self_serve_default_entry_type", "Diagnostic"),
 	("self_serve_horizon_days", 30),
+	("media_storage_backend", "Frappe Private File"),
+	("gdrive_auth_mode", "OAuth2 Refresh Token"),
+	("media_max_audio_mb", 15),
+	("media_max_image_mb", 10),
+	("board_ai_provider", "Disabled"),
+	("board_ai_orchestrator_model", "gemini-2.5-flash"),
+	("board_ai_comms_model", "gemini-2.5-flash"),
+	("board_ai_confidence_threshold", 0.90),
+	("parts_pricing_rounding_increment", 0.01),
+	("parts_pricing_condition_overrides_json", '{"New": null, "Used": null, "Reconditioned": null}'),
+	(
+		"parts_pricing_tesla_search_url_template",
+		"https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
+	),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
@@ -106,6 +120,14 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("max_self_reschedules", 2),
 	("self_serve_min_lead_time_minutes", 120),
 	("enable_waiter_preference", 1),
+	("board_ai_auto_process", 0),
+	("parts_pricing_baseline_discount_pct", 30.0),
+	("parts_pricing_small_ticket_max_tesla_price", 20.0),
+	("parts_pricing_small_ticket_discount_pct", 0.0),
+	("parts_pricing_min_sell_price", 5.0),
+	("parts_pricing_min_cost_markup_pct", 25.0),
+	("parts_pricing_min_cost_margin_dollars", 5.0),
+	("parts_pricing_fallback_cost_markup_pct", 40.0),
 )
 
 
@@ -154,6 +176,11 @@ def setup_default_ism_settings():
 		settings.save(ignore_permissions=True)
 
 	ensure_square_bank_account_and_mop()
+
+	if frappe.db.exists("DocType", "Shop Board Thread"):
+		from ism.board.projections import ensure_singleton_shop_threads
+
+		ensure_singleton_shop_threads()
 
 
 def _find_company_bank_group_account(company_name: str, abbr: str | None) -> str | None:

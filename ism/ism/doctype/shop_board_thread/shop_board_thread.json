@@ -1,0 +1,246 @@
+{
+ "actions": [],
+ "autoname": "field:thread_key",
+ "creation": "2026-11-21 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "sec_identity",
+  "thread_key",
+  "thread_type",
+  "title",
+  "cb_identity",
+  "repair_order",
+  "vehicle",
+  "vin",
+  "customer",
+  "sec_floor",
+  "bay",
+  "assigned_technician",
+  "cb_status",
+  "board_status",
+  "blocked_reason",
+  "blocked_since",
+  "sec_projection",
+  "open_action_count",
+  "open_approval_count",
+  "open_clarification_count",
+  "projection_version",
+  "cb_projection",
+  "last_event_at",
+  "last_event_preview",
+  "open_action_card_ids"
+ ],
+ "fields": [
+  {
+   "fieldname": "sec_identity",
+   "fieldtype": "Section Break",
+   "label": "Thread Identity"
+  },
+  {
+   "fieldname": "thread_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Thread Key",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "REPAIR_ORDER",
+   "fieldname": "thread_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Thread Type",
+   "options": "REPAIR_ORDER\nINTAKE\nAP_RECEIVING\nDISPATCH",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "reqd": 1
+  },
+  {
+   "fieldname": "cb_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "repair_order",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Repair Order",
+   "options": "Repair Order",
+   "search_index": 1
+  },
+  {
+   "fieldname": "vehicle",
+   "fieldtype": "Link",
+   "label": "Vehicle",
+   "options": "Repair Vehicle"
+  },
+  {
+   "fieldname": "vin",
+   "fieldtype": "Data",
+   "label": "VIN"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "fieldname": "sec_floor",
+   "fieldtype": "Section Break",
+   "label": "Floor Assignment & Andon Status"
+  },
+  {
+   "fieldname": "bay",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Service Bay",
+   "options": "Service Bay",
+   "search_index": 1
+  },
+  {
+   "fieldname": "assigned_technician",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Assigned Technician",
+   "options": "Employee",
+   "search_index": 1
+  },
+  {
+   "fieldname": "cb_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "ACTIVE",
+   "fieldname": "board_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Board Status",
+   "options": "ACTIVE\nBLOCKED_PARTS\nBLOCKED_DECISION\nWAITING_CUSTOMER\nCLOSED",
+   "search_index": 1
+  },
+  {
+   "fieldname": "blocked_reason",
+   "fieldtype": "Small Text",
+   "label": "Blocked Reason"
+  },
+  {
+   "fieldname": "blocked_since",
+   "fieldtype": "Datetime",
+   "label": "Blocked Since"
+  },
+  {
+   "fieldname": "sec_projection",
+   "fieldtype": "Section Break",
+   "label": "Projection State"
+  },
+  {
+   "default": "0",
+   "fieldname": "open_action_count",
+   "fieldtype": "Int",
+   "label": "Open Action Count"
+  },
+  {
+   "default": "0",
+   "fieldname": "open_approval_count",
+   "fieldtype": "Int",
+   "label": "Open Approval Count"
+  },
+  {
+   "default": "0",
+   "fieldname": "open_clarification_count",
+   "fieldtype": "Int",
+   "label": "Open Clarification Count"
+  },
+  {
+   "default": "1",
+   "fieldname": "projection_version",
+   "fieldtype": "Int",
+   "label": "Projection Version"
+  },
+  {
+   "fieldname": "cb_projection",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_event_at",
+   "fieldtype": "Datetime",
+   "label": "Last Event At",
+   "search_index": 1
+  },
+  {
+   "fieldname": "last_event_preview",
+   "fieldtype": "Data",
+   "label": "Last Event Preview"
+  },
+  {
+   "fieldname": "open_action_card_ids",
+   "fieldtype": "Code",
+   "label": "Open Action Card IDs",
+   "options": "JSON"
+  }
+ ],
+ "links": [],
+ "modified": "2026-11-21 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "ISM",
+ "name": "Shop Board Thread",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "ISM Technician"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "last_event_at",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 0
+}
