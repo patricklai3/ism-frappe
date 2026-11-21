@@ -21,6 +21,19 @@
   "sec_manual_ref",
   "tesla_manual_url",
   "doc_guid",
+  "sb_self_serve_catalog",
+  "allow_self_serve_booking",
+  "self_serve_sort_order",
+  "customer_title",
+  "customer_summary",
+  "applicable_year_from",
+  "applicable_year_to",
+  "cb_self_serve_pricing",
+  "customer_price_display_mode",
+  "customer_estimate_min",
+  "customer_estimate_max",
+  "self_serve_duration_minutes",
+  "self_serve_required_tags",
   "sb_items",
   "items"
  ],
@@ -108,6 +121,92 @@
    "label": "Doc GUID"
   },
   {
+   "fieldname": "sb_self_serve_catalog",
+   "fieldtype": "Section Break",
+   "label": "Self-Serve Customer Booking Catalog"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_self_serve_booking",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Allow Self-Serve Booking",
+   "search_index": 1
+  },
+  {
+   "default": "100",
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "self_serve_sort_order",
+   "fieldtype": "Int",
+   "label": "Self-Serve Sort Order"
+  },
+  {
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "customer_title",
+   "fieldtype": "Data",
+   "label": "Customer Title"
+  },
+  {
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "customer_summary",
+   "fieldtype": "Small Text",
+   "label": "Customer Summary"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "applicable_year_from",
+   "fieldtype": "Int",
+   "label": "Applicable Year From"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "applicable_year_to",
+   "fieldtype": "Int",
+   "label": "Applicable Year To"
+  },
+  {
+   "fieldname": "cb_self_serve_pricing",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Exact Price",
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "customer_price_display_mode",
+   "fieldtype": "Select",
+   "label": "Customer Price Display Mode",
+   "options": "Exact Price\nStarting At\nEstimate Range\nContact for Quote"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.allow_self_serve_booking && in_list(['Exact Price','Starting At','Estimate Range'], doc.customer_price_display_mode)",
+   "fieldname": "customer_estimate_min",
+   "fieldtype": "Currency",
+   "label": "Customer Estimate Min"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.allow_self_serve_booking && doc.customer_price_display_mode == 'Estimate Range'",
+   "fieldname": "customer_estimate_max",
+   "fieldtype": "Currency",
+   "label": "Customer Estimate Max"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "self_serve_duration_minutes",
+   "fieldtype": "Int",
+   "label": "Self-Serve Duration (Minutes)"
+  },
+  {
+   "depends_on": "eval:doc.allow_self_serve_booking",
+   "fieldname": "self_serve_required_tags",
+   "fieldtype": "Data",
+   "label": "Required Equipment Tags"
+  },
+  {
    "fieldname": "sb_items",
    "fieldtype": "Section Break",
    "label": "Required Parts & Materials"
@@ -134,7 +233,7 @@
   }
  ],
  "links": [],
- "modified": "2026-11-17 07:30:00.000000",
+ "modified": "2026-11-21 08:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Package",
