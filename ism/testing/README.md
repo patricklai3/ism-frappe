@@ -95,5 +95,5 @@ Supported `build(stage)` targets: `checked_in`, `draft_estimate`, `pending_autho
   ```powershell
   powershell -ExecutionPolicy Bypass -File scripts\test-in-slot.ps1 -CleanReinstall -Module ism.tests.test_simulation_foundation
   ```
-- **Rebuild `main_golden.sql.gz` from primary `D:\ism` (`main`)**:
-  - `provision-bench-slots.ps1 -RefreshGolden` and `promote-to-main.ps1` build `main_golden.sql.gz` from a clean `golden.localhost` site + `ism.testing.catalog.seed_all` (decoupled from `development.localhost`).
+- **Rebuild / refresh `main_golden.sql.gz` from primary `D:\ism` (`main`)**:
+  - `provision-bench-slots.ps1 -RefreshGolden` and `promote-to-main.ps1` skip golden rebuilds when `golden_input_fp` is unchanged, or rebuild `main_golden.sql.gz` from a cached Tier-0 upstream base (`base_upstream.sql.gz` + `install-app ism` + `ism.testing.catalog.seed_all`, decoupled from `development.localhost`) and warm idle stale slots asynchronously (`bg-warm`, preserving active feature worktree sticky slots). Pass `-ForceGolden` to force an ISM golden rebuild or `-RebuildBase` / `-FullUpstreamReinstall` for a cold upstream reinstall.
