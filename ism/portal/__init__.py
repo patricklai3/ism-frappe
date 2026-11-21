@@ -1,8 +1,9 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-"""Public exports for Project 4 Customer Portal."""
+"""Public facade exports for Project 4 Customer Portal."""
 
+from ism.portal.auth import create_booking_portal_link
 from ism.portal.contracts import (
 	DEFAULT_PIN_PROMPT_DISCLAIMER,
 	PIN_AUTO_MASK_SECONDS,
@@ -30,6 +31,22 @@ from ism.portal.contracts import (
 	mask_email_address,
 	validate_pin_format,
 )
+from ism.portal.invoices import (
+	email_sales_invoice_copy,
+	get_ro_invoice_summary,
+	render_sales_invoice_pdf,
+)
+from ism.portal.pin_vault import (
+	get_ro_pin_for_staff,
+	get_ro_pin_state,
+	opt_out_ro_pin,
+	purge_ro_pin,
+	submit_ro_pin,
+)
+from ism.portal.visit_view import (
+	build_portal_hub_payload,
+	derive_binary_visit_status,
+)
 
 __all__ = [
 	"DEFAULT_PIN_PROMPT_DISCLAIMER",
@@ -53,8 +70,19 @@ __all__ = [
 	"RO_CLOSED_LOCKED_STATUSES",
 	"RO_PIN_MUTATION_LOCKED_STATUSES",
 	"RO_PIN_PURGE_STATUSES",
+	"build_portal_hub_payload",
+	"create_booking_portal_link",
+	"derive_binary_visit_status",
+	"email_sales_invoice_copy",
 	"find_forbidden_portal_keys",
+	"get_ro_invoice_summary",
+	"get_ro_pin_for_staff",
+	"get_ro_pin_state",
 	"hash_portal_token",
 	"mask_email_address",
+	"opt_out_ro_pin",
+	"purge_ro_pin",
+	"render_sales_invoice_pdf",
+	"submit_ro_pin",
 	"validate_pin_format",
 ]

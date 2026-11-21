@@ -12,6 +12,9 @@ from frappe.utils import cint, escape_html, flt, get_datetime, get_url, now_date
 
 from ism.api.sms import dispatch_sms, get_sms_unconfigured_reason
 from ism.comms.email_dispatch import dispatch_transactional_email
+from ism.portal.auth import assert_ro_mutating_unlocked
+from ism.portal.events import emit_portal_quote_approved_event
+from ism.portal.pin_vault import get_ro_pin_customer_state
 
 _MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 _ALLOWED_SIGNATURE_PREFIXES = (
@@ -76,63 +79,8 @@ def clear_portal_rate_limits() -> None:
 
 
 def _notify_shop_floor_approval(doc, normalized_approvals: dict[str, str], signer_name: str) -> None:
-	"""Emit realtime event and create/update a Shop Action Item for advisor visibility."""
-	frappe.publish_realtime(
-		"ism_ro_approval_updated",
-		{
-			"repair_order": doc.name,
-			"status": doc.status,
-			"approval_status": doc.approval_status,
-			"authorized_by": doc.authorized_by,
-			"vehicle": doc.vehicle,
-			"customer": doc.customer,
-		},
-		after_commit=True,
-	)
-
-	decisions = set(normalized_approvals.values())
-	has_declined = "Declined" in decisions
-	has_approved = "Approved" in decisions
-	if doc.approval_status == "Declined" or (has_declined and not has_approved):
-		title = _("Customer Declined Estimate for {0}").format(doc.name)
-	elif doc.approval_status == "Partially Approved" or (has_approved and has_declined):
-		title = _("Customer Partially Approved Estimate for {0}").format(doc.name)
-	else:
-		title = _("Customer Approved Estimate for {0}").format(doc.name)
-
-	priority = "High" if has_declined else "Medium"
-	details = _(
-		"Customer approval submitted by {0} via portal. Approval Status: {1}. Order Status: {2}."
-	).format(signer_name.strip(), doc.approval_status, doc.status)
-
-	existing = frappe.get_all(
-		"Shop Action Item",
-		filters={
-			"reference_doctype": "Repair Order",
-			"reference_name": doc.name,
-			"category": "General",
-			"status": ["in", ["Open", "In Progress"]],
-		},
-		order_by="modified desc",
-		limit_page_length=1,
-		pluck="name",
-	)
-	if existing:
-		item_doc = frappe.get_doc("Shop Action Item", existing[0])
-		item_doc.title = title
-		item_doc.priority = priority
-		item_doc.details = details
-		item_doc.save(ignore_permissions=True)
-	else:
-		item_doc = frappe.new_doc("Shop Action Item")
-		item_doc.title = title
-		item_doc.category = "General"
-		item_doc.priority = priority
-		item_doc.status = "Open"
-		item_doc.reference_doctype = "Repair Order"
-		item_doc.reference_name = doc.name
-		item_doc.details = details
-		item_doc.insert(ignore_permissions=True)
+	"""Emit realtime event and create/update a deduplicated Shop Action Item via Seam 5."""
+	emit_portal_quote_approved_event(doc, normalized_approvals, signer_name)
 
 
 def _ensure_approval_token_for_doc(doc) -> tuple[str, str]:
@@ -301,6 +249,62 @@ def _validate_signature_data(signature_data: str | None, require_signature: bool
 	return f"{matched_prefix}{b64_payload}"
 
 
+def authorize_ro_for_portal(
+	ro_doc,
+	approvals: dict | list | str,
+	signer_name: str,
+	signature_data: str | None = None,
+	client_ip: str | None = None,
+	user_agent: str | None = None,
+) -> dict:
+	"""Shared portal authorization handler enforcing lifecycle locks, audit trail, and PIN prompt state."""
+	if not isinstance(signer_name, str) or not signer_name.strip():
+		frappe.throw(_("Signer name is required."))
+
+	assert_ro_mutating_unlocked(getattr(ro_doc, "status", None))
+
+	services = getattr(ro_doc, "services", [])
+	has_pending = any(s.status in ("Draft", "Estimating", "Pending Approval") for s in services)
+	if (
+		not has_pending
+		and ro_doc.approval_status in ("Approved", "Partially Approved", "Declined")
+		and (ro_doc.signature_image or ro_doc.authorized_at)
+	):
+		frappe.throw(_("This repair estimate has already been authorized."))
+
+	normalized_approvals = _normalize_approvals_payload(approvals)
+	validated_signature = _validate_signature_data(
+		signature_data,
+		require_signature="Approved" in normalized_approvals.values(),
+	)
+
+	prev_portal_flag = getattr(frappe.flags, "_ism_public_approval_portal", False)
+	frappe.flags._ism_public_approval_portal = True
+	try:
+		ro_doc.authorize_jobs(
+			approvals=normalized_approvals,
+			channel="Remote Web Link",
+			signer_name=signer_name.strip(),
+			signature_image=validated_signature,
+			ip_address=client_ip,
+			user_agent=user_agent,
+		)
+	finally:
+		frappe.flags._ism_public_approval_portal = prev_portal_flag
+
+	_notify_shop_floor_approval(ro_doc, normalized_approvals, signer_name)
+	pin_state = get_ro_pin_customer_state(ro_doc)
+
+	return {
+		"success": True,
+		"approval_status": ro_doc.approval_status,
+		"order_status": ro_doc.status,
+		"audit_hash": getattr(ro_doc, "audit_hash", None),
+		"pin_prompt_required": bool(pin_state.get("prompt_required")),
+		"message": _("Thank you! Your authorization has been recorded."),
+	}
+
+
 @frappe.whitelist(allow_guest=True)
 def submit_customer_approval(
 	token: str,
@@ -341,19 +345,6 @@ def submit_customer_approval(
 	if doc.approval_token_expiry and now_datetime() > get_datetime(doc.approval_token_expiry):
 		frappe.throw(_("Authorization token has expired."))
 
-	services = getattr(doc, "services", [])
-	has_pending = any(s.status in ("Draft", "Estimating", "Pending Approval") for s in services)
-	if not has_pending and doc.approval_status in ("Approved", "Partially Approved", "Declined") and (
-		doc.signature_image or doc.authorized_at
-	):
-		frappe.throw(_("This repair estimate has already been authorized."))
-
-	normalized_approvals = _normalize_approvals_payload(approvals)
-	validated_signature = _validate_signature_data(
-		signature_data,
-		require_signature="Approved" in normalized_approvals.values(),
-	)
-
 	if getattr(frappe.local, "request", None):
 		client_ip = getattr(frappe.local, "request_ip", None)
 		client_ua = frappe.get_request_header("User-Agent")
@@ -361,29 +352,14 @@ def submit_customer_approval(
 		client_ip = ip_address if isinstance(ip_address, str) else getattr(frappe.local, "request_ip", None)
 		client_ua = user_agent if isinstance(user_agent, str) else None
 
-	prev_portal_flag = getattr(frappe.flags, "_ism_public_approval_portal", False)
-	frappe.flags._ism_public_approval_portal = True
-	try:
-		doc.authorize_jobs(
-			approvals=normalized_approvals,
-			channel="Remote Web Link",
-			signer_name=signer_name.strip(),
-			signature_image=validated_signature,
-			ip_address=client_ip,
-			user_agent=client_ua,
-		)
-	finally:
-		frappe.flags._ism_public_approval_portal = prev_portal_flag
-
-	_notify_shop_floor_approval(doc, normalized_approvals, signer_name)
-
-	return {
-		"success": True,
-		"approval_status": doc.approval_status,
-		"order_status": doc.status,
-		"audit_hash": getattr(doc, "audit_hash", None),
-		"message": _("Thank you! Your authorization has been recorded."),
-	}
+	return authorize_ro_for_portal(
+		doc,
+		approvals=approvals,
+		signer_name=signer_name,
+		signature_data=signature_data,
+		client_ip=client_ip,
+		user_agent=client_ua,
+	)
 
 
 @frappe.whitelist(allow_guest=True)
