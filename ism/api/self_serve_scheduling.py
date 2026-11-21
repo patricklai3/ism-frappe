@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import frappe
 from frappe import _
@@ -20,6 +20,43 @@ from ism.scheduling.self_serve import (
 )
 
 _MAX_PUBLIC_DAYS_AHEAD = 60
+
+
+def _validate_required_package_ids(package_ids: Any) -> List[str]:
+	"""Strictly validate non-empty package_ids; reject None, bool, dict, int, float, blank, or invalid JSON."""
+	if package_ids is None or isinstance(package_ids, (bool, int, float, dict)):
+		frappe.throw(_("At least one valid service package must be selected."), frappe.ValidationError)
+
+	raw_items: List[str] = []
+	if isinstance(package_ids, str):
+		stripped = package_ids.strip()
+		if not stripped:
+			frappe.throw(_("At least one service package must be selected."), frappe.ValidationError)
+		if stripped.startswith(("[", "{")):
+			try:
+				parsed = frappe.parse_json(stripped)
+			except (ValueError, TypeError):
+				frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+			if not isinstance(parsed, list):
+				frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+			for item in parsed:
+				if not isinstance(item, str) or not item.strip():
+					frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+				raw_items.append(item.strip())
+		else:
+			raw_items = [part.strip() for part in stripped.split(",") if part.strip()]
+	elif isinstance(package_ids, (list, tuple, set)):
+		for item in package_ids:
+			if not isinstance(item, str) or not item.strip():
+				frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+			raw_items.append(item.strip())
+	else:
+		frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+
+	deduped = list(dict.fromkeys(raw_items))
+	if not deduped:
+		frappe.throw(_("At least one service package must be selected."), frappe.ValidationError)
+	return deduped
 
 
 def _parse_optional_int(value: Any, field_label: str) -> Optional[int]:
@@ -79,10 +116,7 @@ def get_self_serve_slots(
 	max_slots_per_day: Optional[Union[int, str]] = None,
 ) -> Dict[str, Any]:
 	"""Return strictly sanitized customer-facing slots for curated self-serve packages."""
-	if package_ids is None or (isinstance(package_ids, str) and not package_ids.strip()) or (
-		isinstance(package_ids, (list, tuple, set)) and len(package_ids) == 0
-	):
-		frappe.throw(_("At least one service package must be selected."), frappe.ValidationError)
+	validated_package_ids = _validate_required_package_ids(package_ids)
 
 	policy = get_self_serve_policy()
 	horizon_days = max(1, int(policy["self_serve_horizon_days"]))
@@ -99,7 +133,7 @@ def get_self_serve_slots(
 		frappe.throw(_("max_slots_per_day must be a positive integer."), frappe.ValidationError)
 
 	return find_self_serve_slots(
-		package_ids=package_ids,
+		package_ids=validated_package_ids,
 		start_date=start_date,
 		days_ahead=capped_days,
 		vehicle_model=vehicle_model,
@@ -206,10 +240,11 @@ def submit_provisional_booking(
 ) -> Dict[str, Any]:
 	"""Submit a provisional self-serve booking for an authenticated caller."""
 	_ensure_authenticated_permission("Schedule Entry", "create")
+	validated_package_ids = _validate_required_package_ids(package_ids)
 	parsed_year = _parse_optional_int(vehicle_year, "vehicle_year")
 
 	return create_provisional_booking(
-		package_ids=package_ids,
+		package_ids=validated_package_ids,
 		target_date=target_date,
 		customer_arrival_time=customer_arrival_time,
 		customer_name=customer_name,

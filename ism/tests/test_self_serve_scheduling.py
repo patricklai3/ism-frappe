@@ -1157,6 +1157,213 @@ class TestSelfServeScheduling(ISMTestCase):
 		if sai_resched:
 			self.track("Shop Action Item", sai_resched)
 
+	def test_guest_package_ids_bypass_and_direct_empty_list_rejected(self):
+		"""Finding #1 regression: Guest get_self_serve_slots and find_self_serve_slots reject all falsy/invalid package_ids."""
+		target_date = str(self.base_date)
+
+		frappe.set_user("Guest")
+		for bad_value in ({}, False, 0, 0.0, "", "   ", "[]", "{}", "{bad", [], [123], [True], None):
+			with self.subTest(endpoint_package_ids=bad_value):
+				with self.assertRaises(frappe.ValidationError):
+					get_self_serve_slots(package_ids=bad_value, start_date=target_date)
+
+		frappe.set_user("Administrator")
+		for bad_direct in ([], {}, False, 0, "", "[]"):
+			with self.subTest(direct_package_ids=bad_direct):
+				with self.assertRaises(frappe.ValidationError):
+					find_self_serve_slots(
+						package_ids=bad_direct,
+						start_date=target_date,
+						now_dt=self.now_anchor,
+					)
+
+	def test_repeatable_read_snapshot_toctou_reschedule_max_and_ro_checkin(self):
+		"""Finding #2 regression: pre-opened REPEATABLE READ snapshot sees concurrent reschedule & RO check-in."""
+		frappe.db.rollback()
+		site = frappe.local.site
+		appt_date = str(add_days(today(), 16))
+		created_se_names = []
+		created_ro_names = []
+
+		try:
+			self._set_ism_settings(
+				operating_hours_start="08:00:00",
+				operating_hours_end="17:00:00",
+				break_start="12:00:00",
+				break_end="12:30:00",
+				default_slot_interval=30,
+				enable_technician_capacity=1,
+				holiday_list=None,
+				customer_arrival_offset_minutes=15,
+				reschedule_cutoff_hours=24,
+				max_self_reschedules=2,
+				self_serve_min_lead_time_minutes=120,
+				self_serve_horizon_days=30,
+			)
+
+			# Fixture A: SE already at reschedule_count=1 (max=2)
+			se_max = frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": "Scheduled",
+				"scheduled_date": appt_date,
+				"scheduled_time": "09:00:00",
+				"estimated_duration": 60,
+				"service_bay": self.bay1,
+				"provisional_customer_name": "TOCTOU Max User",
+				"provisional_phone": "+16045550191",
+				"booking_source": "Website Self-Serve",
+				"reschedule_count": 1,
+			}).insert(ignore_permissions=True)
+			created_se_names.append(se_max.name)
+
+			# Fixture B: SE at reschedule_count=0 (concurrent reschedule #1 -> thread 1 performs #2 without TimestampMismatch)
+			se_chain = frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": "Scheduled",
+				"scheduled_date": appt_date,
+				"scheduled_time": "10:00:00",
+				"estimated_duration": 60,
+				"service_bay": self.bay2,
+				"provisional_customer_name": "TOCTOU Chain User",
+				"provisional_phone": "+16045550192",
+				"booking_source": "Website Self-Serve",
+				"reschedule_count": 0,
+			}).insert(ignore_permissions=True)
+			created_se_names.append(se_chain.name)
+
+			# Fixture C: SE linked to Draft Estimate RO that gets Checked In concurrently
+			ro_doc = frappe.get_doc({
+				"doctype": "Repair Order",
+				"customer": self.customer,
+				"vehicle": self.vehicle,
+				"odometer_in": 31000,
+				"status": "Draft Estimate",
+				"posting_date": today(),
+			}).insert(ignore_permissions=True)
+			created_ro_names.append(ro_doc.name)
+
+			se_ro = frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": "Scheduled",
+				"scheduled_date": appt_date,
+				"scheduled_time": "11:00:00",
+				"estimated_duration": 60,
+				"service_bay": self.bay_hv,
+				"repair_order": ro_doc.name,
+				"booking_source": "Website Self-Serve",
+				"reschedule_count": 0,
+			}).insert(ignore_permissions=True)
+			created_se_names.append(se_ro.name)
+			frappe.db.commit()
+
+			def _run_in_worker(fn):
+				out = []
+
+				def _target():
+					frappe.init(site=site)
+					frappe.connect()
+					frappe.set_user("Administrator")
+					try:
+						out.append(("ok", fn()))
+						frappe.db.commit()
+					except Exception as exc:
+						frappe.db.rollback()
+						out.append(("err", exc))
+					finally:
+						frappe.destroy()
+
+				t = threading.Thread(target=_target)
+				t.start()
+				t.join(timeout=30)
+				self.assertEqual(len(out), 1)
+				kind, val = out[0]
+				if kind == "err":
+					raise val
+				return val
+
+			# --- Scenario A: Thread 1 opens REPEATABLE READ snapshot, Thread 2 hits max_self_reschedules=2 ---
+			frappe.db.rollback()
+			self.assertTrue(frappe.db.exists("Schedule Entry", se_max.name))
+			stale_doc_a = frappe.get_doc("Schedule Entry", se_max.name)
+			self.assertEqual(stale_doc_a.reschedule_count, 1)
+
+			_run_in_worker(
+				lambda: reschedule_self_serve_appointment(
+					se_max.name,
+					appt_date,
+					"12:45",
+					now_dt=self.now_anchor,
+					emit_notification=False,
+				)
+			)
+
+			# Thread 1's snapshot still has stale reschedule_count=1, but locked reschedule MUST see 2 -> max_reschedules_reached
+			with self.assertRaises(frappe.ValidationError) as ctx_max:
+				reschedule_self_serve_appointment(
+					se_max.name,
+					appt_date,
+					"13:45",
+					now_dt=self.now_anchor,
+					emit_notification=False,
+				)
+			self.assertEqual(getattr(ctx_max.exception, "reason_code", None), "max_reschedules_reached")
+
+			# --- Scenario B: Thread 1 opens snapshot (count=0), Thread 2 commits count=1 -> Thread 1 cleanly updates to count=2 ---
+			frappe.db.rollback()
+			stale_doc_b = frappe.get_doc("Schedule Entry", se_chain.name)
+			self.assertEqual(stale_doc_b.reschedule_count, 0)
+
+			_run_in_worker(
+				lambda: reschedule_self_serve_appointment(
+					se_chain.name,
+					appt_date,
+					"14:15",
+					now_dt=self.now_anchor,
+					emit_notification=False,
+				)
+			)
+
+			res_b = reschedule_self_serve_appointment(
+				se_chain.name,
+				appt_date,
+				"15:15",
+				now_dt=self.now_anchor,
+				emit_notification=False,
+			)
+			frappe.db.commit()
+			self.assertEqual(res_b["reschedule_count"], 2)
+			self.assertEqual(res_b["remaining_reschedules"], 0)
+			self.assertEqual(res_b["appointment"]["customer_arrival_hhmm"], "15:15")
+
+			# --- Scenario C: Thread 1 opens snapshot seeing Draft Estimate RO, Thread 2 checks in RO -> locked_repair_order_status ---
+			frappe.db.rollback()
+			self.assertEqual(frappe.db.get_value("Repair Order", ro_doc.name, "status"), "Draft Estimate")
+			frappe.get_doc("Schedule Entry", se_ro.name)
+
+			_run_in_worker(lambda: frappe.db.set_value("Repair Order", ro_doc.name, "status", "Checked In"))
+
+			with self.assertRaises(frappe.ValidationError) as ctx_ro:
+				reschedule_self_serve_appointment(
+					se_ro.name,
+					appt_date,
+					"13:15",
+					now_dt=self.now_anchor,
+					emit_notification=False,
+				)
+			self.assertEqual(getattr(ctx_ro.exception, "reason_code", None), "locked_repair_order_status")
+		finally:
+			frappe.db.rollback()
+			for se_name in created_se_names:
+				if frappe.db.exists("Schedule Entry", se_name):
+					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
+			for ro_name in created_ro_names:
+				if frappe.db.exists("Repair Order", ro_name):
+					frappe.delete_doc("Repair Order", ro_name, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
 	def test_constants_exported(self):
 		self.assertEqual(ALLOWED_RESCHEDULE_ENTRY_STATUSES, ("Scheduled", "Confirmed"))
 		self.assertEqual(ALLOWED_RESCHEDULE_RO_STATUSES, ("Draft Estimate", "Pending Authorization"))
