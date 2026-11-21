@@ -50,6 +50,13 @@ from ism.booking.contracts import (
 	is_booking_enabled,
 	resolve_booking_portal_link,
 )
+from ism.booking.service import (
+	get_booking_boot_config,
+	get_public_booking_packages,
+	get_public_booking_slots,
+	initiate_booking_otp,
+	verify_and_commit_booking,
+)
 
 __all__ = [
 	"ALLOWED_VEHICLE_MODELS",
@@ -87,14 +94,19 @@ __all__ = [
 	"check_phone_daily_limit_and_duplicate",
 	"clear_booking_rate_limits",
 	"enforce_booking_ip_rate_limit",
+	"get_booking_boot_config",
 	"get_booking_settings",
 	"get_idempotent_booking_result",
+	"get_public_booking_packages",
+	"get_public_booking_slots",
 	"get_shop_branding",
+	"initiate_booking_otp",
 	"is_booking_enabled",
 	"issue_booking_form_nonce",
 	"record_phone_daily_booking",
 	"resolve_booking_portal_link",
 	"store_idempotent_booking_result",
 	"validate_honeypot_and_nonce",
+	"verify_and_commit_booking",
 	"verify_booking_form_nonce",
 ]
