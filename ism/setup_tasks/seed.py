@@ -73,11 +73,33 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("estimation_sigma", 0.30),
 	("default_diagnostic_duration", 60),
 	("default_labor_rate", 140.0),
+	("media_storage_backend", "Frappe Private File"),
+	("gdrive_auth_mode", "OAuth2 Refresh Token"),
+	("media_max_audio_mb", 15),
+	("media_max_image_mb", 10),
+	("board_ai_provider", "Disabled"),
+	("board_ai_orchestrator_model", "gemini-2.5-flash"),
+	("board_ai_comms_model", "gemini-2.5-flash"),
+	("board_ai_confidence_threshold", 0.90),
+	("parts_pricing_rounding_increment", 0.01),
+	("parts_pricing_condition_overrides_json", '{"New": null, "Used": null, "Reconditioned": null}'),
+	(
+		"parts_pricing_tesla_search_url_template",
+		"https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
+	),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
 	("enable_technician_capacity", 1),
 	("buffer_padding_minutes", 0),
+	("board_ai_auto_process", 0),
+	("parts_pricing_baseline_discount_pct", 30.0),
+	("parts_pricing_small_ticket_max_tesla_price", 20.0),
+	("parts_pricing_small_ticket_discount_pct", 0.0),
+	("parts_pricing_min_sell_price", 5.0),
+	("parts_pricing_min_cost_markup_pct", 25.0),
+	("parts_pricing_min_cost_margin_dollars", 5.0),
+	("parts_pricing_fallback_cost_markup_pct", 40.0),
 )
 
 
@@ -115,6 +137,11 @@ def setup_default_ism_settings():
 
 	if changed or settings.is_new():
 		settings.save(ignore_permissions=True)
+
+	if frappe.db.exists("DocType", "Shop Board Thread"):
+		from ism.board.projections import ensure_singleton_shop_threads
+
+		ensure_singleton_shop_threads()
 
 
 def setup_parts_item_group():
