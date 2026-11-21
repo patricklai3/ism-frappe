@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from typing import Any
 
 import frappe
@@ -46,6 +47,20 @@ def _scrub_audit_text(text: Any, max_len: int = 500) -> str:
 	for pattern, replacement in _SECRET_PATTERNS:
 		scrubbed = pattern.sub(replacement, scrubbed)
 	return scrubbed[:max_len]
+
+
+def _is_forced_delete_doc_call() -> bool:
+	"""Return True if an active frappe.model.delete_doc.delete_doc call has force=True."""
+	frame = sys._getframe(1)
+	try:
+		while frame is not None:
+			code = frame.f_code
+			if code.co_name == "delete_doc" and frame.f_globals.get("__name__") == "frappe.model.delete_doc":
+				return bool(frame.f_locals.get("force", False))
+			frame = frame.f_back
+		return False
+	finally:
+		del frame
 
 
 class ISMPaymentTransaction(Document):
@@ -108,6 +123,7 @@ class ISMPaymentTransaction(Document):
 			getattr(frappe.flags, "in_test", False)
 			or getattr(self.flags, "force", False)
 			or getattr(frappe.flags, "force_delete", False)
+			or _is_forced_delete_doc_call()
 		)
 		if not allow_teardown:
 			frappe.throw(

@@ -366,6 +366,74 @@ class TestPaymentsSchemaAndRequests(ISMTestCase):
 		for perm in meta.permissions:
 			self.assertEqual(perm.delete, 0, f"Role {perm.role} must have delete=0 on ISM Payment Transaction")
 
+	def test_payment_transaction_trash_guard_honors_force_and_cleanup_outside_in_test(self):
+		from ism.tests.cleanup import _cleanup_payment_transactions
+
+		customer, _vehicle, ro = self._create_base_ro()
+
+		def _make_linked_tx():
+			tx = frappe.get_doc({
+				"doctype": "ISM Payment Transaction",
+				"repair_order": ro.name,
+				"customer": customer.name,
+				"company": ro.company,
+				"payment_intent": INTENT_MANUAL_DEPOSIT,
+				"status": TX_STATUS_INITIATED,
+				"currency": SQUARE_CURRENCY,
+				"amount": 50.00,
+				"square_environment": SQUARE_ENV_MOCK,
+				"idempotency_key": f"test-trash-{uuid.uuid4().hex[:16]}",
+			})
+			tx.insert(ignore_permissions=True)
+			self.track(tx)
+			frappe.db.set_value(
+				"ISM Payment Transaction",
+				tx.name,
+				"payment_entry",
+				"ACC-PAY-DUMMY-0001",
+				update_modified=False,
+			)
+			return tx
+
+		tx_force = _make_linked_tx()
+		tx_cleanup = _make_linked_tx()
+
+		prev_in_test = frappe.flags.in_test
+		prev_force_delete = getattr(frappe.flags, "force_delete", False)
+		try:
+			frappe.flags.in_test = False
+			frappe.flags.force_delete = False
+
+			# 1. force=False still blocks deletion when payment_entry is populated
+			with self.assertRaises(frappe.ValidationError):
+				frappe.delete_doc(
+					"ISM Payment Transaction",
+					tx_force.name,
+					force=False,
+					ignore_permissions=True,
+				)
+			self.assertTrue(frappe.db.exists("ISM Payment Transaction", tx_force.name))
+
+			# 2. force=True succeeds even when frappe.flags.in_test is False
+			frappe.delete_doc(
+				"ISM Payment Transaction",
+				tx_force.name,
+				force=True,
+				ignore_permissions=True,
+			)
+			self.assertFalse(frappe.db.exists("ISM Payment Transaction", tx_force.name))
+
+			# 3. _cleanup_payment_transactions cleanly deletes PE-linked rows with 0 errors
+			logs = []
+			errors = []
+			_cleanup_payment_transactions({customer.name}, {ro.name}, logs.append, errors)
+			self.assertEqual(errors, [])
+			self.assertFalse(frappe.db.exists("ISM Payment Transaction", tx_cleanup.name))
+			self.assertFalse(getattr(frappe.flags, "force_delete", False))
+		finally:
+			frappe.flags.in_test = prev_in_test
+			frappe.flags.force_delete = prev_force_delete
+
 	def test_repair_order_deposit_request_defaults_and_billing_tab_depends_on(self):
 		_customer, _vehicle, ro = self._create_base_ro()
 		self.assertEqual(ro.deposit_request_status, DEPOSIT_REQ_NONE)

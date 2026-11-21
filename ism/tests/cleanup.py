@@ -186,7 +186,12 @@ def _cleanup_payment_transactions(test_customers, test_ros, log, errors):
 						None,
 						update_modified=False,
 					)
-			_delete_doc_safe("ISM Payment Transaction", tx.name, log, errors)
+			prev_force_delete = getattr(frappe.flags, "force_delete", False)
+			frappe.flags.force_delete = True
+			try:
+				_delete_doc_safe("ISM Payment Transaction", tx.name, log, errors)
+			finally:
+				frappe.flags.force_delete = prev_force_delete
 
 
 def _cleanup_payment_entries(test_customers, test_suppliers, log, errors):
