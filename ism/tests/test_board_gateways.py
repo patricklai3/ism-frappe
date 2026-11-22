@@ -297,8 +297,8 @@ class TestBoardGateways(ISMTestCase):
 		item1 = ctx_single["items"][0]
 		self.assertEqual(item1["name"], act1)
 		self.assertEqual(item1["clearing_condition_type"], "ro_has_supplement_or_service")
-		self.assertIsInstance(item1["clearing_condition"], str)
-		self.assertIsInstance(item1["clearing_condition_params"], dict)
+		self.assertIsInstance(item1["clearing_condition"], dict)
+		self.assertIsInstance(item1["clearing_condition_description"], str)
 		self.assertIn("Front left bushing cracked", item1["triggering_event"]["transcript"] or "")
 		self.assertGreaterEqual(len(item1["triggering_event"]["media_attachments"]), 1)
 		self.assertIn("ism.api.board.get_media", item1["triggering_event"]["media_attachments"][0]["url"])

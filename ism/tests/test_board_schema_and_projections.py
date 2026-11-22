@@ -447,7 +447,11 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 
 		# C. po_submitted_or_received clears automatically on Purchase Order submit referencing RO
 		ro_po = self._create_ro(status="Waiting on Parts", approval_status="Approved")
-		item = self.create_test_item()
+		item = self.create_test_item(
+			f"_TEST_ISM_PO_CLEAR_{frappe.generate_hash(length=5)}",
+			is_stock_item=1,
+			standard_rate=45.0,
+		)
 		supplier = self._create_supplier("po-clear")
 		ctype_po, cparams_po = build_clearing_condition_for_ro("po_submitted_or_received", ro_po.name)
 		sai_po = create_shop_action_item(
