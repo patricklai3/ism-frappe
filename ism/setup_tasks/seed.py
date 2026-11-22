@@ -107,15 +107,7 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("media_max_audio_mb", 15),
 	("media_max_image_mb", 10),
 	("board_ai_provider", "Disabled"),
-	("board_ai_orchestrator_model", DEFAULT_GEMINI_MODEL),
-	("board_ai_comms_model", DEFAULT_GEMINI_MODEL),
-	("board_ai_confidence_threshold", 0.90),
-	("parts_pricing_rounding_increment", 0.01),
-	("parts_pricing_condition_overrides_json", '{"New": null, "Used": null, "Reconditioned": null}'),
-	(
-		"parts_pricing_tesla_search_url_template",
-		"https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
-	),
+	("board_ai_model", DEFAULT_GEMINI_MODEL),
 	("portal_booking_token_ttl_days", PORTAL_BOOKING_TOKEN_DEFAULT_TTL_DAYS),
 	("portal_invoice_print_format", PORTAL_DEFAULT_INVOICE_PRINT_FORMAT),
 	("portal_pin_prompt_disclaimer", DEFAULT_PIN_PROMPT_DISCLAIMER),
@@ -140,13 +132,6 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("self_serve_min_lead_time_minutes", 120),
 	("enable_waiter_preference", 1),
 	("board_ai_auto_process", 0),
-	("parts_pricing_baseline_discount_pct", 30.0),
-	("parts_pricing_small_ticket_max_tesla_price", 20.0),
-	("parts_pricing_small_ticket_discount_pct", 0.0),
-	("parts_pricing_min_sell_price", 5.0),
-	("parts_pricing_min_cost_markup_pct", 25.0),
-	("parts_pricing_min_cost_margin_dollars", 5.0),
-	("parts_pricing_fallback_cost_markup_pct", 40.0),
 	("enable_customer_portal", 1),
 	("enable_self_serve_booking", 0),
 	("self_serve_require_email", 0),
@@ -193,10 +178,9 @@ def setup_default_ism_settings():
 		settings.sms_gateway_provider = "Disabled"
 		changed = True
 
-	for fieldname in ("board_ai_orchestrator_model", "board_ai_comms_model"):
-		if (settings.get(fieldname) or "").strip() in _DEPRECATED_DEFAULT_GEMINI_MODELS:
-			settings.set(fieldname, DEFAULT_GEMINI_MODEL)
-			changed = True
+	if (settings.get("board_ai_model") or "").strip() in _DEPRECATED_DEFAULT_GEMINI_MODELS:
+		settings.set("board_ai_model", DEFAULT_GEMINI_MODEL)
+		changed = True
 
 	if not settings.portal_session_signing_secret and not settings.get_password(
 		"portal_session_signing_secret", raise_exception=False
@@ -214,11 +198,6 @@ def setup_default_ism_settings():
 		settings.save(ignore_permissions=True)
 
 	ensure_square_bank_account_and_mop()
-
-	if frappe.db.exists("DocType", "Shop Board Thread"):
-		from ism.board.projections import ensure_singleton_shop_threads
-
-		ensure_singleton_shop_threads()
 
 
 def _find_company_bank_group_account(company_name: str, abbr: str | None) -> str | None:

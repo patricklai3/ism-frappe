@@ -156,8 +156,16 @@ doc_events = {
 		"on_update": "ism.scheduling.time_utils.invalidate_holiday_cache",
 		"on_trash": "ism.scheduling.time_utils.invalidate_holiday_cache",
 	},
+	"Purchase Order": {
+		"on_submit": [
+			"ism.ism.doctype.shop_action_item.clearing.on_purchase_order_submit_clear_actions",
+		],
+	},
 	"Purchase Receipt": {
-		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
+		"on_submit": [
+			"ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
+			"ism.ism.doctype.shop_action_item.clearing.on_purchase_receipt_submit_clear_actions",
+		],
 	},
 	"Purchase Invoice": {
 		"on_submit": "ism.ism.doctype.repair_order.repair_order.on_stock_update_event",
@@ -180,10 +188,24 @@ doc_events = {
 		"on_update": [
 			"ism.board.projections.on_repair_order_update",
 			"ism.portal.pin_vault.on_repair_order_update_purge_pin",
+			"ism.ism.doctype.shop_action_item.clearing.on_repair_order_update_clear_actions",
 		],
 	},
 	"Schedule Entry": {
-		"on_update": "ism.board.projections.on_schedule_entry_update",
+		"on_update": [
+			"ism.board.projections.on_schedule_entry_update",
+			"ism.ism.doctype.shop_action_item.clearing.on_schedule_entry_update_clear_actions",
+		],
+	},
+	"SMS Audit Log": {
+		"after_insert": [
+			"ism.ism.doctype.shop_action_item.clearing.on_sms_audit_after_insert_clear_actions",
+		],
+	},
+	"Communication": {
+		"after_insert": [
+			"ism.ism.doctype.shop_action_item.clearing.on_communication_after_insert_clear_actions",
+		],
 	},
 	"Shop Action Item": {
 		"after_insert": "ism.board.projections.on_shop_action_item_after_insert",

@@ -13,6 +13,7 @@ from ism.board.contracts import (
 	PAYLOAD_TYPES,
 	RESOLUTION_STATES,
 	TARGET_ROLES,
+	THREAD_TYPES,
 )
 
 
@@ -44,6 +45,11 @@ class ShopBoardEvent(Document):
 		if not self.event_timestamp:
 			self.event_timestamp = now_datetime()
 
+		if self.thread_type and self.thread_type not in THREAD_TYPES:
+			frappe.throw(
+				_("Invalid thread_type: {0}").format(self.thread_type),
+				frappe.ValidationError,
+			)
 		if self.actor_type and self.actor_type not in ACTOR_TYPES:
 			frappe.throw(
 				_("Invalid actor_type: {0}").format(self.actor_type),

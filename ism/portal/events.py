@@ -10,11 +10,13 @@ events so Project 6 (``/board`` / ``/cockpit``) can project alerts softly.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import frappe
 from frappe import _
 
+from ism.ism.doctype.shop_action_item.clearing import build_clearing_condition_for_ro
 from ism.portal.contracts import (
 	PIN_STATUS_OPTED_OUT,
 	PIN_STATUS_PROVIDED,
@@ -37,6 +39,8 @@ def _upsert_ro_action_item(
 	priority: str,
 	details: str,
 	match_legacy_unkeyed: bool = False,
+	clearing_condition_type: str | None = None,
+	clearing_condition_json: str | dict[str, Any] | None = None,
 ) -> str:
 	"""Create or update an open Shop Action Item for a Repair Order (Seam 5)."""
 	existing_name = frappe.db.get_value(
@@ -66,6 +70,12 @@ def _upsert_ro_action_item(
 				existing_name = row["name"]
 				break
 
+	serialized_clearing_json = (
+		json.dumps(clearing_condition_json)
+		if isinstance(clearing_condition_json, dict)
+		else clearing_condition_json
+	)
+
 	if existing_name:
 		item_doc = frappe.get_doc("Shop Action Item", existing_name)
 		item_doc.title = title
@@ -76,6 +86,10 @@ def _upsert_ro_action_item(
 		item_doc.reference_doctype = "Repair Order"
 		item_doc.reference_name = ro_name
 		item_doc.details = details
+		if clearing_condition_type:
+			item_doc.clearing_condition_type = clearing_condition_type
+		if serialized_clearing_json is not None:
+			item_doc.clearing_condition_json = serialized_clearing_json
 		item_doc.save(ignore_permissions=True)
 		return item_doc.name
 
@@ -89,6 +103,10 @@ def _upsert_ro_action_item(
 	item_doc.reference_doctype = "Repair Order"
 	item_doc.reference_name = ro_name
 	item_doc.details = details
+	if clearing_condition_type:
+		item_doc.clearing_condition_type = clearing_condition_type
+	if serialized_clearing_json is not None:
+		item_doc.clearing_condition_json = serialized_clearing_json
 	item_doc.insert(ignore_permissions=True)
 	return item_doc.name
 
@@ -139,6 +157,21 @@ def emit_portal_quote_approved_event(
 		"Customer approval submitted by {0} via portal. Approval Status: {1}. Order Status: {2}."
 	).format(clean_signer, ro_doc.approval_status, ro_doc.status)
 
+	clearing_type, clearing_params = build_clearing_condition_for_ro(
+		"ro_status_in",
+		ro_doc.name,
+		overrides={
+			"statuses": [
+				"Authorized - In Progress",
+				"Work Completed",
+				"Billed / Paid",
+				"Closed / Released",
+				"Cancelled",
+			],
+			"description": "When work starts, completes, or RO closes",
+		},
+	)
+
 	_upsert_ro_action_item(
 		ro_name=ro_doc.name,
 		dedup_key=f"portal:approval:{ro_doc.name}",
@@ -146,6 +179,8 @@ def emit_portal_quote_approved_event(
 		priority=priority,
 		details=details,
 		match_legacy_unkeyed=True,
+		clearing_condition_type=clearing_type,
+		clearing_condition_json=clearing_params,
 	)
 
 
@@ -168,12 +203,20 @@ def emit_portal_pin_submitted_event(ro_name: str, pin_status: str) -> None:
 		title = _("Vehicle PIN-to-Drive Status Updated for {0}").format(ro_name)
 		details = _("Vehicle PIN-to-Drive status changed to {0}.").format(pin_status)
 
+	clearing_type, clearing_params = build_clearing_condition_for_ro(
+		"ro_closed",
+		ro_name,
+		overrides={"description": "When Repair Order closes or is cancelled"},
+	)
+
 	_upsert_ro_action_item(
 		ro_name=ro_name,
 		dedup_key=f"portal:pin:{ro_name}",
 		title=title,
 		priority="Low",
 		details=details,
+		clearing_condition_type=clearing_type,
+		clearing_condition_json=clearing_params,
 	)
 
 	frappe.publish_realtime(

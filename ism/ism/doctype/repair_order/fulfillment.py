@@ -589,6 +589,18 @@ def _notify_ro_parts_ready(ro) -> None:
 		"Status transitioned from Waiting on Parts to Authorized - In Progress."
 	).format(ro.name)
 
+	from ism.ism.doctype.shop_action_item.clearing import build_clearing_condition_for_ro
+
+	clearing_type, clearing_params = build_clearing_condition_for_ro(
+		"ro_status_in",
+		ro.name,
+		overrides={
+			"statuses": ["Work Completed", "Billed / Paid", "Closed / Released", "Cancelled"],
+			"description": "When work completes or RO closes",
+		},
+	)
+	clearing_json = json.dumps(clearing_params)
+
 	existing = frappe.get_all(
 		"Shop Action Item",
 		filters={
@@ -606,6 +618,8 @@ def _notify_ro_parts_ready(ro) -> None:
 		item_doc.title = title
 		item_doc.priority = "High"
 		item_doc.details = details
+		item_doc.clearing_condition_type = clearing_type
+		item_doc.clearing_condition_json = clearing_json
 		item_doc.save(ignore_permissions=True)
 	else:
 		item_doc = frappe.new_doc("Shop Action Item")
@@ -616,6 +630,8 @@ def _notify_ro_parts_ready(ro) -> None:
 		item_doc.reference_doctype = "Repair Order"
 		item_doc.reference_name = ro.name
 		item_doc.details = details
+		item_doc.clearing_condition_type = clearing_type
+		item_doc.clearing_condition_json = clearing_json
 		item_doc.insert(ignore_permissions=True)
 
 

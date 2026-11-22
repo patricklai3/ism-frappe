@@ -108,22 +108,8 @@
   "board_ai_api_key",
   "board_ai_endpoint",
   "cb_board_ai",
-  "board_ai_orchestrator_model",
-  "board_ai_comms_model",
-  "board_ai_confidence_threshold",
+  "board_ai_model",
   "board_ai_auto_process",
-  "sb_parts_pricing",
-  "parts_pricing_baseline_discount_pct",
-  "parts_pricing_small_ticket_max_tesla_price",
-  "parts_pricing_small_ticket_discount_pct",
-  "parts_pricing_min_sell_price",
-  "parts_pricing_min_cost_markup_pct",
-  "cb_parts_pricing",
-  "parts_pricing_min_cost_margin_dollars",
-  "parts_pricing_fallback_cost_markup_pct",
-  "parts_pricing_rounding_increment",
-  "parts_pricing_condition_overrides_json",
-  "parts_pricing_tesla_search_url_template",
   "sb_customer_portal",
   "enable_customer_portal",
   "portal_brand_name",
@@ -747,105 +733,15 @@
   },
   {
    "default": "gemini-3.6-flash",
-   "fieldname": "board_ai_orchestrator_model",
+   "fieldname": "board_ai_model",
    "fieldtype": "Data",
-   "label": "Board AI Orchestrator Model"
-  },
-  {
-   "default": "gemini-3.6-flash",
-   "fieldname": "board_ai_comms_model",
-   "fieldtype": "Data",
-   "label": "Board AI Comms Model"
-  },
-  {
-   "default": "0.90",
-   "fieldname": "board_ai_confidence_threshold",
-   "fieldtype": "Float",
-   "label": "Board AI Confidence Threshold",
-   "precision": "2"
+   "label": "Board AI Model (STT & Action Feed)"
   },
   {
    "default": "0",
    "fieldname": "board_ai_auto_process",
    "fieldtype": "Check",
    "label": "Auto-Process Board Captures"
-  },
-  {
-   "fieldname": "sb_parts_pricing",
-   "fieldtype": "Section Break",
-   "label": "Parts Pricing Policy (Internal)"
-  },
-  {
-   "default": "30.0",
-   "fieldname": "parts_pricing_baseline_discount_pct",
-   "fieldtype": "Float",
-   "label": "Baseline Tesla Discount (%)",
-   "precision": "2"
-  },
-  {
-   "default": "20.0",
-   "fieldname": "parts_pricing_small_ticket_max_tesla_price",
-   "fieldtype": "Float",
-   "label": "Small-Ticket Max Tesla Price ($)",
-   "precision": "2"
-  },
-  {
-   "default": "0.0",
-   "fieldname": "parts_pricing_small_ticket_discount_pct",
-   "fieldtype": "Float",
-   "label": "Small-Ticket Discount (%)",
-   "precision": "2"
-  },
-  {
-   "default": "5.0",
-   "fieldname": "parts_pricing_min_sell_price",
-   "fieldtype": "Float",
-   "label": "Minimum Sell Price ($)",
-   "precision": "2"
-  },
-  {
-   "default": "25.0",
-   "fieldname": "parts_pricing_min_cost_markup_pct",
-   "fieldtype": "Float",
-   "label": "Minimum Cost Markup (%)",
-   "precision": "2"
-  },
-  {
-   "fieldname": "cb_parts_pricing",
-   "fieldtype": "Column Break"
-  },
-  {
-   "default": "5.0",
-   "fieldname": "parts_pricing_min_cost_margin_dollars",
-   "fieldtype": "Float",
-   "label": "Minimum Cost Margin ($)",
-   "precision": "2"
-  },
-  {
-   "default": "40.0",
-   "fieldname": "parts_pricing_fallback_cost_markup_pct",
-   "fieldtype": "Float",
-   "label": "Fallback Cost Markup (%)",
-   "precision": "2"
-  },
-  {
-   "default": "0.01",
-   "fieldname": "parts_pricing_rounding_increment",
-   "fieldtype": "Float",
-   "label": "Price Rounding Increment ($)",
-   "precision": "2"
-  },
-  {
-   "default": "{\"New\": null, \"Used\": null, \"Reconditioned\": null}",
-   "fieldname": "parts_pricing_condition_overrides_json",
-   "fieldtype": "Small Text",
-   "label": "Condition Discount Overrides (JSON)"
-  },
-  {
-   "default": "https://parts.tesla.com/en-CA/find-part?searchTerm={query}",
-   "fieldname": "parts_pricing_tesla_search_url_template",
-   "fieldtype": "Data",
-   "label": "Tesla Parts Search URL Template"
   },
   {
    "fieldname": "sb_customer_portal",
@@ -904,7 +800,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-21 21:25:00.000000",
+ "modified": "2026-11-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",
