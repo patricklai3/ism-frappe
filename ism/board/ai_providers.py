@@ -896,14 +896,14 @@ def get_ai_provider(
 		if elevated:
 			frappe.set_user(prev_user)
 
-	if lowered in ("gemini", "gemini rest api", "gemini_rest"):
+	if lowered in ("gemini", "gemini rest api", "gemini_rest", "google gemini (rest)", "google gemini"):
 		return GeminiRestProvider(
 			api_key=api_key,
 			endpoint=endpoint or DEFAULT_GEMINI_ENDPOINT,
 			model=configured_model or DEFAULT_GEMINI_MODEL,
 		)
 
-	if lowered in ("openai", "openai compatible", "openai_compatible"):
+	if lowered in ("openai", "openai compatible", "openai_compatible", "openai-compatible"):
 		return OpenAICompatibleProvider(
 			api_key=api_key,
 			endpoint=endpoint or DEFAULT_OPENAI_ENDPOINT,
