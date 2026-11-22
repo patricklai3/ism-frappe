@@ -341,7 +341,7 @@ class TestCrossTrackSeams(ISMTestCase):
 			self.track("SMS Audit Log", log_name)
 
 	def test_seam3_online_square_deposit_and_agent_os_checkout_reconcile_erpnext(self) -> None:
-		mgr_user = self._create_user_with_roles("seam3_mgr", ["ISM Manager", "Accounts Manager"])
+		mgr_user = self._create_user_with_roles("seam3_mgr", ["ISM Manager", "System Manager"])
 		phone = "+14165550902"
 		ro, customer, _ = self._create_ro(
 			phone=phone,
