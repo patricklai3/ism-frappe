@@ -1,6 +1,6 @@
 /**
  * Main controller for the ISM Shop OS Blackboard (/board).
- * - Left rail: Shop Channels (#Intake, #Receiving-AP, #Dispatch) + Active ROs with filters
+ * - Left rail: 2-tab switcher (Active ROs + Action Feed)
  * - Pinned Andon Header: pulsing status + 1s ticking blocked_since timer
  * - Seam 6: conditional masked tap-to-reveal PIN-to-Drive pill (15s auto-mask, zero persistence)
  * - Realtime Socket.IO + visibilitychange / reconnect delta sync
@@ -9,28 +9,27 @@
 import {
 	getBoardThread,
 	getThreadDelta,
+	listBoardActionFeed,
 	listBoardThreads,
-	resolveBoardCard,
 	revealRoPin,
 	setOfflineHandler,
-	undoBoardReceipt,
+	updateBoardActionCard,
 } from "./api.js";
 import { BoardCaptureController } from "./capture.js";
 import { escapeHtml, renderEventCard } from "./cards.js";
 import { BoardRealtimeClient } from "./realtime.js";
 
-const SINGLETON_KEYS = ["SHOP:INTAKE", "SHOP:AP_RECEIVING", "SHOP:DISPATCH"];
-const CHANNEL_DISPLAY_NAMES = {
-	"SHOP:INTAKE": "#Intake",
-	"SHOP:AP_RECEIVING": "#Receiving-AP",
-	"SHOP:DISPATCH": "#Dispatch",
-};
 const PIN_AUTO_MASK_SECONDS = 15;
 
 const boot = window.ISM_BOARD_BOOT || {};
+const CAN_MANAGE = Boolean(boot.can_manage ?? boot.can_approve);
 
 const state = {
 	threads: Array.isArray(boot.initial_threads) ? [...boot.initial_threads] : [],
+	actionFeed: Array.isArray(boot.initial_action_feed) ? [...boot.initial_action_feed] : [],
+	selectedActionIds: new Set(),
+	railTab: "THREADS",
+	loadedListStatus: "OPEN",
 	activeThreadKey: null,
 	activeThread: null,
 	events: [],
@@ -38,10 +37,13 @@ const state = {
 	nextBeforeEvent: null,
 	pinState: null,
 	roSummary: null,
-	filter: "ALL",
+	canPost: true,
+	readOnlyReason: "",
+	filter: "ACTIVE",
 	searchQuery: "",
 	isLoadingThread: false,
 	isSyncingDelta: false,
+	pendingDeltaSync: false,
 	// Transient in-memory PIN reveal state (NEVER persisted to storage or DOM datasets)
 	pinRevealed: false,
 	pinSecondsLeft: 0,
@@ -52,11 +54,20 @@ const el = {
 	railToggleBtn: document.getElementById("rail-toggle-btn"),
 	rail: document.getElementById("board-rail"),
 	railBackdrop: document.getElementById("rail-backdrop"),
+	railTabs: document.querySelectorAll(".rail-tab[data-rail-tab]"),
+	railThreadsCount: document.getElementById("rail-threads-count"),
+	railActionsCount: document.getElementById("rail-actions-count"),
+	railPanelThreads: document.getElementById("rail-panel-threads"),
+	railPanelActions: document.getElementById("rail-panel-actions"),
 	searchInput: document.getElementById("thread-search-input"),
 	filterRow: document.getElementById("thread-filter-row"),
-	shopChannelsList: document.getElementById("shop-channels-list"),
+	roSectionLabel: document.getElementById("ro-section-label"),
 	roThreadsList: document.getElementById("ro-threads-list"),
 	activeRoCount: document.getElementById("active-ro-count"),
+	actionFeedList: document.getElementById("action-feed-list"),
+	actionFeedCopySelectedBtn: document.getElementById("action-feed-copy-selected-btn"),
+	actionFeedSelectAllBtn: document.getElementById("action-feed-select-all-btn"),
+	actionFeedClearBtn: document.getElementById("action-feed-clear-btn"),
 	andonStatusBadge: document.getElementById("andon-status-badge"),
 	andonBlockedTimer: document.getElementById("andon-blocked-timer"),
 	andonTitle: document.getElementById("andon-title"),
@@ -92,6 +103,35 @@ function showToast(message, tone = "info") {
 	setTimeout(() => {
 		toast.remove();
 	}, 4200);
+}
+
+async function copyTextToClipboard(text, successMsg = "Copied for Agent.") {
+	if (!text) return;
+	try {
+		if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+			await navigator.clipboard.writeText(text);
+		} else {
+			const ta = document.createElement("textarea");
+			ta.value = text;
+			ta.setAttribute("readonly", "");
+			ta.style.position = "fixed";
+			ta.style.opacity = "0";
+			document.body.appendChild(ta);
+			ta.select();
+			document.execCommand("copy");
+			ta.remove();
+		}
+		showToast(successMsg, "success");
+	} catch (_err) {
+		showToast("Unable to copy to clipboard.", "error");
+	}
+}
+
+function formatSingleActionPrompt({ action_item, repair_order, title }) {
+	const actId = action_item || "";
+	const roPart = repair_order ? ` (${repair_order})` : "";
+	const titlePart = title ? `: ${title}` : "";
+	return `Address ${actId}${roPart}${titlePart}`.trim();
 }
 
 function toggleMobileRail(open) {
@@ -249,8 +289,23 @@ function renderPinPill(revealedPlaintext = null) {
 }
 
 /* =========================================================================
-   Left Rail Rendering & Filtering
+   Left Rail: 2-Tab Switcher, Active ROs & Action Feed
    ========================================================================= */
+
+function switchRailTab(tabName) {
+	state.railTab = tabName === "ACTIONS" ? "ACTIONS" : "THREADS";
+	for (const tabBtn of el.railTabs) {
+		const active = tabBtn.dataset.railTab === state.railTab;
+		tabBtn.classList.toggle("is-active", active);
+		tabBtn.setAttribute("aria-selected", String(active));
+	}
+	if (el.railPanelThreads) {
+		el.railPanelThreads.classList.toggle("is-hidden", state.railTab !== "THREADS");
+	}
+	if (el.railPanelActions) {
+		el.railPanelActions.classList.toggle("is-hidden", state.railTab !== "ACTIONS");
+	}
+}
 
 function upsertThreadSummary(summary) {
 	if (!summary || !summary.thread_key) return;
@@ -281,19 +336,21 @@ function threadMatchesFilter(thread) {
 		if (!hay.includes(q)) return false;
 	}
 
-	if (thread.is_singleton || SINGLETON_KEYS.includes(thread.thread_key)) {
-		return true;
+	if (state.filter === "CLOSED") {
+		return thread.board_status === "CLOSED";
 	}
-
+	if (thread.board_status === "CLOSED") {
+		return false;
+	}
 	if (state.filter === "MY_BAYS") {
 		if (!boot.tech_id) return false;
 		return thread.assigned_technician === boot.tech_id;
 	}
-	if (state.filter === "NEEDS_APPROVAL") {
-		return Number(thread.open_approval_count || 0) > 0 || Number(thread.open_action_count || 0) > 0;
+	if (state.filter === "HAS_ACTIONS") {
+		return Number(thread.open_action_count || 0) > 0;
 	}
 	if (state.filter === "BLOCKED") {
-		return ["BLOCKED_PARTS", "BLOCKED_DECISION", "WAITING_CUSTOMER"].includes(thread.board_status);
+		return ["BLOCKED_PARTS", "NEEDS_ACTION", "WAITING_CUSTOMER"].includes(thread.board_status);
 	}
 	return true;
 }
@@ -304,13 +361,12 @@ function buildThreadItemButton(thread) {
 	btn.className = `thread-item ${thread.thread_key === state.activeThreadKey ? "is-selected" : ""}`;
 	btn.dataset.threadKey = thread.thread_key;
 
-	const isChannel = SINGLETON_KEYS.includes(thread.thread_key);
-	const displayTitle = isChannel
-		? CHANNEL_DISPLAY_NAMES[thread.thread_key] || thread.title
-		: thread.title || thread.thread_key;
-
+	const displayTitle = thread.title || thread.repair_order || thread.thread_key;
 	const openCount = Number(thread.open_action_count || 0);
-	const subLine = thread.last_event_preview || [thread.bay, thread.customer, thread.vin].filter(Boolean).join(" · ") || "No updates yet";
+	const subLine =
+		thread.last_event_preview ||
+		[thread.bay, thread.customer, thread.vin].filter(Boolean).join(" · ") ||
+		"No updates yet";
 
 	btn.innerHTML = `
 		<div class="thread-item__top">
@@ -331,42 +387,137 @@ function buildThreadItemButton(thread) {
 }
 
 function renderThreadRail() {
-	if (!el.shopChannelsList || !el.roThreadsList) return;
-	el.shopChannelsList.innerHTML = "";
+	if (!el.roThreadsList) return;
 	el.roThreadsList.innerHTML = "";
 
-	const channels = [];
-	const ros = [];
+	const ros = state.threads.filter(threadMatchesFilter);
 
-	for (const thread of state.threads) {
-		if (!threadMatchesFilter(thread)) continue;
-		if (SINGLETON_KEYS.includes(thread.thread_key) || thread.is_singleton) {
-			channels.push(thread);
-		} else {
-			ros.push(thread);
-		}
+	if (el.roSectionLabel) {
+		el.roSectionLabel.textContent = state.filter === "CLOSED" ? "Closed ROs" : "Active ROs";
 	}
-
-	channels.sort(
-		(a, b) => SINGLETON_KEYS.indexOf(a.thread_key) - SINGLETON_KEYS.indexOf(b.thread_key)
-	);
-
-	for (const ch of channels) {
-		el.shopChannelsList.appendChild(buildThreadItemButton(ch));
-	}
-
 	if (el.activeRoCount) el.activeRoCount.textContent = String(ros.length);
+	if (el.railThreadsCount && state.filter !== "CLOSED") {
+		const openCount = state.threads.filter((t) => t.board_status !== "CLOSED").length;
+		el.railThreadsCount.textContent = String(openCount);
+	}
 
 	if (!ros.length) {
 		const empty = document.createElement("div");
-		empty.className = "thread-item__sub";
-		empty.style.padding = "8px 4px";
-		empty.textContent = "No matching Repair Order threads.";
+		empty.className = "rail-empty-state";
+		empty.textContent =
+			state.filter === "CLOSED"
+				? "No closed Repair Order threads."
+				: "No active Repair Order threads. Active ROs appear automatically when created.";
 		el.roThreadsList.appendChild(empty);
-	} else {
-		for (const roThread of ros) {
-			el.roThreadsList.appendChild(buildThreadItemButton(roThread));
+		return;
+	}
+
+	for (const roThread of ros) {
+		el.roThreadsList.appendChild(buildThreadItemButton(roThread));
+	}
+}
+
+function updateActionFeedSelectionButtons() {
+	if (!el.actionFeedCopySelectedBtn) return;
+	const selectedCount = state.selectedActionIds.size;
+	el.actionFeedCopySelectedBtn.disabled = selectedCount === 0;
+	el.actionFeedCopySelectedBtn.textContent =
+		selectedCount > 0 ? `Copy Selected for Agent (${selectedCount})` : "Copy Selected for Agent";
+}
+
+function renderActionFeed() {
+	if (!el.actionFeedList) return;
+	const validIds = new Set(state.actionFeed.map((item) => item.name).filter(Boolean));
+	for (const id of Array.from(state.selectedActionIds)) {
+		if (!validIds.has(id)) {
+			state.selectedActionIds.delete(id);
 		}
+	}
+
+	if (el.railActionsCount) {
+		el.railActionsCount.textContent = String(state.actionFeed.length);
+	}
+	updateActionFeedSelectionButtons();
+	el.actionFeedList.innerHTML = "";
+
+	if (!state.actionFeed.length) {
+		const empty = document.createElement("div");
+		empty.className = "rail-empty-state";
+		empty.textContent = "No open RO action cards right now.";
+		el.actionFeedList.appendChild(empty);
+		return;
+	}
+
+	for (const item of state.actionFeed) {
+		const actId = item.name || "";
+		const roName = item.reference_name || "";
+		const targetThreadKey = item.thread_key || (roName ? `RO:${roName}` : "");
+		const checked = state.selectedActionIds.has(actId);
+
+		const card = document.createElement("div");
+		card.className = "action-feed-item";
+		card.innerHTML = `
+			<div class="action-feed-item__top">
+				<label class="action-feed-item__check">
+					<input type="checkbox" class="js-feed-checkbox" data-action-id="${escapeHtml(actId)}" ${checked ? "checked" : ""} />
+					<span class="act-id-badge">${escapeHtml(actId)}</span>
+				</label>
+				<span class="prio-badge prio-badge--${escapeHtml(item.priority || "Medium")}">${escapeHtml(item.priority || "Medium")}</span>
+			</div>
+			<div class="action-feed-item__meta">
+				${item.category ? `<span class="meta-chip">${escapeHtml(item.category)}</span>` : ""}
+				${roName ? `<span class="meta-chip">${escapeHtml(roName)}</span>` : ""}
+			</div>
+			<div class="action-feed-item__title">${escapeHtml(item.title || actId)}</div>
+			${
+				item.clearing_condition
+					? `<div class="action-feed-item__clearing">Auto-clears: ${escapeHtml(item.clearing_condition)}</div>`
+					: ""
+			}
+			<div class="action-feed-item__actions">
+				${
+					targetThreadKey
+						? `<button type="button" class="btn btn-sm btn-ghost js-feed-jump-btn">Open RO</button>`
+						: ""
+				}
+				<button type="button" class="btn btn-sm btn-primary js-feed-copy-btn">Copy</button>
+			</div>
+		`;
+
+		const cb = card.querySelector(".js-feed-checkbox");
+		if (cb) {
+			cb.addEventListener("change", () => {
+				if (cb.checked) {
+					state.selectedActionIds.add(actId);
+				} else {
+					state.selectedActionIds.delete(actId);
+				}
+				updateActionFeedSelectionButtons();
+			});
+		}
+
+		const jumpBtn = card.querySelector(".js-feed-jump-btn");
+		if (jumpBtn && targetThreadKey) {
+			jumpBtn.addEventListener("click", () => {
+				selectThread(targetThreadKey, { pushHistory: true });
+				toggleMobileRail(false);
+			});
+		}
+
+		const copyBtn = card.querySelector(".js-feed-copy-btn");
+		if (copyBtn) {
+			copyBtn.addEventListener("click", () => {
+				copyTextToClipboard(
+					formatSingleActionPrompt({
+						action_item: actId,
+						repair_order: roName,
+						title: item.title || "",
+					})
+				);
+			});
+		}
+
+		el.actionFeedList.appendChild(card);
 	}
 }
 
@@ -377,7 +528,9 @@ function renderThreadRail() {
 function renderAndonHeader() {
 	const t = state.activeThread;
 	if (!t) {
-		el.andonTitle.textContent = "Select a Thread";
+		el.andonStatusBadge.className = "andon-badge andon-badge--CLOSED";
+		el.andonStatusBadge.textContent = "NONE";
+		el.andonTitle.textContent = state.threads.length ? "Select an Active RO" : "No Active Repair Orders";
 		el.andonMeta.innerHTML = "";
 		el.andonBlockedReason.classList.add("is-hidden");
 		el.andonDeskLink.classList.add("is-hidden");
@@ -427,17 +580,29 @@ function renderTimeline({ scrollToBottom = false } = {}) {
 		el.loadMoreWrap.classList.toggle("is-hidden", !state.hasMore);
 	}
 
+	if (!state.activeThread) {
+		el.timelineList.innerHTML = `<div class="timeline-empty">No active Repair Order threads. Active ROs appear automatically when created.</div>`;
+		return;
+	}
+
 	if (!state.events.length) {
-		el.timelineList.innerHTML = `<div class="timeline-empty">No events in this thread yet. Tap PTT, Cam, or type an update below.</div>`;
+		el.timelineList.innerHTML = `<div class="timeline-empty">No events in this RO thread yet. Tap PTT, Cam, or type an update below.</div>`;
 		return;
 	}
 
 	const handlers = {
-		canApprove: Boolean(boot.can_approve),
+		canManage: CAN_MANAGE,
 		onOpenLightbox: openLightbox,
-		onResolveCard: handleResolveCard,
-		onUndoReceipt: handleUndoReceipt,
-		onJumpThread: (nextKey) => selectThread(nextKey, { pushHistory: true }),
+		onCopyForAgent: ({ action_item, repair_order, title }) => {
+			copyTextToClipboard(
+				formatSingleActionPrompt({
+					action_item,
+					repair_order: repair_order || (state.activeThread && state.activeThread.repair_order) || "",
+					title,
+				})
+			);
+		},
+		onDismissActionCard: handleDismissActionCard,
 	};
 
 	const frag = document.createDocumentFragment();
@@ -473,7 +638,6 @@ function mergeEvents(incoming, { prepend = false } = {}) {
 			prev.ai_status !== merged.ai_status ||
 			prev.ai_error !== merged.ai_error ||
 			prev.transcript !== merged.transcript ||
-			prev.confidence_score !== merged.confidence_score ||
 			JSON.stringify(prev.card_schema ?? null) !== JSON.stringify(merged.card_schema ?? null)
 		) {
 			changed = true;
@@ -497,7 +661,7 @@ function mergeEvents(incoming, { prepend = false } = {}) {
 }
 
 /* =========================================================================
-   Thread Loading, URL Sync, Delta Sync & Card Actions
+   Thread Loading, URL Sync, Delta Sync & Action Feed Actions
    ========================================================================= */
 
 function syncUrlForThread(threadKey, { push = false } = {}) {
@@ -530,7 +694,22 @@ function getThreadKeyFromUrl() {
 }
 
 async function selectThread(threadKey, { pushHistory = false } = {}) {
-	if (!threadKey) return;
+	if (!threadKey) {
+		state.activeThreadKey = null;
+		state.activeThread = null;
+		state.events = [];
+		state.canPost = false;
+		state.readOnlyReason = "Select an active Repair Order to post updates.";
+		renderThreadRail();
+		renderAndonHeader();
+		renderTimeline({ scrollToBottom: false });
+		if (captureController) {
+			captureController.setThreadType("REPAIR_ORDER");
+			captureController.setReadOnly(true, state.readOnlyReason);
+		}
+		return;
+	}
+
 	clearPinRevealState();
 	state.activeThreadKey = threadKey;
 	state.isLoadingThread = true;
@@ -556,6 +735,8 @@ async function selectThread(threadKey, { pushHistory = false } = {}) {
 		state.nextBeforeEvent = res.next_before_event || null;
 		state.pinState = res.pin_state || null;
 		state.roSummary = res.repair_order_summary || null;
+		state.canPost = res.can_post !== false;
+		state.readOnlyReason = res.read_only_reason || "";
 
 		upsertThreadSummary(res.thread);
 		renderAndonHeader();
@@ -563,6 +744,7 @@ async function selectThread(threadKey, { pushHistory = false } = {}) {
 
 		if (captureController && res.thread) {
 			captureController.setThreadType(res.thread.thread_type);
+			captureController.setReadOnly(!state.canPost, state.readOnlyReason);
 		}
 	} catch (err) {
 		showToast(err.message || `Failed to load ${threadKey}.`, "error");
@@ -592,6 +774,18 @@ async function loadOlderEvents() {
 	}
 }
 
+async function refreshActionFeed() {
+	try {
+		const res = await listBoardActionFeed({ status: "Open", limit: 50 });
+		if (res && Array.isArray(res.items)) {
+			state.actionFeed = res.items;
+			renderActionFeed();
+		}
+	} catch (_err) {
+		// ignore background action feed refresh error
+	}
+}
+
 async function syncThreadDelta() {
 	if (!state.activeThreadKey || state.isLoadingThread) return;
 	if (state.isSyncingDelta) {
@@ -616,6 +810,13 @@ async function syncThreadDelta() {
 		if (res.pin_state) {
 			state.pinState = res.pin_state;
 		}
+		if (res.can_post !== undefined) {
+			state.canPost = res.can_post !== false;
+			state.readOnlyReason = res.read_only_reason || "";
+			if (captureController) {
+				captureController.setReadOnly(!state.canPost, state.readOnlyReason);
+			}
+		}
 		const newEvents = Array.isArray(res.events) ? res.events : [];
 		const openCards = Array.isArray(res.open_cards) ? res.open_cards : [];
 		const updatedCards = Array.isArray(res.updated_cards) ? res.updated_cards : [];
@@ -624,6 +825,7 @@ async function syncThreadDelta() {
 		if (res.changed || eventsChanged) {
 			renderAndonHeader();
 			renderTimeline({ scrollToBottom: newEvents.length > 0 });
+			refreshActionFeed();
 		}
 	} catch (_err) {
 		// Offline banner is already managed by api.js
@@ -636,10 +838,12 @@ async function syncThreadDelta() {
 	}
 }
 
-async function refreshThreadList() {
+async function refreshThreadList(statusOverride = null) {
+	const targetStatus = statusOverride || (state.filter === "CLOSED" ? "CLOSED" : "OPEN");
 	try {
-		const res = await listBoardThreads({ limit: 100 });
+		const res = await listBoardThreads({ status: targetStatus, limit: 100 });
 		if (res && Array.isArray(res.threads)) {
+			state.loadedListStatus = targetStatus;
 			state.threads = res.threads;
 			renderThreadRail();
 		}
@@ -648,73 +852,29 @@ async function refreshThreadList() {
 	}
 }
 
-async function handleResolveCard(params) {
+async function handleDismissActionCard({ action_item, event_name }) {
 	try {
-		const res = await resolveBoardCard(params);
-		if (res && res.resolution_state && params && params.event_name) {
-			const patch = {
-				name: params.event_name,
-				resolution_state: res.resolution_state,
-			};
-			if (res.resolved_by !== undefined) patch.resolved_by = res.resolved_by;
-			if (res.resolved_at !== undefined) patch.resolved_at = res.resolved_at;
-			if (res.resolution_payload !== undefined) patch.resolution_payload = res.resolution_payload;
-			if (mergeEvents([patch])) {
-				renderTimeline({ scrollToBottom: false });
-			}
+		const res = await updateBoardActionCard({
+			action_item,
+			action: "dismiss",
+		});
+		if (event_name) {
+			mergeEvents([
+				{
+					name: event_name,
+					resolution_state: "REJECTED",
+					resolution_payload: {
+						resolution_notes: "Dismissed from board",
+					},
+				},
+			]);
+			renderTimeline({ scrollToBottom: false });
 		}
-		if (res.already_resolved) {
-			showToast("Card was already resolved.", "info");
-		} else {
-			showToast(
-				params.decision === "reject" ? "Card rejected." : "Action committed.",
-				params.decision === "reject" ? "warn" : "success"
-			);
-		}
-		if (res && res.re_enqueued) {
-			const reEnq = res.re_enqueued;
-			const syncDone = Boolean(
-				typeof reEnq === "object" &&
-					(reEnq.synchronous || reEnq.mode === "sync" || reEnq.result)
-			);
-			if (!syncDone && el.aiStatusBar) {
-				el.aiStatusBar.textContent = "AI Orchestrator processing clarification...";
-				el.aiStatusBar.classList.remove("is-hidden");
-			}
-			await syncThreadDelta();
-			if (syncDone && el.aiStatusBar) {
-				el.aiStatusBar.classList.add("is-hidden");
-			}
-		} else {
-			await syncThreadDelta();
-		}
+		showToast("Action card dismissed.", "info");
+		await Promise.all([syncThreadDelta(), refreshActionFeed()]);
 		return res;
 	} catch (err) {
-		showToast(err.message || "Failed to resolve card.", "error");
-		throw err;
-	}
-}
-
-async function handleUndoReceipt(params) {
-	try {
-		const res = await undoBoardReceipt(params);
-		if (res && res.resolution_state && params && params.event_name) {
-			const patch = {
-				name: params.event_name,
-				resolution_state: res.resolution_state,
-			};
-			if (res.resolved_by !== undefined) patch.resolved_by = res.resolved_by;
-			if (res.resolved_at !== undefined) patch.resolved_at = res.resolved_at;
-			if (res.resolution_payload !== undefined) patch.resolution_payload = res.resolution_payload;
-			if (mergeEvents([patch])) {
-				renderTimeline({ scrollToBottom: false });
-			}
-		}
-		showToast(res.already_undone ? "Receipt was already undone." : "Action undone.", "success");
-		await syncThreadDelta();
-		return res;
-	} catch (err) {
-		showToast(err.message || "Undo failed.", "error");
+		showToast(err.message || "Failed to dismiss action card.", "error");
 		throw err;
 	}
 }
@@ -731,6 +891,12 @@ function bindUiListeners() {
 		el.railBackdrop.addEventListener("click", () => toggleMobileRail(false));
 	}
 
+	for (const tabBtn of el.railTabs) {
+		tabBtn.addEventListener("click", () => {
+			switchRailTab(tabBtn.dataset.railTab || "THREADS");
+		});
+	}
+
 	if (el.searchInput) {
 		el.searchInput.addEventListener("input", (evt) => {
 			state.searchQuery = evt.target.value.trim();
@@ -740,31 +906,53 @@ function bindUiListeners() {
 
 	if (el.filterRow) {
 		for (const chip of el.filterRow.querySelectorAll(".filter-chip")) {
-			chip.addEventListener("click", () => {
-				state.filter = chip.dataset.filter || "ALL";
+			chip.addEventListener("click", async () => {
+				const nextFilter = chip.dataset.filter || "ACTIVE";
+				state.filter = nextFilter;
 				for (const other of el.filterRow.querySelectorAll(".filter-chip")) {
 					other.classList.toggle("is-active", other === chip);
 				}
-				renderThreadRail();
+				const neededStatus = nextFilter === "CLOSED" ? "CLOSED" : "OPEN";
+				if (state.loadedListStatus !== neededStatus) {
+					await refreshThreadList(neededStatus);
+				} else {
+					renderThreadRail();
+				}
 			});
 		}
 	}
 
-	// Intercept top-nav quick channel links for instant SPA switching
-	for (const link of document.querySelectorAll("[data-quick-thread]")) {
-		link.addEventListener("click", (evt) => {
-			evt.preventDefault();
-			const targetKey = link.dataset.quickThread;
-			if (targetKey) {
-				selectThread(targetKey, { pushHistory: true });
-				toggleMobileRail(false);
+	if (el.actionFeedCopySelectedBtn) {
+		el.actionFeedCopySelectedBtn.addEventListener("click", () => {
+			const selected = state.actionFeed.filter((item) => state.selectedActionIds.has(item.name));
+			if (!selected.length) return;
+			const parts = selected.map((item) => {
+				const ro = item.reference_name ? ` (${item.reference_name})` : "";
+				return `${item.name}${ro}`;
+			});
+			copyTextToClipboard(`Address action cards: ${parts.join(", ")}`);
+		});
+	}
+
+	if (el.actionFeedSelectAllBtn) {
+		el.actionFeedSelectAllBtn.addEventListener("click", () => {
+			for (const item of state.actionFeed) {
+				if (item.name) state.selectedActionIds.add(item.name);
 			}
+			renderActionFeed();
+		});
+	}
+
+	if (el.actionFeedClearBtn) {
+		el.actionFeedClearBtn.addEventListener("click", () => {
+			state.selectedActionIds.clear();
+			renderActionFeed();
 		});
 	}
 
 	if (el.refreshThreadBtn) {
 		el.refreshThreadBtn.addEventListener("click", async () => {
-			await Promise.all([refreshThreadList(), syncThreadDelta()]);
+			await Promise.all([refreshThreadList(), refreshActionFeed(), syncThreadDelta()]);
 			showToast("Synced.", "info");
 		});
 	}
@@ -813,6 +1001,7 @@ function init() {
 
 	bindUiListeners();
 	renderThreadRail();
+	renderActionFeed();
 
 	captureController = new BoardCaptureController({
 		getContext: () => ({
@@ -847,20 +1036,21 @@ function init() {
 				} else if (syncDone) {
 					el.aiStatusBar.classList.add("is-hidden");
 				} else {
-					el.aiStatusBar.textContent = "AI Orchestrator analyzing capture...";
+					el.aiStatusBar.textContent = "Board AI analyzing capture...";
 					el.aiStatusBar.classList.remove("is-hidden");
 				}
-				// Immediately sync delta so synchronous AI cards (CLARIFICATION_CARD, AI_RECEIPT, APPROVAL_GATE) render right away
 				const prevCount = state.events.length;
 				syncThreadDelta().then(() => {
 					if (state.events.length > prevCount && evStatus !== "FAILED" && el.aiStatusBar) {
 						el.aiStatusBar.classList.add("is-hidden");
 					}
+					refreshActionFeed();
 				});
 			}
 		},
 		onToast: showToast,
 		elements: {
+			readonlyBanner: document.getElementById("capture-readonly-banner"),
 			intentPills: document.getElementById("intent-pills"),
 			captureNotice: document.getElementById("capture-notice"),
 			photoTray: document.getElementById("photo-tray"),
@@ -883,9 +1073,9 @@ function init() {
 		socketioPort: boot.socketio_port,
 		onBoardEvent: (payload) => {
 			if (payload.thread === state.activeThreadKey) {
-				// Fetch delta so full media URLs and card updates stay authoritative
 				syncThreadDelta();
 			}
+			refreshActionFeed();
 		},
 		onProjection: (payload) => {
 			upsertThreadSummary(payload);
@@ -893,11 +1083,12 @@ function init() {
 				state.activeThread = { ...(state.activeThread || {}), ...payload };
 				renderAndonHeader();
 			}
+			refreshActionFeed();
 		},
 		onAiStatus: (payload) => {
 			if (payload.thread_key !== state.activeThreadKey) return;
 			if (payload.ai_status === "PROCESSING" || payload.ai_status === "QUEUED") {
-				el.aiStatusBar.textContent = "AI Orchestrator processing update...";
+				el.aiStatusBar.textContent = "Board AI analyzing update...";
 				el.aiStatusBar.classList.remove("is-hidden");
 			} else if (payload.ai_status === "FAILED") {
 				el.aiStatusBar.textContent = `AI note: ${payload.ai_error || "Processing failed"}`;
@@ -906,6 +1097,7 @@ function init() {
 			} else {
 				el.aiStatusBar.classList.add("is-hidden");
 				syncThreadDelta();
+				refreshActionFeed();
 			}
 		},
 		onThreadSummary: (payload) => {
@@ -913,6 +1105,7 @@ function init() {
 		},
 		onCatchUpSync: () => {
 			syncThreadDelta();
+			refreshActionFeed();
 		},
 	});
 	realtimeClient.connect();
@@ -932,7 +1125,7 @@ function init() {
 	const initialKey =
 		boot.initial_thread_key ||
 		getThreadKeyFromUrl() ||
-		(state.threads[0] ? state.threads[0].thread_key : "SHOP:INTAKE");
+		(state.threads[0] ? state.threads[0].thread_key : null);
 
 	selectThread(initialKey, { pushHistory: false });
 }

@@ -36,9 +36,7 @@
 			</nav>
 		</div>
 		<div class="shop-os-nav__right">
-			<div class="shop-os-nav__shortcuts" aria-label="Quick channels">
-				<a class="shop-os-nav__pill" href="/board?thread=SHOP%3AINTAKE" data-quick-thread="SHOP:INTAKE">+ Intake</a>
-				<a class="shop-os-nav__pill" href="/board?thread=SHOP%3AAP_RECEIVING" data-quick-thread="SHOP:AP_RECEIVING">Receiving / AP</a>
+			<div class="shop-os-nav__shortcuts" aria-label="Quick links">
 				<a class="shop-os-nav__pill" href="/app/ism">Desk</a>
 			</div>
 			<div class="shop-os-nav__user" title="{{ user_full_name }}">
@@ -68,36 +66,60 @@
 	<div class="board-shell">
 		<div id="rail-backdrop" class="board-rail-backdrop is-hidden" aria-hidden="true"></div>
 
-		<aside id="board-rail" class="board-rail" aria-label="Shop Board Threads">
-			<div class="board-rail__controls">
-				<input
-					type="search"
-					id="thread-search-input"
-					class="board-search-input"
-					placeholder="Search RO, VIN, bay, customer..."
-					autocomplete="off"
-				/>
-				<div class="board-filter-row" id="thread-filter-row" role="tablist" aria-label="Thread filters">
-					<button type="button" class="filter-chip is-active" data-filter="ALL">All</button>
-					<button type="button" class="filter-chip" data-filter="MY_BAYS">My Bays</button>
-					<button type="button" class="filter-chip" data-filter="NEEDS_APPROVAL">Needs Approval</button>
-					<button type="button" class="filter-chip" data-filter="BLOCKED">Blocked</button>
+		<aside id="board-rail" class="board-rail" aria-label="Shop Board Navigation">
+			<div class="rail-tabs" role="tablist" aria-label="Board Rail Views">
+				<button type="button" class="rail-tab is-active" data-rail-tab="THREADS" role="tab" aria-selected="true">
+					<span>Active ROs</span>
+					<span id="rail-threads-count" class="rail-count">0</span>
+				</button>
+				<button type="button" class="rail-tab" data-rail-tab="ACTIONS" role="tab" aria-selected="false">
+					<span>Action Feed</span>
+					<span id="rail-actions-count" class="rail-count">0</span>
+				</button>
+			</div>
+
+			<div id="rail-panel-threads" class="rail-panel">
+				<div class="board-rail__controls">
+					<input
+						type="search"
+						id="thread-search-input"
+						class="board-search-input"
+						placeholder="Search active RO, VIN, bay, customer..."
+						autocomplete="off"
+					/>
+					<div class="board-filter-row" id="thread-filter-row" role="tablist" aria-label="Thread filters">
+						<button type="button" class="filter-chip is-active" data-filter="ACTIVE">Active</button>
+						<button type="button" class="filter-chip" data-filter="MY_BAYS">My Bays</button>
+						<button type="button" class="filter-chip" data-filter="HAS_ACTIONS">Has Actions</button>
+						<button type="button" class="filter-chip" data-filter="BLOCKED">Blocked</button>
+						<button type="button" class="filter-chip" data-filter="CLOSED">Closed</button>
+					</div>
+				</div>
+
+				<div class="board-rail__scroll">
+					<section class="rail-section" aria-label="Active Repair Orders">
+						<h2 class="rail-section__heading">
+							<span id="ro-section-label">Active ROs</span>
+							<span id="active-ro-count" class="rail-count">0</span>
+						</h2>
+						<div id="ro-threads-list" class="thread-list"></div>
+					</section>
 				</div>
 			</div>
 
-			<div class="board-rail__scroll">
-				<section class="rail-section" aria-label="Shop Channels">
-					<h2 class="rail-section__heading">Shop Channels</h2>
-					<div id="shop-channels-list" class="thread-list"></div>
-				</section>
-
-				<section class="rail-section" aria-label="Active Repair Orders">
-					<h2 class="rail-section__heading">
-						<span>Active ROs</span>
-						<span id="active-ro-count" class="rail-count">0</span>
-					</h2>
-					<div id="ro-threads-list" class="thread-list"></div>
-				</section>
+			<div id="rail-panel-actions" class="rail-panel is-hidden">
+				<div class="action-feed-toolbar">
+					<button type="button" id="action-feed-copy-selected-btn" class="btn btn-sm btn-primary" disabled>
+						Copy Selected for Agent
+					</button>
+					<div class="action-feed-toolbar__sub">
+						<button type="button" id="action-feed-select-all-btn" class="btn btn-sm btn-ghost">Select All</button>
+						<button type="button" id="action-feed-clear-btn" class="btn btn-sm btn-ghost">Clear</button>
+					</div>
+				</div>
+				<div class="board-rail__scroll">
+					<div id="action-feed-list" class="action-feed-list"></div>
+				</div>
 			</div>
 		</aside>
 
@@ -132,6 +154,7 @@
 			</section>
 
 			<section id="capture-dock" class="capture-dock" aria-label="Capture note, voice, or photo">
+				<div id="capture-readonly-banner" class="capture-readonly-banner is-hidden" role="status"></div>
 				<div id="intent-pills" class="intent-pills" role="group" aria-label="Quick intent tags"></div>
 				<div id="capture-notice" class="capture-notice is-hidden" role="status"></div>
 				<div id="photo-tray" class="photo-tray is-hidden" aria-label="Staged photos"></div>
@@ -175,7 +198,7 @@
 						id="capture-text"
 						class="capture-input"
 						rows="1"
-						placeholder="Type update, VIN, or odometer..."
+						placeholder="Type RO update, parts note, or blocker..."
 						aria-label="Message text"
 					></textarea>
 
