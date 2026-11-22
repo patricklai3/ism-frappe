@@ -142,6 +142,7 @@ website_route_rules = [
 	{"from_route": "/board/<thread_key>", "to_route": "board"},
 	{"from_route": "/board", "to_route": "board"},
 	{"from_route": "/cockpit", "to_route": "cockpit"},
+	{"from_route": "/book", "to_route": "book"},
 ]
 
 doc_events = {

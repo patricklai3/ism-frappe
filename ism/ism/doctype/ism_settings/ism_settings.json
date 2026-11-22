@@ -82,6 +82,16 @@
   "self_serve_min_lead_time_minutes",
   "self_serve_horizon_days",
   "enable_waiter_preference",
+  "sb_self_serve_booking",
+  "enable_self_serve_booking",
+  "self_serve_booking_title",
+  "self_serve_booking_intro",
+  "self_serve_max_packages_per_booking",
+  "cb_self_serve_booking",
+  "self_serve_require_email",
+  "self_serve_booking_ip_rate_limit_per_hour",
+  "self_serve_booking_phone_rate_limit_per_day",
+  "self_serve_honeypot_enabled",
   "sb_media_storage",
   "media_storage_backend",
   "gdrive_auth_mode",
@@ -584,6 +594,72 @@
    "label": "Enable Waiter Preference"
   },
   {
+   "fieldname": "sb_self_serve_booking",
+   "fieldtype": "Section Break",
+   "label": "Website Self-Serve Booking Funnel"
+  },
+  {
+   "default": "0",
+   "description": "Master feature flag for the hosted /book self-serve booking funnel and guest booking endpoints.",
+   "fieldname": "enable_self_serve_booking",
+   "fieldtype": "Check",
+   "label": "Enable Self-Serve Booking"
+  },
+  {
+   "default": "Book Your Service Appointment",
+   "description": "Customer-facing hero title shown on /book (max 140 characters).",
+   "fieldname": "self_serve_booking_title",
+   "fieldtype": "Data",
+   "label": "Self-Serve Booking Title",
+   "length": 140
+  },
+  {
+   "default": "Select your vehicle and service package to view live drop-off times and book online.",
+   "description": "Customer-facing intro subtitle shown on /book.",
+   "fieldname": "self_serve_booking_intro",
+   "fieldtype": "Small Text",
+   "label": "Self-Serve Booking Intro"
+  },
+  {
+   "default": "5",
+   "description": "Maximum number of predictable Service Packages selectable in one self-serve booking (1-10).",
+   "fieldname": "self_serve_max_packages_per_booking",
+   "fieldtype": "Int",
+   "label": "Max Packages Per Booking"
+  },
+  {
+   "fieldname": "cb_self_serve_booking",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, customers must provide a valid email address before booking.",
+   "fieldname": "self_serve_require_email",
+   "fieldtype": "Check",
+   "label": "Require Customer Email"
+  },
+  {
+   "default": "15",
+   "description": "Maximum booking OTP/commit requests allowed per client IP per hour (1-500).",
+   "fieldname": "self_serve_booking_ip_rate_limit_per_hour",
+   "fieldtype": "Int",
+   "label": "IP Rate Limit Per Hour"
+  },
+  {
+   "default": "3",
+   "description": "Maximum self-serve bookings allowed per phone number per rolling 24 hours (1-20).",
+   "fieldname": "self_serve_booking_phone_rate_limit_per_day",
+   "fieldtype": "Int",
+   "label": "Phone Rate Limit Per Day"
+  },
+  {
+   "default": "1",
+   "description": "Enables anti-bot hidden honeypot field and signed form-fill timing nonce on /book.",
+   "fieldname": "self_serve_honeypot_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Anti-Bot Honeypot & Nonce"
+  },
+  {
    "fieldname": "sb_media_storage",
    "fieldtype": "Section Break",
    "label": "Media Storage Settings"
@@ -828,7 +904,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-21 09:00:00.000000",
+ "modified": "2026-11-21 21:25:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

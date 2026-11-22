@@ -116,6 +116,14 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("portal_booking_token_ttl_days", PORTAL_BOOKING_TOKEN_DEFAULT_TTL_DAYS),
 	("portal_invoice_print_format", PORTAL_DEFAULT_INVOICE_PRINT_FORMAT),
 	("portal_pin_prompt_disclaimer", DEFAULT_PIN_PROMPT_DISCLAIMER),
+	("self_serve_booking_title", "Book Your Service Appointment"),
+	(
+		"self_serve_booking_intro",
+		"Select your vehicle and service package to view live drop-off times and book online.",
+	),
+	("self_serve_max_packages_per_booking", 5),
+	("self_serve_booking_ip_rate_limit_per_hour", 15),
+	("self_serve_booking_phone_rate_limit_per_day", 3),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (
@@ -137,6 +145,9 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("parts_pricing_min_cost_margin_dollars", 5.0),
 	("parts_pricing_fallback_cost_markup_pct", 40.0),
 	("enable_customer_portal", 1),
+	("enable_self_serve_booking", 0),
+	("self_serve_require_email", 0),
+	("self_serve_honeypot_enabled", 1),
 )
 
 
