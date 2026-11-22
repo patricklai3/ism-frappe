@@ -183,7 +183,10 @@ doc_events = {
 		],
 	},
 	"Schedule Entry": {
-		"on_update": "ism.board.projections.on_schedule_entry_update",
+		"on_update": [
+			"ism.board.projections.on_schedule_entry_update",
+			"ism.portal.pin_vault.on_schedule_entry_update_sync_pin",
+		],
 	},
 	"Shop Action Item": {
 		"after_insert": "ism.board.projections.on_shop_action_item_after_insert",

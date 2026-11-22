@@ -62,6 +62,19 @@ function emptyOtpState() {
 	};
 }
 
+function emptyPinState(initial = null) {
+	return {
+		status: (initial && initial.status) || "Not Prompted",
+		masked_display: (initial && initial.masked_display) || null,
+		disclaimer: (initial && initial.disclaimer) || "",
+		code: "",
+		editing: false,
+		submitting: false,
+		error: null,
+		feedback: null,
+	};
+}
+
 export function createBookingStore(bootConfig) {
 	const policy = (bootConfig && bootConfig.policy) || {};
 	const maxPackages = Math.max(1, Number(policy.max_packages_per_booking) || 5);
@@ -101,6 +114,7 @@ export function createBookingStore(bootConfig) {
 			errorBanner: null,
 			infoBanner: null,
 			confirmation: null,
+			pin: emptyPinState(),
 		};
 	}
 
@@ -411,8 +425,56 @@ export function createBookingStore(bootConfig) {
 				...prev,
 				step: 5,
 				confirmation: payload,
+				pin: emptyPinState(payload && payload.pin_to_drive),
 				errorBanner: null,
 				infoBanner: null,
+			}));
+		},
+
+		setPinCode(code) {
+			const digitsOnly = String(code || "").replace(/\D/g, "").slice(0, 4);
+			setState((prev) => ({
+				...prev,
+				pin: { ...prev.pin, code: digitsOnly, error: null },
+			}));
+		},
+
+		setPinSubmitting(val) {
+			setState((prev) => ({
+				...prev,
+				pin: { ...prev.pin, submitting: Boolean(val) },
+			}));
+		},
+
+		setPinError(message) {
+			setState((prev) => ({
+				...prev,
+				pin: { ...prev.pin, submitting: false, error: message || null },
+			}));
+		},
+
+		setPinEditing(editing) {
+			setState((prev) => ({
+				...prev,
+				pin: { ...prev.pin, editing: Boolean(editing), code: "", error: null },
+			}));
+		},
+
+		setPinUpdated(pinState, feedback) {
+			setState((prev) => ({
+				...prev,
+				pin: {
+					...prev.pin,
+					status: (pinState && pinState.status) || prev.pin.status,
+					masked_display:
+						pinState && "masked_display" in pinState ? pinState.masked_display : prev.pin.masked_display,
+					disclaimer: (pinState && pinState.disclaimer) || prev.pin.disclaimer,
+					code: "",
+					editing: false,
+					submitting: false,
+					error: null,
+					feedback: feedback || null,
+				},
 			}));
 		},
 

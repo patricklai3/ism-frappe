@@ -590,6 +590,10 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		self.assertEqual(confirm_res["portal_handoff"]["portal_url"], PORTAL_ROUTE)
 		self.assertTrue(confirm_res["portal_handoff"]["session_established"])
 		self.assertEqual(confirm_res["portal_handoff"]["scope_type"], BOOKING_SESSION_SCOPE_TYPE)
+		self.assertIsInstance(confirm_res.get("pin_to_drive"), dict)
+		self.assertTrue(confirm_res["pin_to_drive"]["prompt_required"])
+		self.assertTrue(confirm_res["pin_to_drive"]["can_submit"])
+		self.assertEqual(confirm_res["pin_to_drive"]["status"], "Not Prompted")
 		self.assertTrue(confirm_res["notifications"]["sms_sent"])
 		self.assertTrue(confirm_res["notifications"]["email_sent"])
 

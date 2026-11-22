@@ -310,6 +310,26 @@ class TestPortalSchemaAndContracts(ISMTestCase):
 		self.assertEqual(int(exp_df.read_only or 0), 1)
 		self.assertEqual(int(exp_df.no_copy or 0), 1)
 
+		self.assertLess(field_names.index("section_break_portal_link"), field_names.index("sec_pin_to_drive"))
+		self.assertLess(field_names.index("sec_pin_to_drive"), field_names.index("section_break_notes"))
+		se_pin_expected = {
+			"sec_pin_to_drive": "Section Break",
+			"pin_to_drive_status": "Select",
+			"pin_to_drive_encrypted": "Password",
+			"pin_to_drive_submitted_at": "Datetime",
+			"pin_to_drive_updated_at": "Datetime",
+			"cb_pin_to_drive": "Column Break",
+			"pin_to_drive_opted_out_at": "Datetime",
+			"pin_to_drive_purged_at": "Datetime",
+			"pin_to_drive_last_viewed_by": "Link",
+			"pin_to_drive_last_viewed_at": "Datetime",
+			"pin_to_drive_view_count": "Int",
+		}
+		for fieldname, fieldtype in se_pin_expected.items():
+			df = meta.get_field(fieldname)
+			self.assertIsNotNone(df, f"Schedule Entry missing field {fieldname}")
+			self.assertEqual(df.fieldtype, fieldtype)
+
 	def test_hooks_registration_and_placeholder_handlers(self):
 		routes = {(r["from_route"], r["to_route"]) for r in ism_hooks.website_route_rules}
 		self.assertIn(("/portal", "portal"), routes)
@@ -321,6 +341,11 @@ class TestPortalSchemaAndContracts(ISMTestCase):
 		self.assertIsInstance(ro_on_update, list)
 		self.assertIn("ism.board.projections.on_repair_order_update", ro_on_update)
 		self.assertIn("ism.portal.pin_vault.on_repair_order_update_purge_pin", ro_on_update)
+
+		se_on_update = ism_hooks.doc_events["Schedule Entry"]["on_update"]
+		self.assertIsInstance(se_on_update, list)
+		self.assertIn("ism.board.projections.on_schedule_entry_update", se_on_update)
+		self.assertIn("ism.portal.pin_vault.on_schedule_entry_update_sync_pin", se_on_update)
 
 		daily_jobs = ism_hooks.scheduler_events["daily"]
 		self.assertIn("ism.comms.otp.cleanup_expired_otp_challenges", daily_jobs)

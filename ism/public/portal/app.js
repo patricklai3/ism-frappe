@@ -201,8 +201,8 @@ function renderVisitHub(root, hub, { boot, state }) {
 				${renderBinaryStatusBanner(activeVisit.status, shop)}
 				${renderVehicleCard(activeVisit)}
 				<div id="portal-slot-appointment"></div>
-				<div id="portal-slot-quote"></div>
 				<div id="portal-slot-pin"></div>
+				<div id="portal-slot-quote"></div>
 				<div id="portal-slot-payments"></div>
 				<div id="portal-slot-invoices"></div>
 			`
@@ -249,10 +249,11 @@ function renderVisitHub(root, hub, { boot, state }) {
 		return;
 	}
 
-	const triggerPinPrompt = (roName) => {
-		const currentVisit = state.hub?.active_visit || activeVisit;
+	const triggerPinPrompt = (visit) => {
+		const currentVisit = visit || state.hub?.active_visit || activeVisit;
 		openPinModal({
-			repairOrder: roName || currentVisit.repair_order,
+			repairOrder: currentVisit.repair_order || null,
+			scheduleEntry: currentVisit.schedule_entry || null,
 			pinState: currentVisit.pin_to_drive,
 			isUpdate: false,
 			onHubUpdated,
@@ -266,14 +267,13 @@ function renderVisitHub(root, hub, { boot, state }) {
 		notify,
 	});
 
-	renderQuoteSection(root.querySelector("#portal-slot-quote"), {
+	renderPinSection(root.querySelector("#portal-slot-pin"), {
 		visit: activeVisit,
 		onHubUpdated,
-		onPromptPin: triggerPinPrompt,
 		notify,
 	});
 
-	renderPinSection(root.querySelector("#portal-slot-pin"), {
+	renderQuoteSection(root.querySelector("#portal-slot-quote"), {
 		visit: activeVisit,
 		onHubUpdated,
 		notify,
@@ -290,15 +290,16 @@ function renderVisitHub(root, hub, { boot, state }) {
 		notify,
 	});
 
-	// Auto-prompt PIN-to-Drive once per RO when quote is approved and PIN has not been prompted yet
+	// Auto-prompt PIN-to-Drive once per confirmed/scheduled visit when PIN has not been submitted yet
+	const promptVisitKey = activeVisit.visit_key || activeVisit.repair_order || activeVisit.schedule_entry;
 	if (
-		activeVisit.repair_order &&
+		promptVisitKey &&
 		activeVisit.pin_to_drive?.prompt_required &&
 		!activeVisit.is_read_only &&
-		!state.pinPromptedRos.has(activeVisit.repair_order)
+		!state.pinPromptedVisits.has(promptVisitKey)
 	) {
-		state.pinPromptedRos.add(activeVisit.repair_order);
-		triggerPinPrompt(activeVisit.repair_order);
+		state.pinPromptedVisits.add(promptVisitKey);
+		triggerPinPrompt(activeVisit);
 	}
 }
 
@@ -318,7 +319,7 @@ async function bootPortal() {
 
 	const state = {
 		hub: null,
-		pinPromptedRos: new Set(),
+		pinPromptedVisits: new Set(),
 	};
 
 	if (!boot.authenticated) {

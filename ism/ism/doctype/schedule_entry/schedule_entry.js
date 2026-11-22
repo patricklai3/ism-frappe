@@ -1,10 +1,13 @@
 // Copyright (c) 2026, patricklai3 and contributors
 // For license information, please see license.txt
 
+const SE_PIN_PURGE_STATUSES = ['Completed', 'Cancelled', 'No Show'];
+
 frappe.ui.form.on('Schedule Entry', {
 	refresh(frm) {
 		frm.trigger('setup_field_visibility');
 		frm.trigger('setup_buttons');
+		frm.trigger('setup_pin_to_drive_controls');
 	},
 
 	entry_type(frm) {
@@ -95,5 +98,102 @@ frappe.ui.form.on('Schedule Entry', {
 				});
 			}
 		}
-	}
+	},
+
+	setup_pin_to_drive_controls(frm) {
+		if (frm.is_new() || frm.doc.docstatus === 2) return;
+		if (frm.doc.pin_to_drive_status !== 'Provided') return;
+		if (!frm.doc.repair_order && SE_PIN_PURGE_STATUSES.includes(frm.doc.status)) return;
+
+		const allowed_roles = [
+			'ISM Technician',
+			'ISM Service Advisor',
+			'ISM Manager',
+			'System Manager',
+		];
+		const can_view_pin =
+			frappe.session.user === 'Administrator' ||
+			allowed_roles.some((role) => frappe.user.has_role(role));
+		if (!can_view_pin) return;
+
+		frm.add_custom_button(__('🔐 Reveal PIN-to-Drive'), () => {
+			frappe.call({
+				method: 'ism.portal.pin_vault.reveal_schedule_entry_pin_desk',
+				args: { schedule_entry: frm.doc.name },
+				freeze: true,
+				freeze_message: __('Retrieving PIN-to-Drive...'),
+				callback: (r) => {
+					if (r.exc) return;
+					const data = r.message || {};
+					if (!data.available || !data.pin) {
+						frappe.show_alert({
+							message: __('No active PIN-to-Drive is available for this appointment.'),
+							indicator: 'orange',
+						});
+						frm.reload_doc();
+						return;
+					}
+
+					const mask_seconds = Math.max(1, parseInt(data.auto_mask_seconds, 10) || 15);
+					let remaining = mask_seconds;
+					let countdown_interval = null;
+
+					const clear_pin_timer = () => {
+						if (countdown_interval) {
+							clearInterval(countdown_interval);
+							countdown_interval = null;
+						}
+					};
+
+					const d = new frappe.ui.Dialog({
+						title: __('Vehicle PIN-to-Drive — {0}', [data.repair_order || frm.doc.name]),
+						fields: [
+							{
+								fieldname: 'pin_html',
+								fieldtype: 'HTML',
+							},
+						],
+						primary_action_label: __('Mask & Close'),
+						primary_action() {
+							d.hide();
+						},
+						onhide() {
+							clear_pin_timer();
+							const $pin_el = d.fields_dict.pin_html.$wrapper.find('.ism-pin-digits');
+							if ($pin_el.length) {
+								$pin_el.text('••••');
+							}
+						},
+					});
+
+					const safe_pin = frappe.utils.escape_html(String(data.pin));
+					const safe_views = frappe.utils.escape_html(String(data.view_count || 1));
+					d.fields_dict.pin_html.$wrapper.html(`
+						<div class="text-center py-3">
+							<div class="text-muted small mb-2">${__('Ephemeral Customer PIN-to-Drive (Audited Access)')}</div>
+							<div class="ism-pin-digits font-weight-bold" style="font-family: monospace; font-size: 2.5rem; letter-spacing: 0.45rem;">${safe_pin}</div>
+							<div class="text-muted small mt-3">
+								${__('Auto-masking in')} <strong class="ism-pin-countdown">${mask_seconds}</strong>s
+								&middot; ${__('Reveal')} #${safe_views}
+							</div>
+						</div>
+					`);
+
+					d.show();
+
+					countdown_interval = setInterval(() => {
+						remaining -= 1;
+						const $countdown = d.fields_dict.pin_html.$wrapper.find('.ism-pin-countdown');
+						if ($countdown.length) {
+							$countdown.text(String(Math.max(0, remaining)));
+						}
+						if (remaining <= 0) {
+							clear_pin_timer();
+							d.hide();
+						}
+					}, 1000);
+				},
+			});
+		});
+	},
 });

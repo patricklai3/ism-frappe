@@ -52,8 +52,11 @@ from ism.portal.invoices import (
 )
 from ism.portal.pin_vault import (
 	get_ro_pin_for_staff,
+	get_schedule_entry_pin_for_staff,
 	opt_out_ro_pin,
+	opt_out_schedule_entry_pin,
 	submit_ro_pin,
+	submit_schedule_entry_pin,
 )
 from ism.portal.visit_view import (
 	_to_plain_value,
@@ -343,14 +346,30 @@ def submit_portal_quote_approval(
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def submit_pin_to_drive(repair_order: str, pin: str) -> dict[str, Any]:
+def submit_pin_to_drive(
+	repair_order: str | None = None,
+	pin: str | None = None,
+	schedule_entry: str | None = None,
+) -> dict[str, Any]:
 	"""Submit or update a 4-digit encrypted PIN-to-Drive under active portal session (NEVER echoes PIN)."""
 	session = require_portal_session(touch=True)
-	assert_session_owns_ro(session, repair_order)
 
-	ro_name = repair_order.strip()
-	pin_state = submit_ro_pin(ro_name, pin, actor_label="Customer Portal")
-	hub = build_portal_hub_payload(session, active_ro=ro_name)
+	clean_ro = repair_order.strip() if isinstance(repair_order, str) and repair_order.strip() else None
+	clean_se = schedule_entry.strip() if isinstance(schedule_entry, str) and schedule_entry.strip() else None
+	if not clean_ro and not clean_se:
+		frappe.throw(_("Either a Repair Order or appointment reference is required."), frappe.ValidationError)
+
+	if clean_ro:
+		assert_session_owns_ro(session, clean_ro)
+		if clean_se:
+			assert_session_owns_schedule_entry(session, clean_se)
+		pin_state = submit_ro_pin(clean_ro, pin, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_ro=clean_ro)
+	else:
+		assert_session_owns_schedule_entry(session, clean_se)
+		pin_state = submit_schedule_entry_pin(clean_se, pin, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_schedule_entry=clean_se)
+
 	return {
 		"success": True,
 		"pin_to_drive": pin_state,
@@ -359,14 +378,29 @@ def submit_pin_to_drive(repair_order: str, pin: str) -> dict[str, Any]:
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def opt_out_pin_to_drive(repair_order: str) -> dict[str, Any]:
+def opt_out_pin_to_drive(
+	repair_order: str | None = None,
+	schedule_entry: str | None = None,
+) -> dict[str, Any]:
 	"""Record customer 1-tap 'No PIN-to-Drive enabled' opt-out under active portal session."""
 	session = require_portal_session(touch=True)
-	assert_session_owns_ro(session, repair_order)
 
-	ro_name = repair_order.strip()
-	pin_state = opt_out_ro_pin(ro_name, actor_label="Customer Portal")
-	hub = build_portal_hub_payload(session, active_ro=ro_name)
+	clean_ro = repair_order.strip() if isinstance(repair_order, str) and repair_order.strip() else None
+	clean_se = schedule_entry.strip() if isinstance(schedule_entry, str) and schedule_entry.strip() else None
+	if not clean_ro and not clean_se:
+		frappe.throw(_("Either a Repair Order or appointment reference is required."), frappe.ValidationError)
+
+	if clean_ro:
+		assert_session_owns_ro(session, clean_ro)
+		if clean_se:
+			assert_session_owns_schedule_entry(session, clean_se)
+		pin_state = opt_out_ro_pin(clean_ro, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_ro=clean_ro)
+	else:
+		assert_session_owns_schedule_entry(session, clean_se)
+		pin_state = opt_out_schedule_entry_pin(clean_se, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_schedule_entry=clean_se)
+
 	return {
 		"success": True,
 		"pin_to_drive": pin_state,
@@ -674,3 +708,9 @@ def email_invoice_copy(
 def reveal_ro_pin(repair_order: str) -> dict[str, Any]:
 	"""Staff-only convenience wrapper delegating to ism.portal.pin_vault.get_ro_pin_for_staff."""
 	return get_ro_pin_for_staff(repair_order, channel="Desk")
+
+
+@frappe.whitelist(allow_guest=False, methods=["POST"])
+def reveal_schedule_entry_pin(schedule_entry: str) -> dict[str, Any]:
+	"""Staff-only convenience wrapper delegating to ism.portal.pin_vault.get_schedule_entry_pin_for_staff."""
+	return get_schedule_entry_pin_for_staff(schedule_entry, channel="Desk")

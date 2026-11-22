@@ -700,7 +700,7 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 			self._track_session_artifacts(ro_name=ro2.name)
 
 	def test_quote_approval_pin_flow_and_staff_reveal(self):
-		"""Verify portal quote approval -> pin_prompt_required -> PIN submit/mask -> staff reveal -> opt-out."""
+		"""Verify quote approval does NOT prompt for PIN, while appointment hub prompts and supports submit/reveal/opt-out."""
 		phone = "+14165550203"
 		customer = self.create_test_customer(mobile_no=phone, email_id="pin203@example.test")
 		vehicle = self.create_test_vehicle(customer=customer.name, license_plate="PIN203")
@@ -727,15 +727,16 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 			self.assertTrue(app_res["success"])
 			self.assertEqual(app_res["approval_status"], "Approved")
 			self.assertTrue(app_res["audit_hash"])
-			self.assertTrue(app_res["pin_prompt_required"])
-			self.assertTrue(app_res["hub"]["active_visit"]["pin_to_drive"]["prompt_required"])
+			# PIN is requested at appointment confirmation, NOT at quote authorization
+			self.assertFalse(app_res["pin_prompt_required"])
+			self.assertFalse(app_res["hub"]["active_visit"]["pin_to_drive"]["prompt_required"])
 			self.assertEqual(find_forbidden_portal_keys(app_res), [])
 
 			rt_events = [c.args[0] for c in mock_rt.call_args_list if c.args]
 			self.assertIn("ism_ro_approval_updated", rt_events)
 			self.assertIn("ism_portal_event", rt_events)
 
-			# Submit 4-digit PIN with leading zero; NEVER echoed in customer payload!
+			# Voluntary PIN submit on active RO still works with leading zero; NEVER echoed in customer payload!
 			pin_res = portal_api.submit_pin_to_drive(repair_order=ro.name, pin="0427")
 			self.assertTrue(pin_res["success"])
 			self.assertEqual(pin_res["pin_to_drive"]["status"], PIN_STATUS_PROVIDED)
@@ -770,6 +771,78 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 		finally:
 			frappe.set_user("Administrator")
 			self._track_session_artifacts(phone_e164=phone, ro_name=ro.name)
+
+	def test_appointment_confirmation_booking_pin_flow(self):
+		"""Verify confirmed/scheduled booking prompts for PIN-to-Drive in portal hub, supports submit/reveal/opt-out."""
+		phone = "+14165550299"
+		customer = self.create_test_customer(mobile_no=phone, email_id="pin299@example.test")
+		vehicle = self.create_test_vehicle(customer=customer.name, license_plate="PIN299")
+		bay = self._create_bay()
+		se = self._create_schedule_entry(
+			customer=customer.name,
+			vehicle=vehicle.name,
+			bay=bay,
+			scheduled_date=add_days(nowdate(), 4),
+			scheduled_time="08:00:00",
+			status="Confirmed",
+			provisional_phone=phone,
+		)
+		booking_url = create_booking_portal_link(se.name)
+		booking_token = parse_qs(urlparse(booking_url).query)["booking_token"][0]
+		tech_user = self._create_user_with_role("portal_se_tech", "ISM Technician")
+
+		frappe.set_user("Guest")
+		try:
+			cm = self._attach_request(cookie_value=None)
+			ex = portal_api.exchange_portal_link(booking_token=booking_token)
+			self.assertTrue(ex["valid"])
+			cookie = self._extract_cookie_value(cm)
+
+			active_visit = ex["hub"]["active_visit"]
+			self.assertEqual(active_visit["kind"], "booking")
+			self.assertEqual(active_visit["schedule_entry"], se.name)
+			self.assertIsNotNone(active_visit["pin_to_drive"])
+			self.assertTrue(active_visit["pin_to_drive"]["prompt_required"])
+			self.assertIn("PIN-to-Drive Requested", ex["hub"]["visits"][0]["action_required_badges"])
+			self.assertEqual(find_forbidden_portal_keys(ex), [])
+
+			self._attach_request(cookie_value=cookie)
+			pin_res = portal_api.submit_pin_to_drive(schedule_entry=se.name, pin="0915")
+			self.assertTrue(pin_res["success"])
+			self.assertEqual(pin_res["pin_to_drive"]["status"], PIN_STATUS_PROVIDED)
+			self.assertEqual(pin_res["pin_to_drive"]["masked_display"], "••••")
+			self.assertFalse(pin_res["pin_to_drive"]["prompt_required"])
+			self.assertNotIn("PIN-to-Drive Requested", pin_res["hub"]["visits"][0]["action_required_badges"])
+			self.assertNotIn("0915", json.dumps(pin_res))
+			self.assertEqual(find_forbidden_portal_keys(pin_res), [])
+
+			# Staff reveal on Schedule Entry works for ISM Technician
+			frappe.set_user(tech_user)
+			reveal = portal_api.reveal_schedule_entry_pin(schedule_entry=se.name)
+			self.assertTrue(reveal["available"])
+			self.assertEqual(reveal["pin"], "0915")
+			self.assertEqual(reveal["auto_mask_seconds"], 15)
+
+			# Opt-out via schedule_entry erases __Auth ciphertext
+			frappe.set_user("Guest")
+			self._attach_request(cookie_value=cookie)
+			opt_res = portal_api.opt_out_pin_to_drive(schedule_entry=se.name)
+			self.assertTrue(opt_res["success"])
+			self.assertEqual(opt_res["pin_to_drive"]["status"], PIN_STATUS_OPTED_OUT)
+			auth_rows = frappe.db.sql(
+				"SELECT COUNT(*) FROM `__Auth` WHERE doctype='Schedule Entry' AND name=%s AND fieldname='pin_to_drive_encrypted'",
+				(se.name,),
+			)[0][0]
+			self.assertEqual(auth_rows, 0)
+		finally:
+			frappe.set_user("Administrator")
+			for item_name in frappe.get_all(
+				"Shop Action Item",
+				filters={"reference_doctype": "Schedule Entry", "reference_name": se.name},
+				pluck="name",
+			):
+				self.track("Shop Action Item", item_name)
+			self._track_session_artifacts(phone_e164=phone)
 
 	def test_reschedule_options_and_execution_with_silent_offset_sms(self):
 		"""Verify P3 reschedule slots & execution with 08:00->07:45 silent drop-off offset and Mock SMS."""
@@ -1137,6 +1210,10 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 			for target_se in (se_b.name, "SE-NONEXISTENT-99999"):
 				with self.assertRaises(frappe.PermissionError):
 					portal_api.get_portal_hub(active_schedule_entry=target_se)
+				with self.assertRaises(frappe.PermissionError):
+					portal_api.submit_pin_to_drive(schedule_entry=target_se, pin="1234")
+				with self.assertRaises(frappe.PermissionError):
+					portal_api.opt_out_pin_to_drive(schedule_entry=target_se)
 				with self.assertRaises(frappe.PermissionError):
 					portal_api.get_reschedule_options(schedule_entry=target_se)
 				with self.assertRaises(frappe.PermissionError):

@@ -224,7 +224,8 @@ class TestPortalPinVault(ISMTestCase):
 		initial_state = pin_vault.get_ro_pin_customer_state(ro)
 		self.assertEqual(initial_state["status"], PIN_STATUS_NOT_PROMPTED)
 		self.assertIsNone(initial_state["masked_display"])
-		self.assertTrue(initial_state["prompt_required"])
+		# Quote approval alone no longer triggers prompt_required; PIN is requested at appointment confirmation.
+		self.assertFalse(initial_state["prompt_required"])
 		self.assertTrue(initial_state["can_submit"])
 		self.assertTrue(initial_state["can_update"])
 
@@ -607,3 +608,150 @@ class TestPortalPinVault(ISMTestCase):
 		self.assertEqual(len(resched_calls), 1)
 		self.assertTrue(resched_calls[0].kwargs.get("after_commit"))
 		self.assertEqual(len(self._track_action_items_for_ro(ro.name)), 2)
+
+	def _count_se_auth_rows(self, se_name: str) -> int:
+		row = frappe.db.sql(
+			"""
+			SELECT COUNT(*)
+			FROM `__Auth`
+			WHERE doctype = 'Schedule Entry'
+			  AND name = %s
+			  AND fieldname = 'pin_to_drive_encrypted'
+			""",
+			(se_name,),
+		)
+		return int(row[0][0]) if row else 0
+
+	def _create_schedule_entry(self, *, status: str = "Scheduled", customer: str | None = None, vehicle: str | None = None):
+		from frappe.utils import add_days, nowdate
+
+		if not customer:
+			cust = self.create_test_customer(mobile_no="+14165550911")
+			customer = cust.name
+		if not vehicle:
+			veh = self.create_test_vehicle(customer=customer, license_plate=f"SE{frappe.generate_hash(length=4)}")
+			vehicle = veh.name
+		bay = frappe.get_doc(
+			{
+				"doctype": "Service Bay",
+				"bay_name": f"_TEST_ISM_PinBay_{frappe.generate_hash(length=6)}",
+				"bay_type": "General Service",
+				"is_active": 1,
+			}
+		).insert(ignore_permissions=True)
+		self.track(bay)
+		se = frappe.get_doc(
+			{
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": status,
+				"scheduled_date": add_days(nowdate(), 3),
+				"scheduled_time": "09:00:00",
+				"estimated_duration": 60,
+				"service_bay": bay.name,
+				"customer": customer,
+				"repair_vehicle": vehicle,
+			}
+		).insert(ignore_permissions=True)
+		self.track(se)
+		return se
+
+	def test_schedule_entry_pin_prompt_carryover_staff_reveal_and_purge(self):
+		"""PIN is requested on confirmed/scheduled appointments, carries over to RO on check-in, and purges cleanly."""
+		from ism.api.scheduling import create_repair_order_from_schedule_entry
+
+		se = self._create_schedule_entry(status="Scheduled")
+
+		# 1. Appointment prompts for PIN before RO exists
+		cust_initial = pin_vault.get_schedule_entry_pin_customer_state(se)
+		self.assertEqual(cust_initial["status"], PIN_STATUS_NOT_PROMPTED)
+		self.assertTrue(cust_initial["prompt_required"])
+		self.assertTrue(cust_initial["can_submit"])
+		self.assertTrue(cust_initial["can_update"])
+
+		# 2. Submit leading-zero PIN on Schedule Entry -> stored encrypted, never plaintext
+		with patch("frappe.publish_realtime") as mock_rt:
+			after_submit = pin_vault.submit_schedule_entry_pin(se.name, "0073")
+		self.assertEqual(after_submit["status"], PIN_STATUS_PROVIDED)
+		self.assertEqual(after_submit["masked_display"], "••••")
+		self.assertFalse(after_submit["prompt_required"])
+		self.assertNotIn("0073", str(after_submit))
+		self.assertEqual(self._count_se_auth_rows(se.name), 1)
+
+		se_items = frappe.get_all(
+			"Shop Action Item",
+			filters={"reference_doctype": "Schedule Entry", "reference_name": se.name},
+			fields=["name", "title", "details"],
+		)
+		for item in se_items:
+			self.track("Shop Action Item", item["name"])
+		self.assertEqual(len(se_items), 1)
+		self.assertNotIn("0073", str(se_items[0]))
+		for call in mock_rt.call_args_list:
+			self.assertNotIn("0073", str(call.args))
+
+		# 3. Cross-SE ciphertext transplant is rejected
+		se_other = self._create_schedule_entry(status="Scheduled")
+		se_cipher = get_decrypted_password(
+			"Schedule Entry", se.name, fieldname="pin_to_drive_encrypted", raise_exception=True
+		)
+		set_encrypted_password("Schedule Entry", se_other.name, se_cipher, fieldname="pin_to_drive_encrypted")
+		frappe.db.set_value("Schedule Entry", se_other.name, "pin_to_drive_status", PIN_STATUS_PROVIDED, update_modified=False)
+		with self.assertRaises(frappe.ValidationError):
+			pin_vault.get_schedule_entry_pin_for_staff(se_other.name, channel="Desk")
+		pin_vault.purge_schedule_entry_pin(se_other.name, reason="Cancelled")
+
+		# 4. Staff reveal on Schedule Entry succeeds before RO exists
+		se_reveal = pin_vault.get_schedule_entry_pin_for_staff(se.name, channel="Desk")
+		self.assertTrue(se_reveal["available"])
+		self.assertEqual(se_reveal["pin"], "0073")
+		self.assertEqual(se_reveal["view_count"], 1)
+
+		# 5. Creating RO from Schedule Entry transfers PIN to RO-bound envelope and removes SE __Auth copy
+		created = create_repair_order_from_schedule_entry(schedule_entry=se.name, odometer_in=15000)
+		ro_name = created["repair_order"]
+		self.track("Repair Order", ro_name)
+		self._track_action_items_for_ro(ro_name)
+
+		self.assertEqual(self._count_se_auth_rows(se.name), 0)
+		self.assertEqual(self._count_auth_rows(ro_name), 1)
+
+		ro_reveal = pin_vault.get_ro_pin_for_staff(ro_name, channel="Board")
+		self.assertTrue(ro_reveal["available"])
+		self.assertEqual(ro_reveal["pin"], "0073")
+		self.assertEqual(ro_reveal["view_count"], 2)
+
+		# 6. Closing RO purges both RO and linked Schedule Entry PIN state
+		ro_doc = frappe.get_doc("Repair Order", ro_name)
+		ro_doc.approval_status = "Approved"
+		ro_doc.status = "Closed / Released"
+		ro_doc.save(ignore_permissions=True)
+		self.assertEqual(self._count_auth_rows(ro_name), 0)
+		self.assertEqual(self._count_se_auth_rows(se.name), 0)
+		se.reload()
+		self.assertEqual(se.pin_to_drive_status, PIN_STATUS_PURGED)
+
+		# 7. Unlinked Schedule Entry cancellation auto-purges SE PIN
+		se_cancel = self._create_schedule_entry(status="Confirmed")
+		pin_vault.submit_schedule_entry_pin(se_cancel.name, "4321")
+		for item in frappe.get_all("Shop Action Item", filters={"reference_doctype": "Schedule Entry", "reference_name": se_cancel.name}, pluck="name"):
+			self.track("Shop Action Item", item)
+		self.assertEqual(self._count_se_auth_rows(se_cancel.name), 1)
+		se_cancel.reload()
+		se_cancel.status = "Cancelled"
+		se_cancel.save(ignore_permissions=True)
+		self.assertEqual(self._count_se_auth_rows(se_cancel.name), 0)
+		se_cancel.reload()
+		self.assertEqual(se_cancel.pin_to_drive_status, PIN_STATUS_PURGED)
+
+		# 8. Opt-out on Schedule Entry carries over to Repair Order on manual link
+		se_opt = self._create_schedule_entry(status="Scheduled")
+		pin_vault.opt_out_schedule_entry_pin(se_opt.name)
+		for item in frappe.get_all("Shop Action Item", filters={"reference_doctype": "Schedule Entry", "reference_name": se_opt.name}, pluck="name"):
+			self.track("Shop Action Item", item)
+		ro_opt = self._create_ro()
+		se_opt.reload()
+		se_opt.repair_order = ro_opt.name
+		se_opt.save(ignore_permissions=True)
+		ro_opt.reload()
+		self.assertEqual(ro_opt.pin_to_drive_status, PIN_STATUS_OPTED_OUT)

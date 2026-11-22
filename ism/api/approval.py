@@ -14,7 +14,6 @@ from ism.api.sms import dispatch_sms, get_sms_unconfigured_reason
 from ism.comms.email_dispatch import dispatch_transactional_email
 from ism.portal.auth import assert_ro_mutating_unlocked
 from ism.portal.events import emit_portal_quote_approved_event
-from ism.portal.pin_vault import get_ro_pin_customer_state
 
 _MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 _ALLOWED_SIGNATURE_PREFIXES = (
@@ -293,14 +292,13 @@ def authorize_ro_for_portal(
 		frappe.flags._ism_public_approval_portal = prev_portal_flag
 
 	_notify_shop_floor_approval(ro_doc, normalized_approvals, signer_name)
-	pin_state = get_ro_pin_customer_state(ro_doc)
 
 	return {
 		"success": True,
 		"approval_status": ro_doc.approval_status,
 		"order_status": ro_doc.status,
 		"audit_hash": getattr(ro_doc, "audit_hash", None),
-		"pin_prompt_required": bool(pin_state.get("prompt_required")),
+		"pin_prompt_required": False,
 		"message": _("Thank you! Your authorization has been recorded."),
 	}
 

@@ -39,6 +39,7 @@ from ism.booking.contracts import (
 	get_booking_settings,
 	get_shop_branding,
 	is_booking_enabled,
+	resolve_booking_pin_state,
 	resolve_booking_portal_link,
 )
 from ism.comms.contracts import SMSDispatchRequest, get_client_ip
@@ -1247,6 +1248,7 @@ def verify_and_commit_booking(
 			)
 
 	# Step 8: Strictly sanitized response & idempotency cache (zero internal IDs/cookie/OTP).
+	pin_state = resolve_booking_pin_state(booking_reference)
 	confirmation = BookingConfirmationPayload(
 		success=True,
 		booking_reference=booking_reference,
@@ -1266,6 +1268,7 @@ def verify_and_commit_booking(
 			"email_requested": bool(recipient_email),
 		},
 		shop=branding,
+		pin_to_drive=pin_state,
 	)
 	payload = confirmation.to_dict()
 	store_idempotent_booking_result(

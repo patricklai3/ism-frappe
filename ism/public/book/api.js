@@ -4,6 +4,7 @@
  */
 
 const API_BASE = "/api/method/ism.api.booking";
+const PORTAL_API_BASE = "/api/method/ism.api.portal";
 
 export class BookingApiError extends Error {
 	constructor(message, details = {}) {
@@ -62,8 +63,11 @@ function extractRetrySeconds(obj) {
 	return null;
 }
 
-async function callBookingApi(methodName, { httpMethod = "POST", params = null, body = null } = {}) {
-	let url = `${API_BASE}.${methodName}`;
+async function callBookingApi(
+	methodName,
+	{ httpMethod = "POST", params = null, body = null, apiBase = API_BASE } = {}
+) {
+	let url = `${apiBase}.${methodName}`;
 	const headers = {
 		Accept: "application/json",
 	};
@@ -190,5 +194,21 @@ export function confirmSelfServeBooking(payload) {
 	return callBookingApi("confirm_self_serve_booking", {
 		httpMethod: "POST",
 		body: payload,
+	});
+}
+
+export function submitBookingPinToDrive({ schedule_entry, pin }) {
+	return callBookingApi("submit_pin_to_drive", {
+		httpMethod: "POST",
+		apiBase: PORTAL_API_BASE,
+		body: { schedule_entry, pin },
+	});
+}
+
+export function optOutBookingPinToDrive({ schedule_entry }) {
+	return callBookingApi("opt_out_pin_to_drive", {
+		httpMethod: "POST",
+		apiBase: PORTAL_API_BASE,
+		body: { schedule_entry },
 	});
 }

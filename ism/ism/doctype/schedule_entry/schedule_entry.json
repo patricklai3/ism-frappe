@@ -43,6 +43,17 @@
   "section_break_portal_link",
   "portal_booking_token_hash",
   "portal_booking_token_expires_at",
+  "sec_pin_to_drive",
+  "pin_to_drive_status",
+  "pin_to_drive_encrypted",
+  "pin_to_drive_submitted_at",
+  "pin_to_drive_updated_at",
+  "cb_pin_to_drive",
+  "pin_to_drive_opted_out_at",
+  "pin_to_drive_purged_at",
+  "pin_to_drive_last_viewed_by",
+  "pin_to_drive_last_viewed_at",
+  "pin_to_drive_view_count",
   "section_break_notes",
   "items_summary",
   "notes"
@@ -309,6 +320,79 @@
    "read_only": 1
   },
   {
+   "collapsible": 1,
+   "fieldname": "sec_pin_to_drive",
+   "fieldtype": "Section Break",
+   "label": "Vehicle PIN-to-Drive (Ephemeral)"
+  },
+  {
+   "default": "Not Prompted",
+   "fieldname": "pin_to_drive_status",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "PIN-to-Drive Status",
+   "options": "Not Prompted\nProvided\nOpted Out\nPurged",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pin_to_drive_encrypted",
+   "fieldtype": "Password",
+   "hidden": 1,
+   "label": "PIN-to-Drive (Encrypted)",
+   "no_copy": 1,
+   "print_hide": 1,
+   "read_only": 1,
+   "report_hide": 1
+  },
+  {
+   "fieldname": "pin_to_drive_submitted_at",
+   "fieldtype": "Datetime",
+   "label": "PIN Submitted At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pin_to_drive_updated_at",
+   "fieldtype": "Datetime",
+   "label": "PIN Updated At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_pin_to_drive",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "pin_to_drive_opted_out_at",
+   "fieldtype": "Datetime",
+   "label": "PIN Opted Out At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pin_to_drive_purged_at",
+   "fieldtype": "Datetime",
+   "label": "PIN Purged At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pin_to_drive_last_viewed_by",
+   "fieldtype": "Link",
+   "label": "PIN Last Viewed By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pin_to_drive_last_viewed_at",
+   "fieldtype": "Datetime",
+   "label": "PIN Last Viewed At",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "pin_to_drive_view_count",
+   "fieldtype": "Int",
+   "label": "PIN View Count",
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_notes",
    "fieldtype": "Section Break",
    "label": "Summary & Notes"
@@ -329,7 +413,7 @@
  "index_web_pages_for_search": 1,
  "is_calendar_and_gantt": 1,
  "links": [],
- "modified": "2026-11-21 09:00:00.000000",
+ "modified": "2026-11-22 05:05:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Schedule Entry",
@@ -359,6 +443,23 @@
    "role": "ISM Manager",
    "share": 1,
    "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Service Advisor",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "ISM Technician"
   },
   {
    "create": 1,
