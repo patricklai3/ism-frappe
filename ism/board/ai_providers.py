@@ -32,9 +32,20 @@ from ism.board.pricing import calculate_part_price
 
 DEFAULT_GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_OPENAI_ENDPOINT = "https://api.openai.com/v1"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+DEFAULT_GEMINI_THINKING_LEVEL = "LOW"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_HTTP_TIMEOUT_SECONDS = 45
+DEFAULT_HTTP_TIMEOUT_SECONDS = 90
+
+_GEMINI_THINKING_LEVEL_MODEL_RE = re.compile(
+	r"^(?:models/)?gemini-(?:[3-9]|\d{2,})(?:\.\d+)?-(?!.*(?:embedding|tts|image))",
+	re.IGNORECASE,
+)
+
+
+def _supports_gemini_thinking_level(model: str | None) -> bool:
+	normalized = (model or "").strip().lower()
+	return bool(normalized and _GEMINI_THINKING_LEVEL_MODEL_RE.match(normalized))
 
 PROVIDER_DISABLED = "Disabled"
 PROVIDER_MOCK = "Mock (Deterministic Test)"
@@ -261,12 +272,14 @@ class GeminiRestProvider:
 		endpoint: str | None = None,
 		orchestrator_model: str | None = None,
 		comms_model: str | None = None,
+		thinking_level: str | None = DEFAULT_GEMINI_THINKING_LEVEL,
 		timeout_seconds: int = DEFAULT_HTTP_TIMEOUT_SECONDS,
 	) -> None:
 		self.api_key = (api_key or "").strip()
 		self.endpoint = (endpoint or DEFAULT_GEMINI_ENDPOINT).strip().rstrip("/")
 		self.orchestrator_model = (orchestrator_model or DEFAULT_GEMINI_MODEL).strip()
 		self.comms_model = (comms_model or self.orchestrator_model or DEFAULT_GEMINI_MODEL).strip()
+		self.thinking_level = (thinking_level or "").strip().upper() or None
 		self.timeout_seconds = max(5, int(timeout_seconds or DEFAULT_HTTP_TIMEOUT_SECONDS))
 
 	def _generate_content(
@@ -285,14 +298,18 @@ class GeminiRestProvider:
 			"Content-Type": "application/json",
 			"x-goog-api-key": self.api_key,
 		}
+		generation_config: dict[str, Any] = {
+			"temperature": 0.1,
+			"responseMimeType": "application/json",
+			"responseSchema": response_schema,
+		}
+		if self.thinking_level and _supports_gemini_thinking_level(model):
+			generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
+
 		body = {
 			"systemInstruction": {"parts": [{"text": system_instruction}]},
 			"contents": [{"role": "user", "parts": parts}],
-			"generationConfig": {
-				"temperature": 0.1,
-				"responseMimeType": "application/json",
-				"responseSchema": response_schema,
-			},
+			"generationConfig": generation_config,
 		}
 
 		resp = requests.post(url, headers=headers, json=body, timeout=self.timeout_seconds)
@@ -303,7 +320,11 @@ class GeminiRestProvider:
 		if not candidates:
 			raise ValueError("Gemini API returned no candidates.")
 		content_parts = (candidates[0].get("content") or {}).get("parts") or []
-		text_chunks = [p.get("text", "") for p in content_parts if isinstance(p, dict) and p.get("text")]
+		text_chunks = [
+			p.get("text", "")
+			for p in content_parts
+			if isinstance(p, dict) and p.get("text") and not p.get("thought")
+		]
 		if not text_chunks:
 			raise ValueError("Gemini API response contained no text part.")
 		return _extract_json_object("\n".join(text_chunks))
@@ -1455,6 +1476,8 @@ __all__ = [
 	"DECISION_SCHEMA",
 	"DEFAULT_GEMINI_ENDPOINT",
 	"DEFAULT_GEMINI_MODEL",
+	"DEFAULT_GEMINI_THINKING_LEVEL",
+	"DEFAULT_HTTP_TIMEOUT_SECONDS",
 	"DEFAULT_OPENAI_ENDPOINT",
 	"DEFAULT_OPENAI_MODEL",
 	"DEFAULT_PAYMENT_OPTIONS",

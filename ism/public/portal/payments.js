@@ -60,6 +60,21 @@ function getBadgeClass(badge) {
 	return "portal-badge--neutral";
 }
 
+function normalizePaymentIntent(intent) {
+	return String(intent || "")
+		.trim()
+		.toLowerCase()
+		.replace(/\s+/g, "_");
+}
+
+function isManualDepositIntent(intent) {
+	return normalizePaymentIntent(intent) === "manual_deposit";
+}
+
+function isInvoiceBalanceIntent(intent) {
+	return normalizePaymentIntent(intent) === "invoice_balance";
+}
+
 function renderTransactionsList(transactions, currency) {
 	if (!Array.isArray(transactions) || transactions.length === 0) {
 		return "";
@@ -69,12 +84,11 @@ function renderTransactionsList(transactions, currency) {
 			<h3 class="portal-card__title" style="font-size: 0.96rem; margin-bottom: 6px;">Payment Receipts</h3>
 			${transactions
 				.map((tx) => {
-					const intentLabel =
-						tx.payment_intent === "manual_deposit"
-							? "Deposit"
-							: tx.payment_intent === "invoice_balance"
-								? "Invoice Balance"
-								: tx.payment_intent || "Payment";
+					const intentLabel = isManualDepositIntent(tx.payment_intent)
+						? "Deposit"
+						: isInvoiceBalanceIntent(tx.payment_intent)
+							? "Invoice Balance"
+							: tx.payment_intent || "Payment";
 					const cardText =
 						tx.card_brand || tx.card_last4
 							? `${escapeHtml(tx.card_brand || "Card")} •••• ${escapeHtml(tx.card_last4 || "")}`
@@ -90,7 +104,7 @@ function renderTransactionsList(transactions, currency) {
 								<div><strong>${formatCurrency(tx.amount || 0, currency)}</strong></div>
 								${
 									tx.receipt_url
-										? `<a href="${escapeHtml(tx.receipt_url)}" target="_blank" rel="noopener" class="portal-help">Square Receipt</a>`
+										? `<a href="${escapeHtml(tx.receipt_url)}" target="_blank" rel="noopener noreferrer" class="portal-help">Square Receipt</a>`
 										: ""
 								}
 							</div>
@@ -121,10 +135,9 @@ export function renderPaymentsSection(container, { visit, onHubUpdated, notify }
 			!state.has_in_flight_payment
 	);
 
-	const payHeading =
-		state.payable_intent === "manual_deposit"
-			? `Pay Requested Deposit (${formatCurrency(state.payable_amount, currency)})`
-			: `Pay Invoice Balance (${formatCurrency(state.payable_amount, currency)})`;
+	const payHeading = isManualDepositIntent(state.payable_intent)
+		? `Pay Requested Deposit (${formatCurrency(state.payable_amount, currency)})`
+		: `Pay Invoice Balance (${formatCurrency(state.payable_amount, currency)})`;
 
 	container.innerHTML = `
 		<section class="portal-card" id="portal-payments-section">

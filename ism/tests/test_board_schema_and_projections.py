@@ -8,6 +8,7 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import now_datetime
 
+from ism.board.ai_providers import DEFAULT_GEMINI_MODEL
 from ism.board.contracts import (
 	AUTONOMOUS_ACTIONS,
 	MANAGER_GATED_ACTIONS,
@@ -134,10 +135,14 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 		# Seed defaults match rules/parts_pricing.json and never clobber explicit 0 or operator config
 		settings = frappe.get_single("ISM Settings")
 		original_provider = settings.board_ai_provider
+		original_orch_model = settings.board_ai_orchestrator_model
+		original_comms_model = settings.board_ai_comms_model
 		original_baseline = settings.parts_pricing_baseline_discount_pct
 		original_auto = settings.board_ai_auto_process
 		try:
 			settings.board_ai_provider = "Mock (Deterministic Test)"
+			settings.board_ai_orchestrator_model = "gemini-2.5-flash"
+			settings.board_ai_comms_model = "gemini-2.5-flash"
 			settings.parts_pricing_baseline_discount_pct = 0.0
 			settings.board_ai_auto_process = 0
 			settings.save(ignore_permissions=True)
@@ -149,16 +154,28 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			self.assertEqual(float(reloaded.parts_pricing_baseline_discount_pct), 0.0)
 			self.assertEqual(int(reloaded.board_ai_auto_process), 0)
 			self.assertEqual(reloaded.media_storage_backend, "Frappe Private File")
-			self.assertEqual(reloaded.board_ai_orchestrator_model, "gemini-2.5-flash")
+			self.assertEqual(reloaded.board_ai_orchestrator_model, DEFAULT_GEMINI_MODEL)
+			self.assertEqual(reloaded.board_ai_comms_model, DEFAULT_GEMINI_MODEL)
 			self.assertEqual(float(reloaded.parts_pricing_small_ticket_max_tesla_price), 20.0)
 			self.assertEqual(float(reloaded.parts_pricing_min_sell_price), 5.0)
 			self.assertEqual(float(reloaded.parts_pricing_min_cost_markup_pct), 25.0)
 			self.assertEqual(float(reloaded.parts_pricing_min_cost_margin_dollars), 5.0)
 			self.assertEqual(float(reloaded.parts_pricing_fallback_cost_markup_pct), 40.0)
 			self.assertEqual(float(reloaded.parts_pricing_rounding_increment), 0.01)
+
+			# Custom operator-chosen models must NOT be clobbered by setup_default_ism_settings()
+			reloaded.board_ai_orchestrator_model = "gemini-3.8-flash"
+			reloaded.board_ai_comms_model = "gemini-3.5-flash"
+			reloaded.save(ignore_permissions=True)
+			setup_default_ism_settings()
+			custom_reloaded = frappe.get_single("ISM Settings")
+			self.assertEqual(custom_reloaded.board_ai_orchestrator_model, "gemini-3.8-flash")
+			self.assertEqual(custom_reloaded.board_ai_comms_model, "gemini-3.5-flash")
 		finally:
 			settings.reload()
 			settings.board_ai_provider = original_provider or "Disabled"
+			settings.board_ai_orchestrator_model = original_orch_model or DEFAULT_GEMINI_MODEL
+			settings.board_ai_comms_model = original_comms_model or DEFAULT_GEMINI_MODEL
 			settings.parts_pricing_baseline_discount_pct = (
 				original_baseline if original_baseline is not None else 30.0
 			)

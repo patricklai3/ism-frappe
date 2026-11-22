@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import frappe
@@ -32,17 +33,30 @@ def _validate_required_package_ids(package_ids: Any) -> List[str]:
 		stripped = package_ids.strip()
 		if not stripped:
 			frappe.throw(_("At least one service package must be selected."), frappe.ValidationError)
-		if stripped.startswith(("[", "{")):
+		if stripped.startswith("{"):
+			frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+		if stripped.startswith("["):
 			try:
-				parsed = frappe.parse_json(stripped)
-			except (ValueError, TypeError):
-				frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
-			if not isinstance(parsed, list):
-				frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
-			for item in parsed:
-				if not isinstance(item, str) or not item.strip():
+				parsed = json.loads(stripped)
+			except json.JSONDecodeError:
+				close_idx = stripped.find("]")
+				prefix_tag = stripped[1:close_idx] if close_idx > 1 else ""
+				is_bracket_prefixed_name = (
+					close_idx > 1
+					and close_idx < len(stripped) - 1
+					and bool(prefix_tag.strip())
+					and not any(ch in prefix_tag for ch in ('"', "'", ",", "[", "{"))
+				)
+				if not is_bracket_prefixed_name:
 					frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
-				raw_items.append(item.strip())
+				raw_items = [part.strip() for part in stripped.split(",") if part.strip()]
+			else:
+				if not isinstance(parsed, list):
+					frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+				for item in parsed:
+					if not isinstance(item, str) or not item.strip():
+						frappe.throw(_("Invalid package_ids parameter."), frappe.ValidationError)
+					raw_items.append(item.strip())
 		else:
 			raw_items = [part.strip() for part in stripped.split(",") if part.strip()]
 	elif isinstance(package_ids, (list, tuple, set)):

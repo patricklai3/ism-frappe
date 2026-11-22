@@ -17,6 +17,9 @@ from frappe.utils import add_days, now_datetime, today
 
 from ism.board.ai_providers import (
 	DEFAULT_GEMINI_ENDPOINT,
+	DEFAULT_GEMINI_MODEL,
+	DEFAULT_GEMINI_THINKING_LEVEL,
+	DEFAULT_HTTP_TIMEOUT_SECONDS,
 	DEFAULT_OPENAI_ENDPOINT,
 	GeminiRestProvider,
 	MockMultimodalProvider,
@@ -703,11 +706,14 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		with self.assertRaises(BoardContractError):
 			get_ai_provider(provider_override="UnknownProviderXYZ")
 
+		self.assertEqual(DEFAULT_GEMINI_MODEL, "gemini-3.6-flash")
+		self.assertEqual(DEFAULT_GEMINI_THINKING_LEVEL, "LOW")
+		self.assertGreaterEqual(DEFAULT_HTTP_TIMEOUT_SECONDS, 90)
+
 		# GeminiRestProvider mocked HTTPS
 		gemini = GeminiRestProvider(
 			api_key="test-gemini-key",
 			endpoint=DEFAULT_GEMINI_ENDPOINT,
-			orchestrator_model="gemini-2.5-flash",
 			comms_model="gemini-2.5-flash-lite",
 		)
 		decision_json = {
@@ -726,7 +732,16 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		mock_resp = MagicMock()
 		mock_resp.raise_for_status.return_value = None
 		mock_resp.json.return_value = {
-			"candidates": [{"content": {"parts": [{"text": json.dumps(decision_json)}]}}]
+			"candidates": [
+				{
+					"content": {
+						"parts": [
+							{"thought": True, "text": "internal reasoning that is not JSON"},
+							{"text": json.dumps(decision_json)},
+						]
+					}
+				}
+			]
 		}
 
 		with patch("ism.board.ai_providers.requests.post", return_value=mock_resp) as mock_post:
@@ -745,10 +760,15 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		called_url = mock_post.call_args.args[0]
 		called_headers = mock_post.call_args.kwargs["headers"]
 		called_body = mock_post.call_args.kwargs["json"]
-		self.assertEqual(called_url, f"{DEFAULT_GEMINI_ENDPOINT}/models/gemini-2.5-flash:generateContent")
+		self.assertEqual(called_url, f"{DEFAULT_GEMINI_ENDPOINT}/models/gemini-3.6-flash:generateContent")
+		self.assertEqual(mock_post.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT_SECONDS)
 		self.assertEqual(called_headers["x-goog-api-key"], "test-gemini-key")
 		self.assertEqual(called_body["generationConfig"]["responseMimeType"], "application/json")
 		self.assertIn("responseSchema", called_body["generationConfig"])
+		self.assertEqual(
+			called_body["generationConfig"]["thinkingConfig"],
+			{"thinkingLevel": "LOW"},
+		)
 
 		parts = called_body["contents"][0]["parts"]
 		self.assertEqual(len(parts), 3)
@@ -756,7 +776,29 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		self.assertEqual(parts[1]["inline_data"]["data"], base64.b64encode(_TINY_PNG).decode("ascii"))
 		self.assertEqual(parts[2]["inline_data"]["mime_type"], "audio/wav")
 
-		# Gemini isolated customer comms call uses comms_model
+		# Gemini 3.8 Flash also receives bounded thinkingConfig
+		gemini_38 = GeminiRestProvider(
+			api_key="test-gemini-key",
+			endpoint=DEFAULT_GEMINI_ENDPOINT,
+			orchestrator_model="gemini-3.8-flash",
+		)
+		with patch("ism.board.ai_providers.requests.post", return_value=mock_resp) as mock_38_post:
+			gemini_38.analyze_capture(
+				thread_type="REPAIR_ORDER",
+				context={"thread_key": "RO:RO-1"},
+				text="FYI brake pads at 8mm",
+				media_blobs=[],
+			)
+		self.assertEqual(
+			mock_38_post.call_args.args[0],
+			f"{DEFAULT_GEMINI_ENDPOINT}/models/gemini-3.8-flash:generateContent",
+		)
+		self.assertEqual(
+			mock_38_post.call_args.kwargs["json"]["generationConfig"]["thinkingConfig"],
+			{"thinkingLevel": "LOW"},
+		)
+
+		# Gemini isolated customer comms call uses comms_model and omits thinkingConfig on pre-Gemini-3 models
 		comms_resp = MagicMock()
 		comms_resp.raise_for_status.return_value = None
 		comms_resp.json.return_value = {
@@ -784,6 +826,7 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 			mock_comms_post.call_args.args[0],
 			f"{DEFAULT_GEMINI_ENDPOINT}/models/gemini-2.5-flash-lite:generateContent",
 		)
+		self.assertNotIn("thinkingConfig", mock_comms_post.call_args.kwargs["json"]["generationConfig"])
 		self.assertIn("brake check is complete", draft["body"])
 
 		# OpenAICompatibleProvider mocked HTTPS

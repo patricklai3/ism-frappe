@@ -1,6 +1,7 @@
 {% extends "templates/web.html" %}
 
 {% block head_include %}
+<meta name="referrer" content="no-referrer" />
 <meta name="ism-csrf-token" content="{{ csrf_token }}">
 <link rel="stylesheet" href="/assets/ism/portal/portal.css?v={{ asset_version or '1' }}">
 {% endblock %}

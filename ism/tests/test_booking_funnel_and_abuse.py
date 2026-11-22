@@ -1391,6 +1391,53 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			self.assertIn("/portal", mock_mail2.call_args.kwargs["message"])
 			self.assertNotIn("booking_token", mock_mail2.call_args.kwargs["message"])
 
+	def test_bracket_prefixed_package_ids_and_malformed_json_rejection(self) -> None:
+		from ism.api.booking import _parse_package_ids_arg
+
+		bracket_name = f"[STAGING TEST] {TEST_PREFIX}Brake Service & Inspection"
+		bracket_pkg = self._create_bookable_package(
+			"BracketPkg",
+			package_name=bracket_name,
+			customer_title="Bracket Prefixed Brake Service",
+			applicable_model="All Models",
+			self_serve_duration_minutes=60,
+		)
+
+		self.assertEqual(_parse_package_ids_arg(bracket_pkg.name), [bracket_pkg.name])
+		self.assertEqual(
+			_parse_package_ids_arg(f"{bracket_pkg.name}, {self.bookable_pkg.name}"),
+			[bracket_pkg.name, self.bookable_pkg.name],
+		)
+		self.assertEqual(
+			_parse_package_ids_arg(json.dumps([bracket_pkg.name])),
+			[bracket_pkg.name],
+		)
+
+		for bad_value in (
+			"{}",
+			"{bad",
+			"[]",
+			"[bad",
+			'["unterminated',
+			"[123]",
+			'["PKG"] trailing',
+			"[PKG-1, PKG-2]",
+			"[] foo",
+		):
+			with self.subTest(bad_package_ids=bad_value):
+				with self.assertRaises(frappe.ValidationError):
+					_parse_package_ids_arg(bad_value)
+
+		frappe.set_user("Guest")
+		slot_res = get_booking_slots(
+			package_ids=bracket_pkg.name,
+			start_date=str(self.base_date),
+			days_ahead=1,
+		)
+		self.assertEqual(frappe.local.response.get("http_status_code"), 200)
+		self.assertTrue(slot_res["success"])
+		self.assertGreaterEqual(slot_res["total_slots"], 1)
+
 
 class TestBookingHostedRoute(ISMTestCase):
 	"""Wave 3 hosted /book page controller, security headers, boot JSON, and asset hygiene tests."""
@@ -1521,6 +1568,7 @@ class TestBookingHostedRoute(ISMTestCase):
 		self.assertEqual(response.headers.get("Content-Security-Policy"), "frame-ancestors 'none'")
 
 		html = response.get_data(as_text=True)
+		self.assertIn('<meta name="referrer" content="no-referrer" />', html.split("</head>", 1)[0])
 		self.assertIn('id="ism-booking-app"', html)
 		self.assertIn('id="ism-booking-boot"', html)
 		self.assertIn("/assets/ism/book/app.js", html)

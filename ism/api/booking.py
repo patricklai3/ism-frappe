@@ -1,11 +1,12 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import json
 from typing import Any
 
 import frappe
 
-from ism.api._validation import optional_int, optional_str, parse_json_arg, require_str
+from ism.api._validation import optional_int, optional_str, require_str
 from ism.booking.anti_abuse import validate_honeypot_and_nonce
 from ism.booking.contracts import (
 	ERR_BOOKING_DISABLED,
@@ -83,14 +84,30 @@ def _parse_package_ids_arg(package_ids: Any) -> list[str]:
 		stripped = package_ids.strip()
 		if not stripped:
 			frappe.throw("At least one service package must be selected.", frappe.ValidationError)
-		if stripped.startswith(("[", "{")):
-			parsed = parse_json_arg(stripped, label="package_ids")
-			if not isinstance(parsed, list):
-				frappe.throw("Invalid package_ids parameter.", frappe.ValidationError)
-			for item in parsed:
-				if not isinstance(item, str) or not item.strip():
+		if stripped.startswith("{"):
+			frappe.throw("Invalid package_ids parameter.", frappe.ValidationError)
+		if stripped.startswith("["):
+			try:
+				parsed = json.loads(stripped)
+			except json.JSONDecodeError:
+				close_idx = stripped.find("]")
+				prefix_tag = stripped[1:close_idx] if close_idx > 1 else ""
+				is_bracket_prefixed_name = (
+					close_idx > 1
+					and close_idx < len(stripped) - 1
+					and bool(prefix_tag.strip())
+					and not any(ch in prefix_tag for ch in ('"', "'", ",", "[", "{"))
+				)
+				if not is_bracket_prefixed_name:
 					frappe.throw("Invalid package_ids parameter.", frappe.ValidationError)
-				raw_items.append(item.strip())
+				raw_items = [part.strip() for part in stripped.split(",") if part.strip()]
+			else:
+				if not isinstance(parsed, list):
+					frappe.throw("Invalid package_ids parameter.", frappe.ValidationError)
+				for item in parsed:
+					if not isinstance(item, str) or not item.strip():
+						frappe.throw("Invalid package_ids parameter.", frappe.ValidationError)
+					raw_items.append(item.strip())
 		else:
 			raw_items = [part.strip() for part in stripped.split(",") if part.strip()]
 	elif isinstance(package_ids, (list, tuple)):

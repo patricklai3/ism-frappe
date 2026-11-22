@@ -746,13 +746,13 @@
    "fieldtype": "Column Break"
   },
   {
-   "default": "gemini-2.5-flash",
+   "default": "gemini-3.6-flash",
    "fieldname": "board_ai_orchestrator_model",
    "fieldtype": "Data",
    "label": "Board AI Orchestrator Model"
   },
   {
-   "default": "gemini-2.5-flash",
+   "default": "gemini-3.6-flash",
    "fieldname": "board_ai_comms_model",
    "fieldtype": "Data",
    "label": "Board AI Comms Model"

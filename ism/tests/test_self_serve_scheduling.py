@@ -11,6 +11,7 @@ from frappe.utils import add_days, getdate, today
 
 from ism.api.scheduling import create_repair_order_from_schedule_entry
 from ism.api.self_serve_scheduling import (
+	_validate_required_package_ids,
 	execute_self_serve_reschedule,
 	get_bookable_packages,
 	get_reschedule_policy_and_slots,
@@ -1160,6 +1161,15 @@ class TestSelfServeScheduling(ISMTestCase):
 	def test_guest_package_ids_bypass_and_direct_empty_list_rejected(self):
 		"""Finding #1 regression: Guest get_self_serve_slots and find_self_serve_slots reject all falsy/invalid package_ids."""
 		target_date = str(self.base_date)
+
+		self.assertEqual(
+			_validate_required_package_ids("[STAGING TEST] Brake Service & Inspection"),
+			["[STAGING TEST] Brake Service & Inspection"],
+		)
+		for bad_raw in ("[bad", '["unterminated', "{bad", "{}", "[]", "[PKG-1, PKG-2]", "[] foo"):
+			with self.subTest(raw_package_ids=bad_raw):
+				with self.assertRaises(frappe.ValidationError):
+					_validate_required_package_ids(bad_raw)
 
 		frappe.set_user("Guest")
 		for bad_value in ({}, False, 0, 0.0, "", "   ", "[]", "{}", "{bad", [], [123], [True], None):

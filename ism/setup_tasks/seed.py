@@ -6,12 +6,15 @@ import secrets
 import frappe
 from cryptography.fernet import Fernet
 
+from ism.board.ai_providers import DEFAULT_GEMINI_MODEL
 from ism.ism.doctype.schedule_entry_type.schedule_entry_type import STANDARD_SCHEDULE_ENTRY_TYPES
 from ism.portal.contracts import (
 	DEFAULT_PIN_PROMPT_DISCLAIMER,
 	PORTAL_BOOKING_TOKEN_DEFAULT_TTL_DAYS,
 	PORTAL_DEFAULT_INVOICE_PRINT_FORMAT,
 )
+
+_DEPRECATED_DEFAULT_GEMINI_MODELS = ("gemini-2.5-flash",)
 
 STANDARD_INSPECTION_ITEMS = [
 	{"inspection_description": "Manufacturing Certification Label"},
@@ -104,8 +107,8 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("media_max_audio_mb", 15),
 	("media_max_image_mb", 10),
 	("board_ai_provider", "Disabled"),
-	("board_ai_orchestrator_model", "gemini-2.5-flash"),
-	("board_ai_comms_model", "gemini-2.5-flash"),
+	("board_ai_orchestrator_model", DEFAULT_GEMINI_MODEL),
+	("board_ai_comms_model", DEFAULT_GEMINI_MODEL),
 	("board_ai_confidence_threshold", 0.90),
 	("parts_pricing_rounding_increment", 0.01),
 	("parts_pricing_condition_overrides_json", '{"New": null, "Used": null, "Reconditioned": null}'),
@@ -189,6 +192,11 @@ def setup_default_ism_settings():
 	if not settings.sms_gateway_provider or settings.sms_gateway_provider == "Twilio":
 		settings.sms_gateway_provider = "Disabled"
 		changed = True
+
+	for fieldname in ("board_ai_orchestrator_model", "board_ai_comms_model"):
+		if (settings.get(fieldname) or "").strip() in _DEPRECATED_DEFAULT_GEMINI_MODELS:
+			settings.set(fieldname, DEFAULT_GEMINI_MODEL)
+			changed = True
 
 	if not settings.portal_session_signing_secret and not settings.get_password(
 		"portal_session_signing_secret", raise_exception=False

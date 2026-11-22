@@ -177,6 +177,7 @@ class TestPortalPagesAndSSR(ISMTestCase):
 
 			html = get_response_content("portal")
 
+		self.assertIn('<meta name="referrer" content="no-referrer" />', html.split("</head>", 1)[0])
 		self.assertIn("ISM Test Auto Clinic", html)
 		self.assertIn("/assets/ism/portal/portal.css", html)
 		self.assertIn("/assets/ism/portal/app.js", html)
@@ -307,6 +308,7 @@ class TestPortalPagesAndSSR(ISMTestCase):
 		headers = self._flush_set_cookie_headers(cm)
 		self.assertTrue(_extract_cookie_value(headers, DEFAULT_PORTAL_COOKIE_NAME))
 
+		self.assertIn('<meta name="referrer" content="no-referrer" />', html.split("</head>", 1)[0])
 		self.assertIn(ro.name, html)
 		self.assertNotIn(token, html)
 		self.assertNotIn("signature_image", html)
@@ -414,3 +416,9 @@ class TestPortalPagesAndSSR(ISMTestCase):
 			full_path = os.path.join(portal_public_dir, filename)
 			self.assertTrue(os.path.isfile(full_path), msg=f"Missing portal asset: {filename}")
 			self.assertGreater(os.path.getsize(full_path), 0, msg=f"Empty portal asset: {filename}")
+
+		with open(os.path.join(portal_public_dir, "payments.js"), encoding="utf-8") as payments_file:
+			payments_src = payments_file.read()
+		self.assertIn("isManualDepositIntent", payments_src)
+		self.assertIn("Pay Requested Deposit", payments_src)
+		self.assertIn("Pay Invoice Balance", payments_src)
