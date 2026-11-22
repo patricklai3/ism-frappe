@@ -63,7 +63,7 @@ function renderApprovalLogs(logs, auditHash) {
 
 	return `
 		<div style="margin-top: 16px;">
-			<h3 class="portal-card__title" style="font-size: 0.96rem; margin-bottom: 8px;">Authorization Audit History</h3>
+			<h3 class="portal-card__title" style="font-size: 0.96rem; margin-bottom: 8px;">Authorization History</h3>
 			${logHtml}
 			${hashHtml}
 		</div>
