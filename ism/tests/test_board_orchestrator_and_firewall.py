@@ -119,6 +119,7 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 				"actor_type": actor_type,
 				"actor_user": frappe.session.user,
 				"payload_type": payload_type,
+				"intent_tag": intent_tag or None,
 				"body_text": body_text,
 				"metadata_json": json.dumps(meta) if meta else None,
 				"media_attachments": json.dumps(media_attachments) if media_attachments else None,
@@ -160,7 +161,7 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 		audio_ref = media_storage.store_media_payload(
 			filename="tech_voice.wav",
 			content_type="audio/wav",
-			file_bytes=_TINY_WAV,
+			data_bytes=_TINY_WAV,
 			thread_key=thread_key,
 			repair_order=ro.name,
 			settings=settings,
@@ -375,7 +376,7 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 
 		# GeminiRestProvider via factory (uses board_ai_model default gemini-3.6-flash)
 		gemini_settings = SimpleNamespace(
-			board_ai_provider="Google Gemini (REST)",
+			board_ai_provider="Gemini REST API",
 			board_ai_api_key="test-gemini-secret-key",
 			board_ai_endpoint=DEFAULT_GEMINI_ENDPOINT,
 			board_ai_model=DEFAULT_GEMINI_MODEL,
@@ -451,7 +452,7 @@ class TestBoardOrchestratorAndFirewall(ISMTestCase):
 
 		# OpenAICompatibleProvider mocked HTTPS via factory (reads board_ai_model)
 		oa_settings = SimpleNamespace(
-			board_ai_provider="OpenAI-Compatible",
+			board_ai_provider="OpenAI Compatible",
 			board_ai_api_key="test-openai-key",
 			board_ai_endpoint=DEFAULT_OPENAI_ENDPOINT,
 			board_ai_model="gpt-4o-mini",
