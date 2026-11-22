@@ -17,7 +17,7 @@ from frappe.utils import now_datetime
 from werkzeug.datastructures import FileStorage, ImmutableMultiDict
 
 from ism.api import board as board_api
-from ism.api.agent_common import build_ro_urls
+from ism.api.agent_serializers import build_ro_urls
 from ism.board.contracts import BoardContractError, ro_thread_key
 from ism.board.gateways import dispatch_board_ai_result
 from ism.board.projections import ensure_thread_for_ro
@@ -279,7 +279,8 @@ class TestBoardGateways(ISMTestCase):
 		self.assertEqual(feed_by_id[act1]["thread_key"], tkey)
 		self.assertIn(ro.name, feed_by_id[act1]["board_url"])
 		self.assertEqual(feed_by_id[act1]["clearing_condition_type"], "ro_has_supplement_or_service")
-		self.assertIsInstance(feed_by_id[act1]["clearing_condition"], dict)
+		self.assertIsInstance(feed_by_id[act1]["clearing_condition"], str)
+		self.assertIsInstance(feed_by_id[act1]["clearing_condition_params"], dict)
 
 		# 2. RBAC: ISM Technician blocked from update_board_action_card and get_action_cards_context
 		frappe.set_user(tech_email)
@@ -296,15 +297,16 @@ class TestBoardGateways(ISMTestCase):
 		item1 = ctx_single["items"][0]
 		self.assertEqual(item1["name"], act1)
 		self.assertEqual(item1["clearing_condition_type"], "ro_has_supplement_or_service")
-		self.assertIsInstance(item1["clearing_condition"], dict)
-		self.assertIn("Front left bushing cracked", item1["board_event"]["transcript"] or "")
-		self.assertGreaterEqual(len(item1["board_event"]["media_attachments"]), 1)
-		self.assertIn("ism.api.board.get_media", item1["board_event"]["media_attachments"][0]["url"])
+		self.assertIsInstance(item1["clearing_condition"], str)
+		self.assertIsInstance(item1["clearing_condition_params"], dict)
+		self.assertIn("Front left bushing cracked", item1["triggering_event"]["transcript"] or "")
+		self.assertGreaterEqual(len(item1["triggering_event"]["media_attachments"]), 1)
+		self.assertIn("ism.api.board.get_media", item1["triggering_event"]["media_attachments"][0]["url"])
 
 		ro_bundle = ctx_single["threads_by_ro"][ro.name]
 		self.assertEqual(ro_bundle["repair_order"]["name"], ro.name)
 		self.assertGreaterEqual(len(ro_bundle["services"]), 1)
-		self.assertGreaterEqual(len(ro_bundle["recent_messages"]), 1)
+		self.assertGreaterEqual(len(ro_bundle["recent_events"]), 1)
 
 		ctx_multi = board_api.get_action_cards_context(action_items=[act1, act2])
 		self.assertEqual(ctx_multi["count"], 2)

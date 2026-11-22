@@ -502,7 +502,7 @@ class TestBoardMediaStorage(ISMTestCase):
 			settings=settings,
 		)
 		self._created_files.append(orphan_ref["storage_id"])
-		self.assertEqual(orphan_ref["folder_name"], "RO_RO-TEST-001")
+		self.assertEqual(orphan_ref["folder_name"], "RO-TEST-001")
 		orphan_doc = frappe.get_doc("File", orphan_ref["storage_id"])
 		self.assertEqual(orphan_doc.is_private, 1)
 

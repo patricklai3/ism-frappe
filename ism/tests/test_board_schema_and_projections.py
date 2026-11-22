@@ -368,13 +368,13 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			clearing_condition_type=ctype,
 			clearing_condition_json=json.dumps(cparams),
 		)
-		self.track("Shop Action Item", sai_supp["name"])
+		self.track("Shop Action Item", sai_supp)
 
 		card_ev = self._insert_event(
 			thread_key,
 			actor_type="AI",
 			payload_type="ACTION_CARD",
-			action_item=sai_supp["name"],
+			action_item=sai_supp,
 			target_role="MANAGER",
 			resolution_state="PENDING",
 			body_text="Add front left upper control arm supplement",
@@ -403,7 +403,7 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 		)
 		ro.save(ignore_permissions=True)
 
-		sai_supp_doc = frappe.get_doc("Shop Action Item", sai_supp["name"])
+		sai_supp_doc = frappe.get_doc("Shop Action Item", sai_supp)
 		self.assertEqual(sai_supp_doc.status, "Resolved")
 		self.assertEqual(int(sai_supp_doc.auto_cleared), 1)
 		self.assertIn("Auto-cleared:", sai_supp_doc.resolution_notes or "")
@@ -437,13 +437,13 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			clearing_condition_type=ctype_st,
 			clearing_condition_json=json.dumps(cparams_st),
 		)
-		self.track("Shop Action Item", sai_status["name"])
+		self.track("Shop Action Item", sai_status)
 
 		ro.reload()
 		ro.status = "Work Completed"
 		ro.save(ignore_permissions=True)
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_status["name"], "status"), "Resolved")
-		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_status["name"], "auto_cleared")), 1)
+		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_status, "status"), "Resolved")
+		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_status, "auto_cleared")), 1)
 
 		# C. po_submitted_or_received clears automatically on Purchase Order submit referencing RO
 		ro_po = self._create_ro(status="Waiting on Parts", approval_status="Approved")
@@ -462,7 +462,7 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			clearing_condition_type=ctype_po,
 			clearing_condition_json=json.dumps(cparams_po),
 		)
-		self.track("Shop Action Item", sai_po["name"])
+		self.track("Shop Action Item", sai_po)
 
 		company = frappe.defaults.get_global_default("company") or frappe.db.get_value("Company", {}, "name")
 		warehouse = frappe.db.get_value("Warehouse", {"company": company, "is_group": 0}, "name")
@@ -492,8 +492,8 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 		self.track(po)
 		po.submit()
 
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_po["name"], "status"), "Resolved")
-		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_po["name"], "auto_cleared")), 1)
+		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_po, "status"), "Resolved")
+		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_po, "auto_cleared")), 1)
 
 		# D. ro_sms_or_email_sent clears automatically on outbound SMS Audit Log insert for RO
 		ctype_sms, cparams_sms = build_clearing_condition_for_ro("ro_sms_or_email_sent", ro_po.name)
@@ -508,7 +508,7 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			clearing_condition_type=ctype_sms,
 			clearing_condition_json=json.dumps(cparams_sms),
 		)
-		self.track("Shop Action Item", sai_sms["name"])
+		self.track("Shop Action Item", sai_sms)
 
 		sms_log = frappe.get_doc(
 			{
@@ -525,8 +525,8 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 		).insert(ignore_permissions=True)
 		self.track(sms_log)
 
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_sms["name"], "status"), "Resolved")
-		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_sms["name"], "auto_cleared")), 1)
+		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_sms, "status"), "Resolved")
+		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_sms, "auto_cleared")), 1)
 
 		# E. schedule_converted_to_ro clears automatically when Schedule Entry links to an RO
 		se = self.create_test_schedule_entry(
@@ -544,13 +544,13 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			dedup_key=f"sched_conv:{se.name}",
 			clearing_condition_type="schedule_converted_to_ro",
 		)
-		self.track("Shop Action Item", sai_sched["name"])
+		self.track("Shop Action Item", sai_sched)
 
 		se.reload()
 		se.repair_order = ro_po.name
 		se.save(ignore_permissions=True)
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_sched["name"], "status"), "Resolved")
-		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_sched["name"], "auto_cleared")), 1)
+		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_sched, "status"), "Resolved")
+		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_sched, "auto_cleared")), 1)
 
 		# F. RO reaching Closed / Released auto-clears open RO items (including manual),
 		# unless keep_open_on_close=True
@@ -564,7 +564,7 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			dedup_key=f"board:manual_close:{ro_po.name}",
 			clearing_condition_type="manual",
 		)
-		self.track("Shop Action Item", sai_manual["name"])
+		self.track("Shop Action Item", sai_manual)
 
 		sai_keep_open = create_shop_action_item(
 			title="Keep open after RO close",
@@ -577,17 +577,17 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			clearing_condition_type="manual",
 			clearing_condition_json=json.dumps({"keep_open_on_close": True}),
 		)
-		self.track("Shop Action Item", sai_keep_open["name"])
+		self.track("Shop Action Item", sai_keep_open)
 
 		ro_po.reload()
 		ro_po.status = "Closed / Released"
 		ro_po.save(ignore_permissions=True)
 
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_manual["name"], "status"), "Resolved")
-		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_manual["name"], "auto_cleared")), 1)
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_keep_open["name"], "status"), "Open")
+		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_manual, "status"), "Resolved")
+		self.assertEqual(int(frappe.db.get_value("Shop Action Item", sai_manual, "auto_cleared")), 1)
+		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_keep_open, "status"), "Open")
 		should_clear, _ = evaluate_clearing_condition(
-			frappe.get_doc("Shop Action Item", sai_keep_open["name"]), ro_doc=ro_po
+			frappe.get_doc("Shop Action Item", sai_keep_open), ro_doc=ro_po
 		)
 		self.assertFalse(should_clear)
 

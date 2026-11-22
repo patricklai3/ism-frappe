@@ -26,7 +26,10 @@ MAX_AI_ERROR_LENGTH = 280
 MAX_RECENT_MESSAGES = 4
 MAX_RECENT_MESSAGE_CHARS = 250
 
-_SECRET_SCRUB_RE = re.compile(r"(?:key|token|bearer|authorization)\s*[:=]\s*\S+", re.IGNORECASE)
+_SECRET_SCRUB_RE = re.compile(
+	r"(?:key|token|bearer|authorization)\s*[:=]\s*\S+|\bbearer\s+\S+|\bsk-[A-Za-z0-9_-]+",
+	re.IGNORECASE,
+)
 _SHORT_ACK_SET: frozenset[str] = frozenset(
 	{
 		"ok",
@@ -135,9 +138,15 @@ def should_skip_ai_for_capture(
 	intent_tag: str | None,
 	attachments: list[dict[str, Any]] | None,
 	metadata: dict[str, Any] | None,
+	*,
+	actor_type: str | None = None,
 ) -> bool:
 	"""Zero-cost pre-filter skipping AI when capture needs neither STT nor action extraction."""
 	meta = metadata if isinstance(metadata, dict) else {}
+	effective_actor = str(actor_type or meta.get("actor_type") or "").strip().upper()
+	if effective_actor in ("AI", "SYSTEM"):
+		return True
+
 	if _is_truthy_flag(meta.get("skip_ai")):
 		return True
 
@@ -150,7 +159,7 @@ def should_skip_ai_for_capture(
 	if has_audio:
 		return False
 
-	norm_intent = (intent_tag or "").strip().upper()
+	norm_intent = str(intent_tag or meta.get("intent_tag") or "").strip().upper()
 	if norm_intent == "FYI":
 		return True
 
@@ -376,6 +385,28 @@ def enqueue_board_event(event_name: str) -> dict[str, Any]:
 		event_doc = frappe.get_doc("Shop Board Event", clean_name)
 		thread_doc = frappe.get_doc("Shop Board Thread", event_doc.thread)
 
+		attachments = _safe_json_loads(getattr(event_doc, "media_attachments", None), [])
+		metadata = _safe_json_loads(getattr(event_doc, "metadata_json", None), {})
+		if (
+			str(getattr(event_doc, "actor_type", "") or "").strip().upper() in ("AI", "SYSTEM")
+			or should_skip_ai_for_capture(
+				getattr(event_doc, "body_text", None),
+				getattr(event_doc, "intent_tag", None),
+				attachments if isinstance(attachments, list) else [],
+				metadata if isinstance(metadata, dict) else {},
+				actor_type=getattr(event_doc, "actor_type", None),
+			)
+		):
+			event_doc.db_set({"ai_status": "NONE", "ai_error": ""}, update_modified=True)
+			return {
+				"event_name": clean_name,
+				"thread_key": thread_doc.name,
+				"ai_status": "NONE",
+				"queued": False,
+				"synchronous": False,
+				"skipped": True,
+			}
+
 		event_doc.db_set({"ai_status": "QUEUED", "ai_error": ""}, update_modified=True)
 		_publish_ai_status(
 			event_doc=event_doc,
@@ -482,6 +513,7 @@ def process_board_event(
 				"event_name": event_doc.name,
 				"thread_key": thread_doc.name,
 				"ai_status": "COMPLETED",
+				"outcome": dispatch_result.get("outcome") if isinstance(dispatch_result, dict) else None,
 				"ai_result": result,
 				"dispatch_result": dispatch_result,
 			}
