@@ -92,12 +92,13 @@ class TestBoardAndCockpitPagesSSR(ISMTestCase):
 	def test_guest_redirects_to_login_on_board_and_cockpit(self) -> None:
 		frappe.set_user("Guest")
 
-		self._attach_request("/board?thread=SHOP%3AINTAKE")
+		self._attach_request("/board?thread=RO%3ARO-TEST-001")
 		ctx_board = frappe._dict()
 		with self.assertRaises(frappe.Redirect):
 			board_page.get_context(ctx_board)
 		self.assertIn("/login?redirect-to=", frappe.local.flags.redirect_location or "")
 		self.assertIn("%2Fboard", frappe.local.flags.redirect_location or "")
+		self.assertIn("RO-TEST-001", frappe.local.flags.redirect_location or "")
 		self._assert_security_headers(ctx_board.response_headers)
 
 		frappe.local.flags.pop("redirect_location", None)
@@ -178,6 +179,20 @@ class TestBoardAndCockpitPagesSSR(ISMTestCase):
 		self.assertIn("/assets/ism/board/vendor/socket.io.min.js?v=", board_html)
 		self.assertIn("/assets/ism/board/board.css?v=", board_html)
 		self.assertIn("/assets/ism/board/app.js?v=", board_html)
+		# Active-RO-only UI markers present; legacy singleton channels & intake/AP triggers absent
+		self.assertIn("Action Feed", board_html)
+		self.assertIn("Active ROs", board_html)
+		self.assertIn("Copy Selected for Agent", board_html)
+		for forbidden in (
+			"SHOP:INTAKE",
+			"SHOP:AP_RECEIVING",
+			"SHOP:DISPATCH",
+			"+ Intake",
+			"+ New Intake",
+			"Receive / Vendor Bill",
+			"Shop Channels",
+		):
+			self.assertNotIn(forbidden, board_html)
 
 		self._attach_request("/cockpit")
 		resp_cockpit = get_response("cockpit")
@@ -191,6 +206,18 @@ class TestBoardAndCockpitPagesSSR(ISMTestCase):
 		self.assertIn("/assets/ism/board/board.css?v=", cockpit_html)
 		self.assertIn("/assets/ism/cockpit/cockpit.css?v=", cockpit_html)
 		self.assertIn("/assets/ism/cockpit/cockpit.js?v=", cockpit_html)
+		self.assertIn("Action Queue", cockpit_html)
+		self.assertIn("Internal Time (T)", cockpit_html)
+		for forbidden in (
+			"SHOP:INTAKE",
+			"SHOP:AP_RECEIVING",
+			"SHOP:DISPATCH",
+			"+ Intake",
+			"+ New Intake",
+			"Receive / Vendor Bill",
+			"Shop Channels",
+		):
+			self.assertNotIn(forbidden, cockpit_html)
 
 	def test_board_and_cockpit_public_assets_exist_and_non_empty(self) -> None:
 		ism_root = Path(frappe.get_app_path("ism"))

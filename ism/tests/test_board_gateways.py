@@ -1,8 +1,11 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+"""Active-RO Shop Board REST API, RBAC, Action Feed, Agent Context, Delta, Media & PIN tests."""
+
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import sys
@@ -10,36 +13,28 @@ import types
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.utils import add_days, now_datetime, today
+from frappe.utils import now_datetime
 from werkzeug.datastructures import FileStorage, ImmutableMultiDict
 
 from ism.api import board as board_api
-from ism.api.agent_serializers import build_ro_urls
-from ism.board.contracts import MANAGER_GATED_ACTIONS, ro_thread_key
-from ism.board.gateways import (
-	ACOUSTIC_CLARITY_CONFIDENCE_CAP,
-	assert_can_commit_approval_gate,
-	dispatch_orchestrator_decision,
-	resolve_actor_role,
-	resolve_card_action,
-	undo_receipt_action,
-)
-from ism.board.projections import ensure_singleton_shop_threads, ensure_thread_for_ro
+from ism.api.agent_common import build_ro_urls
+from ism.board.contracts import BoardContractError, ro_thread_key
+from ism.board.gateways import dispatch_board_ai_result
+from ism.board.projections import ensure_thread_for_ro
 from ism.tests.base import ISMTestCase
 
 
 def _make_png_bytes() -> bytes:
-	# Minimal valid 1x1 PNG binary header + IHDR/IDAT/IEND chunks
 	return (
 		b"\x89PNG\r\n\x1a\n"
 		b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
-		b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N"
+		b"\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01\xf6\x178U"
 		b"\x00\x00\x00\x00IEND\xaeB`\x82"
 	)
 
 
 class TestBoardGateways(ISMTestCase):
-	"""Comprehensive tests for Wave 2A gateways, REST endpoints, RBAC, idempotency, and Seams 2/3/5/6."""
+	"""Comprehensive tests for Active-RO Board gateways, REST APIs, RBAC, and Seams."""
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -51,34 +46,29 @@ class TestBoardGateways(ISMTestCase):
 				{
 					"doctype": "User",
 					"email": email,
-					"first_name": email.split("@")[0].title(),
+					"first_name": email.split("@")[0],
 					"enabled": 1,
+					"user_type": "System User",
 					"send_welcome_email": 0,
 					"roles": [{"role": r} for r in roles],
 				}
 			).insert(ignore_permissions=True)
 			self.track(user)
-		else:
-			user = frappe.get_doc("User", email)
-			user.set("roles", [{"role": r} for r in roles])
-			user.save(ignore_permissions=True)
 		return email
 
 	def _create_ro(self, *, approved: bool = False, with_service: bool = True, **ro_kwargs):
 		customer = self.create_test_customer()
-		customer.db_set("mobile_no", "+14165550199", update_modified=False)
-		customer.db_set("email_id", "customer@example.com", update_modified=False)
 		vehicle = self.create_test_vehicle(
 			customer=customer.name,
 			model_year=2023,
 			model="Model 3",
 			manufacturer="Tesla",
 		)
-		if with_service and "services" not in ro_kwargs:
-			ro_kwargs["services"] = [
+		services = (
+			[
 				{
-					"service_title": "Front Brake Inspection",
-					"status": "Approved" if approved else "Estimating",
+					"service_title": "Brake Inspection",
+					"status": "Approved" if approved else "Pending Approval",
 					"labor_hours": 1.0,
 					"labor_rate": 150.0,
 					"labor_amount": 150.0,
@@ -86,10 +76,17 @@ class TestBoardGateways(ISMTestCase):
 					"total_amount": 150.0,
 				}
 			]
-		if approved:
-			ro_kwargs.setdefault("status", "Authorized - In Progress")
-			ro_kwargs.setdefault("approval_status", "Approved")
-		ro = self.create_test_repair_order(customer.name, vehicle.name, **ro_kwargs)
+			if with_service
+			else []
+		)
+		ro = self.create_test_repair_order(
+			customer.name,
+			vehicle.name,
+			status=ro_kwargs.pop("status", "Authorized - In Progress" if approved else "Draft Estimate"),
+			approval_status=ro_kwargs.pop("approval_status", "Approved" if approved else "Not Sent"),
+			services=services,
+			**ro_kwargs,
+		)
 		return ro, customer, vehicle
 
 	def _insert_capture_event(self, thread_key: str, text: str = "Tech capture") -> object:
@@ -107,742 +104,240 @@ class TestBoardGateways(ISMTestCase):
 		).insert(ignore_permissions=True)
 		return self.track(ev)
 
-	def _create_supplier(self, name_suffix: str) -> str:
-		sup_name = f"TEST_SUP_{name_suffix}_{frappe.generate_hash(length=5)}"
-		if not frappe.db.exists("Supplier", sup_name):
-			sup = frappe.get_doc(
-				{
-					"doctype": "Supplier",
-					"supplier_name": sup_name,
-					"supplier_group": "All Supplier Groups",
-					"supplier_type": "Company",
-				}
-			).insert(ignore_permissions=True)
-			self.track(sup)
-			return sup.name
-		return sup_name
-
-	def test_rbac_actor_roles_and_technician_rejections_on_every_gate_and_cockpit(self):
-		tech_email = self._create_user_with_roles("board_tech_test@example.com", ["ISM Technician"])
-		advisor_email = self._create_user_with_roles("board_advisor_test@example.com", ["ISM Service Advisor"])
-		mgr_email = self._create_user_with_roles("board_mgr_test@example.com", ["ISM Manager"])
-		nobody_email = self._create_user_with_roles("board_nobody_test@example.com", ["Guest"])
-
-		with self.assertRaises(frappe.PermissionError):
-			resolve_actor_role("Guest")
-		with self.assertRaises(frappe.PermissionError):
-			resolve_actor_role(nobody_email)
-
-		self.assertEqual(resolve_actor_role(tech_email), "TECH")
-		self.assertEqual(resolve_actor_role(advisor_email), "MANAGER")
-		self.assertEqual(resolve_actor_role(mgr_email), "MANAGER")
-		self.assertEqual(resolve_actor_role("Administrator"), "MANAGER")
-
-		with self.assertRaises(frappe.PermissionError):
-			assert_can_commit_approval_gate(tech_email)
-		self.assertEqual(assert_can_commit_approval_gate(advisor_email), "MANAGER")
-		self.assertEqual(assert_can_commit_approval_gate(mgr_email), "MANAGER")
-
-		# Create one APPROVAL_GATE per every single MANAGER_GATED_ACTION and verify tech is rejected
-		ro, _, _ = self._create_ro(approved=True)
-		tkey = ensure_thread_for_ro(ro.name)
-		source = self._insert_capture_event(tkey, "Trigger gates")
-
-		gate_events: list[str] = []
-		for action_name in MANAGER_GATED_ACTIONS:
-			out = dispatch_orchestrator_decision(
-				source,
-				{
-					"intent": action_name.lower(),
-					"confidence": 0.96,
-					"summary": f"Gate for {action_name}",
-					"action": action_name,
-					"action_payload": {"repair_order": ro.name, "amount": 100.0},
-				},
-			)
-			self.assertEqual(out["outcome"], "APPROVAL_GATE")
-			self.assertEqual(len(out["gates"]), 1)
-			gate_events.append(out["gates"][0])
-			self.track("Shop Board Event", out["gates"][0])
-
-		# Technician must get frappe.PermissionError on EVERY approval gate and every Manager-only API
-		frappe.set_user(tech_email)
-		for gate_ev in gate_events:
-			with self.assertRaises(frappe.PermissionError):
-				board_api.resolve_board_card(gate_ev, "approve")
-			with self.assertRaises(frappe.PermissionError):
-				board_api.resolve_board_card(gate_ev, "reject")
-
-		with self.assertRaises(frappe.PermissionError):
-			board_api.get_cockpit_dashboard()
-		with self.assertRaises(frappe.PermissionError):
-			board_api.sync_cockpit_action("board:test", "dismiss")
-		with self.assertRaises(frappe.PermissionError):
-			board_api.price_part(tesla_oem_price=100.0, cost=40.0)
-		with self.assertRaises(frappe.PermissionError):
-			board_api.test_media_storage()
-
-		# Service Advisor can access cockpit and price_part, but NOT test_media_storage (Manager/SysMgr only)
-		frappe.set_user(advisor_email)
-		priced = board_api.price_part(tesla_oem_price=100.0, cost=40.0)
-		self.assertTrue(priced["ok"])
-		self.assertEqual(priced["sell_price"], 70.0)
-		with self.assertRaises(frappe.PermissionError):
-			board_api.test_media_storage()
-
-		frappe.set_user("Administrator")
-
-	def test_acoustic_clarity_floor_confidence_gating_and_clarification_reenqueue(self):
-		ro, _, _ = self._create_ro(approved=True)
-		tkey = ensure_thread_for_ro(ro.name)
-		source = self._insert_capture_event(tkey, "muffled audio control arm")
-
-		# 1. Noisy audio (< 0.75) caps effective confidence <= 0.70 even when raw confidence is 0.96
-		out = dispatch_orchestrator_decision(
-			source,
-			{
-				"intent": "note",
-				"confidence": 0.96,
-				"audio_clarity_score": 0.60,
-				"transcript": "control arm bushing torn",
-				"action": "LOG_RO_NOTE",
-				"action_payload": {"repair_order": ro.name, "note": "Should not auto-write"},
-			},
-		)
-		self.assertEqual(out["outcome"], "CLARIFICATION_CARD")
-		self.assertTrue(out["acoustic_clarity_capped"])
-		self.assertLessEqual(out["effective_confidence"], ACOUSTIC_CLARITY_CONFIDENCE_CAP)
-		ro.reload()
-		self.assertFalse(ro.override_notes)  # Zero ERP mutation!
-		clar_ev_name = out["cards"][0]
-		self.track("Shop Board Event", clar_ev_name)
-
-		# 2. Missing mandatory field (side) with high confidence emits CLARIFICATION_CARD
-		out_missing = dispatch_orchestrator_decision(
-			source,
-			{
-				"intent": "supplement",
-				"confidence": 0.95,
-				"action": "ADD_SUPPLEMENT_DRAFT",
-				"action_payload": {"repair_order": ro.name, "service_title": "Control Arm Replacement"},
-				"missing_fields": ["side"],
-				"clarification": {
-					"prompt": "Which side control arm?",
-					"options": ["Front Left", "Front Right", "Both"],
-					"target_role": "TECH",
-				},
-			},
-		)
-		self.assertEqual(out_missing["outcome"], "CLARIFICATION_CARD")
-		clar_side = out_missing["cards"][0]
-		self.track("Shop Board Event", clar_side)
-
-		# 3. UPDATE_JOB_STATUS(complete) without odometer_out degrades cleanly to CLARIFICATION_CARD
-		out_odo = dispatch_orchestrator_decision(
-			source,
-			{
-				"intent": "complete_job",
-				"confidence": 0.95,
-				"action": "UPDATE_JOB_STATUS",
-				"action_payload": {"repair_order": ro.name, "action": "complete"},
-			},
-		)
-		self.assertEqual(out_odo["outcome"], "CLARIFICATION_CARD")
-		odo_card = frappe.get_doc("Shop Board Event", out_odo["cards"][0])
-		self.track(odo_card)
-		odo_schema = json.loads(odo_card.card_schema)
-		self.assertEqual(odo_schema.get("input_field"), "odometer_out")
-
-		# 4. Resolve clarification card -> marks RESOLVED, appends CARD_RESOLUTION, re-enqueues orchestrator
-		fake_orch = types.ModuleType("ism.board.orchestrator")
-		mock_enqueue = MagicMock(return_value={"queued": True})
-		fake_orch.enqueue_board_event = mock_enqueue
-		with patch.dict(sys.modules, {"ism.board.orchestrator": fake_orch}):
-			res1 = resolve_card_action(
-				clar_side,
-				"clarify",
-				selected_option="Front Left",
-				form_patch={"side": "Front Left"},
-				idempotency_key="clar-side-1",
-			)
-			self.assertFalse(res1["already_resolved"])
-			self.assertEqual(res1["resolution_state"], "RESOLVED")
-			self.assertTrue(res1["re_enqueued"]["enqueued"])
-			mock_enqueue.assert_called_once()
-			args, kwargs = mock_enqueue.call_args
-			self.assertEqual(args[0], source.name)
-			self.assertEqual(kwargs["clarification_patch"]["side"], "Front Left")
-
-			# Double-tap returns already_resolved=True with zero duplicate re-enqueue
-			res2 = resolve_card_action(clar_side, "clarify", selected_option="Front Right")
-			self.assertTrue(res2["already_resolved"])
-			self.assertEqual(mock_enqueue.call_count, 1)
-
-	def test_autonomous_actions_seam5_self_echo_and_compensating_undos(self):
-		ro, _, vehicle = self._create_ro(approved=True)
-		tkey = ensure_thread_for_ro(ro.name)
-		source = self._insert_capture_event(tkey, "Autonomous actions test")
-		part_item = self.create_test_item(
-			f"TEST-CA-{frappe.generate_hash(length=5)}", is_stock_item=1, standard_rate=80.0
-		)
-		supplier_name = self._create_supplier("AUTO")
-
-		# 1. LOG_RO_NOTE + Undo
-		r_note = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.95,
-				"action": "LOG_RO_NOTE",
-				"action_payload": {"repair_order": ro.name, "note": "Subframe bolts slightly corroded"},
-			},
-		)
-		self.assertEqual(r_note["outcome"], "EXECUTED")
-		ro.reload()
-		self.assertIn("Subframe bolts slightly corroded", ro.override_notes or "")
-		u_note = undo_receipt_action(r_note["receipts"][0], reason="Wrong RO")
-		self.assertFalse(u_note["already_undone"])
-		ro.reload()
-		self.assertEqual(ro.override_notes or "", "")
-		# Double-tap undo is idempotent
-		u_note_2 = undo_receipt_action(r_note["receipts"][0])
-		self.assertTrue(u_note_2["already_undone"])
-
-		# 2. ATTACH_INSPECTION_MEDIA + Undo
-		r_insp = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.94,
-				"action": "ATTACH_INSPECTION_MEDIA",
-				"action_payload": {
-					"repair_order": ro.name,
-					"item_name": "Front Control Arm Bushings",
-					"status": "Attention",
-					"notes": "Torn bushing observed",
-				},
-			},
-		)
-		self.assertEqual(r_insp["outcome"], "EXECUTED")
-		ro.reload()
-		self.assertEqual(len(ro.get("inspection_items") or []), 1)
-		undo_receipt_action(r_insp["receipts"][0])
-		ro.reload()
-		self.assertEqual(len(ro.get("inspection_items") or []), 0)
-
-		# 3. ADD_SUPPLEMENT_DRAFT (with internal pricing & symmetrical opposite-side duplication) + Undo
-		r_supp = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.96,
-				"action": "ADD_SUPPLEMENT_DRAFT",
-				"action_payload": {
-					"repair_order": ro.name,
-					"service_title": "Front Upper Control Arm Replacement (LH)",
-					"labor_hours": 1.5,
-					"side": "both",
-					"parts": [
-						{
-							"item_code": part_item.name,
-							"qty": 1,
-							"tesla_oem_price": 200.0,
-							"cost": 80.0,
-						}
-					],
-				},
-			},
-		)
-		self.assertEqual(r_supp["outcome"], "EXECUTED")
-		ro.reload()
-		# Original 1 approved service + 2 supplement rows (LH + RH)
-		self.assertEqual(len(ro.services), 3)
-		supp_parts = json.loads(ro.services[1].parts)
-		# Tesla OEM $200 * (1 - 30%) = $140 CAD internal pricing rule applied
-		self.assertEqual(float(supp_parts[0]["rate"]), 140.0)
-		undo_receipt_action(r_supp["receipts"][0])
-		ro.reload()
-		self.assertEqual(len(ro.services), 1)
-
-		# 4. SET_PARTS_HOLD (Seam 5: dedup_key="board:parts_hold:<ro>" suppresses self-echo) + CLEAR_PARTS_HOLD + Undo
-		before_state_mut_count = frappe.db.count(
-			"Shop Board Event", {"thread": tkey, "payload_type": "STATE_MUTATION"}
-		)
-		r_hold = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.95,
-				"action": "SET_PARTS_HOLD",
-				"action_payload": {"repair_order": ro.name, "reason": "Waiting on control arm delivery"},
-			},
-		)
-		self.assertEqual(r_hold["outcome"], "EXECUTED")
-		ro.reload()
-		self.assertEqual(int(ro.manual_parts_hold), 1)
-		sai_name = r_hold["results"][0]["result"]["action_item"]
-		self.track("Shop Action Item", sai_name)
-		self.assertEqual(
-			frappe.db.get_value("Shop Action Item", sai_name, "dedup_key"),
-			f"board:parts_hold:{ro.name}",
-		)
-		# Seam 5: verify NO self-echo STATE_MUTATION card was created on the thread!
-		after_state_mut_count = frappe.db.count(
-			"Shop Board Event", {"thread": tkey, "payload_type": "STATE_MUTATION"}
-		)
-		self.assertEqual(after_state_mut_count, before_state_mut_count)
-
-		r_clear = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.95,
-				"action": "CLEAR_PARTS_HOLD",
-				"action_payload": {"repair_order": ro.name},
-			},
-		)
-		ro.reload()
-		self.assertEqual(int(ro.manual_parts_hold), 0)
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_name, "status"), "Resolved")
-		undo_receipt_action(r_clear["receipts"][0])
-		ro.reload()
-		self.assertEqual(int(ro.manual_parts_hold), 1)
-		self.assertEqual(frappe.db.get_value("Shop Action Item", sai_name, "status"), "Open")
-		undo_receipt_action(r_hold["receipts"][0])
-		ro.reload()
-		self.assertEqual(int(ro.manual_parts_hold), 0)
-
-		# 5. TOGGLE_SERVICE_COMPLETION + Undo
-		svc_row_name = ro.services[0].name
-		r_toggle = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.96,
-				"action": "TOGGLE_SERVICE_COMPLETION",
-				"action_payload": {
-					"repair_order": ro.name,
-					"service_row_id": svc_row_name,
-					"is_completed": True,
-				},
-			},
-		)
-		ro.reload()
-		self.assertEqual(int(ro.services[0].is_completed), 1)
-		undo_receipt_action(r_toggle["receipts"][0])
-		ro.reload()
-		self.assertEqual(int(ro.services[0].is_completed), 0)
-
-		# 6. UPDATE_JOB_STATUS + Undo (and verify authorization lock on unapproved RO)
-		r_status = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.96,
-				"action": "UPDATE_JOB_STATUS",
-				"action_payload": {"repair_order": ro.name, "action": "complete", "odometer_out": 10250},
-			},
-		)
-		ro.reload()
-		self.assertEqual(ro.status, "Work Completed")
-		self.assertEqual(int(ro.odometer_out), 10250)
-		undo_receipt_action(r_status["receipts"][0])
-		ro.reload()
-		self.assertEqual(ro.status, "Authorized - In Progress")
-
-		unapproved_ro, _, _ = self._create_ro(approved=False)
-		unapproved_tkey = ensure_thread_for_ro(unapproved_ro.name)
-		unapproved_src = self._insert_capture_event(unapproved_tkey, "Start unapproved")
-		with self.assertRaises(frappe.ValidationError):
-			dispatch_orchestrator_decision(
-				unapproved_src,
-				{
-					"confidence": 0.95,
-					"action": "UPDATE_JOB_STATUS",
-					"action_payload": {"repair_order": unapproved_ro.name, "action": "start"},
-				},
-			)
-
-		# 7. ADD_DEFERRED_SERVICES + Undo
-		veh_doc = frappe.get_doc("Repair Vehicle", vehicle.name)
-		veh_doc.append(
-			"deferred_services",
-			{
-				"job_title": "Cabin Air Filter Replacement",
-				"estimated_cost": 120.0,
-				"status": "Open Recommendation",
-			},
-		)
-		veh_doc.save(ignore_permissions=True)
-		r_def = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.95,
-				"action": "ADD_DEFERRED_SERVICES",
-				"action_payload": {"repair_order": ro.name},
-			},
-		)
-		self.assertEqual(r_def["outcome"], "EXECUTED")
-		ro.reload()
-		self.assertGreaterEqual(len(ro.services), 2)
-		undo_receipt_action(r_def["receipts"][0])
-		ro.reload()
-		self.assertEqual(len(ro.services), 1)
-
-		# 8. DRAFT_PURCHASE_ORDER -> creates Draft PO + auto-spawns Manager SUBMIT_PO gate + Undo
-		r_po = dispatch_orchestrator_decision(
-			source,
-			{
-				"confidence": 0.96,
-				"action": "DRAFT_PURCHASE_ORDER",
-				"action_payload": {
-					"repair_order": ro.name,
-					"parts_data": [
-						{
-							"item_code": part_item.name,
-							"supplier": supplier_name,
-							"qty": 1,
-							"rate": 80.0,
-							"order_mode": "Purchase Order",
-						}
-					],
-				},
-			},
-		)
-		self.assertEqual(r_po["outcome"], "EXECUTED")
-		created_pos = r_po["results"][0]["result"]["data"]["purchase_orders"]
-		self.assertEqual(len(created_pos), 1)
-		po_name = created_pos[0]
-		self.track("Purchase Order", po_name)
-		self.assertEqual(int(frappe.db.get_value("Purchase Order", po_name, "docstatus")), 0)
-		self.assertEqual(len(r_po["gates"]), 1)
-		submit_gate = frappe.get_doc("Shop Board Event", r_po["gates"][0])
-		self.assertEqual(json.loads(submit_gate.card_schema)["action_type"], "SUBMIT_PO")
-
-		# Undo deletes Draft PO cleanly
-		undo_receipt_action(r_po["receipts"][0])
-		self.assertFalse(frappe.db.exists("Purchase Order", po_name))
-
-	def test_manager_gates_seam2_sms_seam3_billing_and_double_tap_idempotency(self):
-		# A. AMEND_QUOTE + SEND_QUOTE_APPROVAL on a Draft Estimate RO
-		draft_ro, _, _ = self._create_ro(approved=False)
-		draft_tkey = ensure_thread_for_ro(draft_ro.name)
-		draft_src = self._insert_capture_event(draft_tkey, "Amend & send quote")
-
-		g_amend = dispatch_orchestrator_decision(
-			draft_src,
-			{
-				"confidence": 0.95,
-				"action": "AMEND_QUOTE",
-				"action_payload": {
-					"repair_order": draft_ro.name,
-					"add_services": [{"service_title": "Brake Fluid Flush", "labor_hours": 0.5}],
-				},
-			},
-		)
-		res_amend = resolve_card_action(g_amend["gates"][0], "approve", idempotency_key="amend-1")
-		self.assertFalse(res_amend["already_resolved"])
-		draft_ro.reload()
-		self.assertEqual(len(draft_ro.services), 2)
-		# Double-tap returns already_resolved=True without adding a 3rd service
-		res_amend_dup = resolve_card_action(g_amend["gates"][0], "approve", idempotency_key="amend-2")
-		self.assertTrue(res_amend_dup["already_resolved"])
-		draft_ro.reload()
-		self.assertEqual(len(draft_ro.services), 2)
-
-		g_send = dispatch_orchestrator_decision(
-			draft_src,
-			{
-				"confidence": 0.95,
-				"action": "SEND_QUOTE_APPROVAL",
-				"action_payload": {"repair_order": draft_ro.name, "communication_medium": "link"},
-			},
-		)
-		res_send = resolve_card_action(g_send["gates"][0], "approve")
-		self.assertTrue(res_send["execution_result"]["success"])
-		self.assertTrue(res_send["execution_result"]["data"]["approval_url"])
-
-		# B. Seam 2: DISPATCH_CUSTOMER_SMS (success + opt-out propagation + provider error) & EMAIL
-		g_sms_ok = dispatch_orchestrator_decision(
-			draft_src,
-			{
-				"confidence": 0.95,
-				"action": "DISPATCH_CUSTOMER_SMS",
-				"action_payload": {
-					"repair_order": draft_ro.name,
-					"phone_number": "+14165550199",
-					"finding_summary": "Brake inspection complete.",
-				},
-			},
-		)
-		with patch(
-			"ism.api.sms.dispatch_sms",
-			return_value={"success": True, "message_id": "msg-ok-1", "error": None},
-		) as mock_sms:
-			res_sms = resolve_card_action(
-				g_sms_ok["gates"][0],
-				"approve",
-				edited_message="Hi, your Tesla brake inspection is ready for review.",
-			)
-			mock_sms.assert_called_once_with(
-				"+14165550199", "Hi, your Tesla brake inspection is ready for review."
-			)
-			self.assertEqual(res_sms["execution_result"]["delivery_status"], "SENT")
-			self.assertEqual(res_sms["execution_result"]["message_id"], "msg-ok-1")
-
-		g_sms_optout = dispatch_orchestrator_decision(
-			draft_src,
-			{
-				"confidence": 0.95,
-				"action": "DISPATCH_CUSTOMER_SMS",
-				"action_payload": {
-					"repair_order": draft_ro.name,
-					"phone_number": "+14165550199",
-					"finding_summary": "Followup",
-				},
-			},
-		)
-		with patch(
-			"ism.api.sms.dispatch_sms",
-			return_value={"success": False, "message_id": None, "error": "Recipient opted out via STOP"},
+	def _track_ro_board_artifacts(self, ro_name: str) -> None:
+		tkey = ro_thread_key(ro_name)
+		for sai_name in frappe.get_all(
+			"Shop Action Item",
+			filters={"reference_doctype": "Repair Order", "reference_name": ro_name},
+			pluck="name",
 		):
-			res_opt = resolve_card_action(g_sms_optout["gates"][0], "approve")
-			self.assertFalse(res_opt["execution_result"]["success"])
-			self.assertTrue(res_opt["execution_result"]["opted_out"])
-			self.assertEqual(res_opt["execution_result"]["delivery_status"], "OPTED_OUT")
+			self.track("Shop Action Item", sai_name)
+		for ev_name in frappe.get_all("Shop Board Event", filters={"thread": tkey}, pluck="name"):
+			self.track("Shop Board Event", ev_name)
 
-		g_email = dispatch_orchestrator_decision(
-			draft_src,
-			{
-				"confidence": 0.95,
-				"action": "DISPATCH_CUSTOMER_EMAIL",
-				"action_payload": {
-					"repair_order": draft_ro.name,
-					"recipient": "customer@example.com",
-					"subject": "Service Update",
-				},
-			},
-		)
-		with patch("frappe.sendmail") as mock_mail:
-			res_mail = resolve_card_action(g_email["gates"][0], "approve", edited_message="Your vehicle is ready.")
-			mock_mail.assert_called_once()
-			self.assertEqual(res_mail["execution_result"]["delivery_status"], "SENT")
-
-		# C. Seam 3: RECORD_DEPOSIT & CHECKOUT_REPAIR_ORDER writing canonical ERPNext Payment Entry + Sales Invoice
-		ro_bill, _, _ = self._create_ro(approved=True)
-		ro_bill.db_set("odometer_out", 10500, update_modified=False)
-		bill_tkey = ensure_thread_for_ro(ro_bill.name)
-		bill_src = self._insert_capture_event(bill_tkey, "Deposit and checkout")
-
-		g_dep = dispatch_orchestrator_decision(
-			bill_src,
-			{
-				"confidence": 0.96,
-				"action": "RECORD_DEPOSIT",
-				"action_payload": {"repair_order": ro_bill.name, "amount": 50.0},
-			},
-		)
-		res_dep = resolve_card_action(g_dep["gates"][0], "approve", selected_option="Debit / Interac")
-		dep_data = res_dep["execution_result"]["data"]
-		if dep_data.get("payment_entry"):
-			self.track("Payment Entry", dep_data["payment_entry"])
-		self.assertAlmostEqual(float(dep_data["deposit_amount"]), 50.0, places=2)
-
-		g_chk = dispatch_orchestrator_decision(
-			bill_src,
-			{
-				"confidence": 0.96,
-				"action": "CHECKOUT_REPAIR_ORDER",
-				"action_payload": {"repair_order": ro_bill.name, "odometer_out": 10500},
-			},
-		)
-		res_chk = resolve_card_action(
-			g_chk["gates"][0],
-			"approve",
-			selected_option="Credit Card",
-			form_patch={"odometer_out": 10525},
-		)
-		chk_data = res_chk["execution_result"]["data"]
-		self.assertTrue(chk_data["sales_invoice"])
-		self.track("Sales Invoice", chk_data["sales_invoice"])
-		if chk_data.get("payment_entry"):
-			self.track("Payment Entry", chk_data["payment_entry"])
-		ro_bill.reload()
-		self.assertEqual(ro_bill.status, "Closed / Released")
-		self.assertEqual(int(ro_bill.odometer_out), 10525)
-
-		# D. RESCHEDULE_APPOINTMENT with candidate slot & optional sanitized ETA SMS
-		target_day = add_days(today(), 2)
-		se = self.create_test_schedule_entry(
-			repair_order=draft_ro.name,
-			scheduled_date=target_day,
-			scheduled_time="09:00:00",
-			estimated_duration=60,
-		)
-		new_day = add_days(today(), 3)
-		g_resched = dispatch_orchestrator_decision(
-			draft_src,
-			{
-				"confidence": 0.95,
-				"action": "RESCHEDULE_APPOINTMENT",
-				"action_payload": {
-					"repair_order": draft_ro.name,
-					"schedule_entry": se.name,
-					"candidate_slots": [{"scheduled_date": new_day, "start_time": "10:00"}],
-					"send_customer_sms": True,
-				},
-			},
-		)
-		with patch(
-			"ism.api.sms.dispatch_sms",
-			return_value={"success": True, "message_id": "eta-1", "error": None},
-		) as mock_eta_sms:
-			res_rs = resolve_card_action(
-				g_resched["gates"][0],
-				"approve",
-				selected_option="0",
-				form_patch={"send_customer_sms": True},
+	def test_removed_endpoints_and_modules_absent(self):
+		for removed_endpoint in ("resolve_board_card", "undo_board_receipt", "price_part"):
+			self.assertFalse(
+				hasattr(board_api, removed_endpoint),
+				f"Removed endpoint {removed_endpoint} must not exist on ism.api.board",
 			)
-			self.assertTrue(res_rs["execution_result"]["success"])
-			mock_eta_sms.assert_called_once()
-		se.reload()
-		self.assertEqual(str(se.scheduled_date), str(new_day))
+		for removed_mod in ("ism.board.comms_firewall", "ism.board.pricing"):
+			with self.assertRaises(ModuleNotFoundError):
+				importlib.import_module(removed_mod)
 
-	def test_phase2_intake_and_ap_receiving_gates(self):
-		ensure_singleton_shop_threads()
+	def test_list_board_threads_active_ro_only_and_capture_guards(self):
+		ro_open, _, _ = self._create_ro(approved=True, status="Authorized - In Progress")
+		ro_closed, _, _ = self._create_ro(approved=True, status="Closed / Released")
+		ro_cancelled, _, _ = self._create_ro(approved=True, status="Cancelled")
+		ro_billed, _, _ = self._create_ro(approved=True, status="Billed / Paid")
 
-		# 1. SHOP:INTAKE -> INTAKE_QUOTE_AND_BOOK -> creates RO + Schedule Entry + RO:<id> thread
-		intake_src = self._insert_capture_event("SHOP:INTAKE", "Book Model Y brake check")
-		intake_cust = self.create_test_customer()
-		intake_veh = self.create_test_vehicle(customer=intake_cust.name, model="Model Y")
-		book_day = add_days(today(), 4)
+		tkey_open = ensure_thread_for_ro(ro_open.name)
+		tkey_closed = ensure_thread_for_ro(ro_closed.name)
+		tkey_cancelled = ensure_thread_for_ro(ro_cancelled.name)
+		tkey_billed = ensure_thread_for_ro(ro_billed.name)
 
-		g_intake = dispatch_orchestrator_decision(
-			intake_src,
+		# Default status='OPEN' excludes CLOSED threads
+		open_res = board_api.list_board_threads()
+		self.assertTrue(open_res["ok"])
+		open_keys = {t["thread_key"] for t in open_res["threads"]}
+		self.assertIn(tkey_open, open_keys)
+		self.assertNotIn(tkey_closed, open_keys)
+		self.assertNotIn(tkey_cancelled, open_keys)
+		for t in open_res["threads"]:
+			self.assertEqual(t["thread_type"], "REPAIR_ORDER")
+
+		# status='CLOSED' returns closed threads
+		closed_res = board_api.list_board_threads(status="CLOSED")
+		closed_keys = {t["thread_key"] for t in closed_res["threads"]}
+		self.assertIn(tkey_closed, closed_keys)
+		self.assertNotIn(tkey_open, closed_keys)
+
+		# status='ALL' includes both
+		all_res = board_api.list_board_threads(status="ALL")
+		all_keys = {t["thread_key"] for t in all_res["threads"]}
+		self.assertIn(tkey_open, all_keys)
+		self.assertIn(tkey_closed, all_keys)
+
+		# Create an ACTION_CARD on ro_open -> status='NEEDS_ACTION' returns it
+		src = self._insert_capture_event(tkey_open, "Need supplement for front left bushing")
+		dispatch_board_ai_result(
+			src,
 			{
-				"confidence": 0.95,
-				"action": "INTAKE_QUOTE_AND_BOOK",
-				"action_payload": {
-					"customer": intake_cust.name,
-					"vehicle": intake_veh.name,
-					"odometer_in": 45000,
-					"services": [{"service_title": "Brake Service", "labor_hours": 1.0}],
-					"candidate_slots": [{"scheduled_date": book_day, "start_time": "11:00"}],
-				},
+				"transcript": "",
+				"summary": "Front left bushing supplement",
+				"followup_question": None,
+				"action_items": [
+					{
+						"title": "Add front left bushing supplement",
+						"details": "Cracked bushing on front left control arm.",
+						"category": "Quote / Supplement",
+						"priority": "High",
+						"suggested_action": "ADD_SUPPLEMENT",
+						"clearing_condition_type": "ro_has_supplement_or_service",
+					}
+				],
 			},
 		)
-		res_intake = resolve_card_action(g_intake["gates"][0], "approve", selected_option="0")
-		exec_in = res_intake["execution_result"]
-		created_ro = exec_in["repair_order"]
-		self.assertTrue(created_ro)
-		self.track("Repair Order", created_ro)
-		self.assertEqual(exec_in["ro_thread_key"], ro_thread_key(created_ro))
-		self.assertTrue(frappe.db.exists("Shop Board Thread", exec_in["ro_thread_key"]))
-		self.assertIn("/board?thread=", exec_in["board_url"])
-		if exec_in.get("booking") and (exec_in["booking"].get("data") or {}).get("name"):
-			self.track("Schedule Entry", exec_in["booking"]["data"]["name"])
+		self._track_ro_board_artifacts(ro_open.name)
+		needs_res = board_api.list_board_threads(status="NEEDS_ACTION")
+		self.assertIn(tkey_open, {t["thread_key"] for t in needs_res["threads"]})
 
-		# 2. SHOP:INTAKE -> CONVERT_APPOINTMENT_TO_RO (requires odometer_in)
-		provisional_se = self.create_test_schedule_entry(
-			scheduled_date=add_days(today(), 5),
-			scheduled_time="13:00:00",
-			estimated_duration=60,
-			provisional_customer_name=intake_cust.name,
-			provisional_vehicle_info=intake_veh.vin,
-		)
-		g_conv = dispatch_orchestrator_decision(
-			intake_src,
-			{
-				"confidence": 0.95,
-				"action": "CONVERT_APPOINTMENT_TO_RO",
-				"action_payload": {"schedule_entry": provisional_se.name},
-			},
-		)
-		# Missing odometer_in raises ValidationError and keeps card PENDING
+		# post_board_capture rejects legacy singleton keys
+		with self.assertRaises((BoardContractError, frappe.ValidationError)):
+			board_api.post_board_capture(thread_key="SHOP:INTAKE", text="Should fail", metadata={"skip_ai": True})
+
+		# post_board_capture rejects Closed / Released & Cancelled ROs
 		with self.assertRaises(frappe.ValidationError):
-			resolve_card_action(g_conv["gates"][0], "approve")
+			board_api.post_board_capture(
+				thread_key=tkey_closed,
+				text="Cannot post on closed RO",
+				metadata={"skip_ai": True},
+			)
+		with self.assertRaises(frappe.ValidationError):
+			board_api.post_board_capture(
+				thread_key=tkey_cancelled,
+				text="Cannot post on cancelled RO",
+				metadata={"skip_ai": True},
+			)
+
+		# Billed / Paid ROs still allow post_board_capture (vehicle not yet released)
+		billed_cap = board_api.post_board_capture(
+			thread_key=tkey_billed,
+			text="Final wipe-down before customer pickup",
+			metadata={"skip_ai": True},
+		)
+		self.assertTrue(billed_cap["ok"])
+		self.track("Shop Board Event", billed_cap["event"]["name"])
+
+		# get_board_thread exposes can_post=False on closed RO and can_post=True on open/billed RO
+		closed_view = board_api.get_board_thread(thread_key=tkey_closed)
+		self.assertFalse(closed_view["can_post"])
+		self.assertTrue(bool(closed_view.get("read_only_reason")))
+		open_view = board_api.get_board_thread(thread_key=tkey_open)
+		self.assertTrue(open_view["can_post"])
+
+	def test_action_feed_update_card_rbac_and_agent_context_bundle(self):
+		tech_email = self._create_user_with_roles("board_gw_tech@example.test", ["ISM Technician"])
+		mgr_email = self._create_user_with_roles("board_gw_mgr@example.test", ["ISM Manager"])
+
+		ro, _, _ = self._create_ro(approved=True, status="Authorized - In Progress")
+		tkey = ensure_thread_for_ro(ro.name)
+
+		# Post capture with PNG attachment so get_action_cards_context can surface media proxy URLs
+		png_bytes = _make_png_bytes()
+		fake_file = FileStorage(stream=io.BytesIO(png_bytes), filename="crack.png", content_type="image/png")
+		fake_req = types.SimpleNamespace(files=ImmutableMultiDict([("files", fake_file)]), headers={})
+		with patch.object(frappe, "request", fake_req, create=True):
+			cap_res = board_api.post_board_capture(
+				repair_order=ro.name,
+				text="Front left bushing cracked and need to notify customer",
+				metadata={"skip_ai": True},
+			)
+		src_name = cap_res["event"]["name"]
+		self.track("Shop Board Event", src_name)
+		src_doc = frappe.get_doc("Shop Board Event", src_name)
+		src_doc.db_set("transcript", "Front left bushing cracked and notify customer", update_modified=False)
+		src_doc.reload()
+
+		dispatch_res = dispatch_board_ai_result(
+			src_doc,
+			{
+				"transcript": "Front left bushing cracked and notify customer",
+				"summary": "Supplement + customer update",
+				"followup_question": None,
+				"action_items": [
+					{
+						"title": "Add front left control arm supplement",
+						"details": "Bushing cracked on front left.",
+						"category": "Quote / Supplement",
+						"priority": "High",
+						"suggested_action": "ADD_SUPPLEMENT",
+						"clearing_condition_type": "ro_has_supplement_or_service",
+					},
+					{
+						"title": "Send customer ETA update",
+						"details": "Let customer know about extra hour.",
+						"category": "Customer Comms",
+						"priority": "Medium",
+						"suggested_action": "NOTIFY_CUSTOMER",
+						"clearing_condition_type": "ro_sms_or_email_sent",
+					},
+				],
+			},
+		)
+		self._track_ro_board_artifacts(ro.name)
+		act_ids = dispatch_res["action_items"]
+		self.assertEqual(len(act_ids), 2)
+		act1, act2 = act_ids[0], act_ids[1]
+
+		# 1. list_board_action_feed returns active RO open cards enriched with clearing_condition + thread_key/board_url
+		feed = board_api.list_board_action_feed(status="Open", repair_order=ro.name)
+		self.assertTrue(feed["ok"])
+		feed_by_id = {it["name"]: it for it in feed["items"]}
+		self.assertIn(act1, feed_by_id)
+		self.assertIn(act2, feed_by_id)
+		self.assertEqual(feed_by_id[act1]["thread_key"], tkey)
+		self.assertIn(ro.name, feed_by_id[act1]["board_url"])
+		self.assertEqual(feed_by_id[act1]["clearing_condition_type"], "ro_has_supplement_or_service")
+		self.assertIsInstance(feed_by_id[act1]["clearing_condition"], dict)
+
+		# 2. RBAC: ISM Technician blocked from update_board_action_card and get_action_cards_context
+		frappe.set_user(tech_email)
+		with self.assertRaises(frappe.PermissionError):
+			board_api.update_board_action_card(act1, "dismiss", notes="Tech should not dismiss")
+		with self.assertRaises(frappe.PermissionError):
+			board_api.get_action_cards_context(action_items=[act1])
+
+		# 3. Manager/Advisor get_action_cards_context: single card, multi-card, and by repair_order
+		frappe.set_user(mgr_email)
+		ctx_single = board_api.get_action_cards_context(action_items=act1)
+		self.assertTrue(ctx_single["ok"])
+		self.assertEqual(ctx_single["count"], 1)
+		item1 = ctx_single["items"][0]
+		self.assertEqual(item1["name"], act1)
+		self.assertEqual(item1["clearing_condition_type"], "ro_has_supplement_or_service")
+		self.assertIsInstance(item1["clearing_condition"], dict)
+		self.assertIn("Front left bushing cracked", item1["board_event"]["transcript"] or "")
+		self.assertGreaterEqual(len(item1["board_event"]["media_attachments"]), 1)
+		self.assertIn("ism.api.board.get_media", item1["board_event"]["media_attachments"][0]["url"])
+
+		ro_bundle = ctx_single["threads_by_ro"][ro.name]
+		self.assertEqual(ro_bundle["repair_order"]["name"], ro.name)
+		self.assertGreaterEqual(len(ro_bundle["services"]), 1)
+		self.assertGreaterEqual(len(ro_bundle["recent_messages"]), 1)
+
+		ctx_multi = board_api.get_action_cards_context(action_items=[act1, act2])
+		self.assertEqual(ctx_multi["count"], 2)
+
+		ctx_by_ro = board_api.get_action_cards_context(repair_order=ro.name, status="Open")
+		self.assertEqual(ctx_by_ro["count"], 2)
+
+		# 4. Manager dismiss / reopen / resolve on update_board_action_card (silent, ZERO confirmation pill)
+		state_mut_before = frappe.db.count(
+			"Shop Board Event", {"thread": tkey, "payload_type": "STATE_MUTATION"}
+		)
+		dismiss_res = board_api.update_board_action_card(act2, "dismiss", notes="Not needed")
+		self.assertTrue(dismiss_res["ok"])
+		card2_name = frappe.db.get_value(
+			"Shop Board Event", {"payload_type": "ACTION_CARD", "action_item": act2}, "name"
+		)
+		self.assertEqual(frappe.db.get_value("Shop Board Event", card2_name, "resolution_state"), "REJECTED")
 		self.assertEqual(
-			frappe.db.get_value("Shop Board Event", g_conv["gates"][0], "resolution_state"),
-			"PENDING",
+			frappe.db.count("Shop Board Event", {"thread": tkey, "payload_type": "STATE_MUTATION"}),
+			state_mut_before,
 		)
-		res_conv = resolve_card_action(
-			g_conv["gates"][0], "approve", form_patch={"odometer_in": 42100}
-		)
-		conv_ro = res_conv["execution_result"]["repair_order"]
-		self.assertTrue(conv_ro)
-		self.track("Repair Order", conv_ro)
-		self.assertTrue(frappe.db.exists("Shop Board Thread", ro_thread_key(conv_ro)))
 
-		# 3. SHOP:AP_RECEIVING -> SUBMIT_PO -> RECEIVE_PO -> POST_PURCHASE_INVOICE -> PAY_PURCHASE
-		ap_src = self._insert_capture_event("SHOP:AP_RECEIVING", "Vendor box & bill arrived")
-		ap_item = self.create_test_item(
-			f"TEST-AP-{frappe.generate_hash(length=5)}", is_stock_item=1, standard_rate=90.0
-		)
-		ap_supplier = self._create_supplier("APREC")
+		reopen_res = board_api.update_board_action_card(act2, "reopen")
+		self.assertTrue(reopen_res["ok"])
+		self.assertEqual(frappe.db.get_value("Shop Board Event", card2_name, "resolution_state"), "PENDING")
 
-		g_sub_po = dispatch_orchestrator_decision(
-			ap_src,
-			{
-				"confidence": 0.96,
-				"action": "SUBMIT_PO",
-				"action_payload": {
-					"parts_data": [
-						{
-							"item_code": ap_item.name,
-							"supplier": ap_supplier,
-							"qty": 2,
-							"rate": 45.0,
-							"order_mode": "Purchase Order",
-						}
-					]
-				},
-			},
+		resolve_res = board_api.update_board_action_card(act2, "resolve", notes="Handled manually")
+		self.assertTrue(resolve_res["ok"])
+		self.assertEqual(frappe.db.get_value("Shop Board Event", card2_name, "resolution_state"), "RESOLVED")
+		self.assertEqual(
+			frappe.db.count("Shop Board Event", {"thread": tkey, "payload_type": "STATE_MUTATION"}),
+			state_mut_before,
 		)
-		res_sub_po = resolve_card_action(g_sub_po["gates"][0], "approve")
-		po_name = res_sub_po["execution_result"]["data"]["purchase_orders"][0]
-		self.track("Purchase Order", po_name)
-		self.assertEqual(int(frappe.db.get_value("Purchase Order", po_name, "docstatus")), 1)
-
-		g_rec = dispatch_orchestrator_decision(
-			ap_src,
-			{
-				"confidence": 0.96,
-				"action": "RECEIVE_PO",
-				"action_payload": {"purchase_order": po_name},
-			},
-		)
-		res_rec = resolve_card_action(g_rec["gates"][0], "approve")
-		pr_name = res_rec["execution_result"]["data"]["purchase_receipt"]
-		self.assertTrue(pr_name)
-		self.track("Purchase Receipt", pr_name)
-
-		g_pi = dispatch_orchestrator_decision(
-			ap_src,
-			{
-				"confidence": 0.96,
-				"action": "POST_PURCHASE_INVOICE",
-				"action_payload": {
-					"purchase_order": po_name,
-					"bill_no": f"INV-{frappe.generate_hash(length=5)}",
-					"bill_date": today(),
-					"update_stock": False,
-				},
-			},
-		)
-		res_pi = resolve_card_action(g_pi["gates"][0], "approve")
-		pi_name = res_pi["execution_result"]["purchase_invoice_result"]["data"]["purchase_invoice"]
-		self.assertTrue(pi_name)
-		self.track("Purchase Invoice", pi_name)
-
-		g_pay = dispatch_orchestrator_decision(
-			ap_src,
-			{
-				"confidence": 0.96,
-				"action": "PAY_PURCHASE",
-				"action_payload": {
-					"purchase_invoice": pi_name,
-					"reference_no": "CHQ-1001",
-					"reference_date": today(),
-				},
-			},
-		)
-		res_pay = resolve_card_action(g_pay["gates"][0], "approve", selected_option="E-Transfer")
-		pe_name = res_pay["execution_result"]["data"]["payment_entry"]
-		self.assertTrue(pe_name)
-		self.track("Payment Entry", pe_name)
 
 	def test_rest_api_endpoints_media_proxy_urls_and_seam6_pin_vault(self):
 		ro, _, _ = self._create_ro(approved=True)
@@ -870,7 +365,7 @@ class TestBoardGateways(ISMTestCase):
 			cap1 = board_api.post_board_capture(
 				repair_order=ro.name,
 				text="Front bushing torn",
-				intent_tag="finding",
+				intent_tag="Supplement",
 				metadata={"skip_ai": True},
 				idempotency_key="cap-idem-1",
 			)
@@ -901,17 +396,7 @@ class TestBoardGateways(ISMTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			board_api.get_media(ev_name, "m_invalid_idor_ref")
 
-		# 4. list_board_threads, get_board_thread, get_thread_delta
-		listed = board_api.list_board_threads(query=ro.name)
-		self.assertTrue(listed["ok"])
-		self.assertTrue(any(t["thread_key"] == tkey for t in listed["threads"]))
-
-		thread_view = board_api.get_board_thread(repair_order=ro.name)
-		self.assertTrue(thread_view["ok"])
-		self.assertEqual(thread_view["thread"]["thread_key"], tkey)
-		self.assertEqual(thread_view["repair_order_summary"]["name"], ro.name)
-
-		# Seam 6 when P4 is absent
+		# 4. Seam 6 PIN reveal on active RO (absent & present)
 		with patch.dict(sys.modules, {"ism.portal.pin_vault": None}):
 			absent_view = board_api.get_board_thread(repair_order=ro.name)
 			self.assertEqual(
@@ -927,7 +412,6 @@ class TestBoardGateways(ISMTestCase):
 			self.assertFalse(absent_reveal["available"])
 			self.assertFalse(absent_reveal["pin_feature_installed"])
 
-		# Seam 6 when P4 is present (mocked ism.portal.pin_vault)
 		fake_portal = types.ModuleType("ism.portal")
 		fake_vault = types.ModuleType("ism.portal.pin_vault")
 		fake_vault.get_ro_pin_state = MagicMock(
@@ -937,7 +421,7 @@ class TestBoardGateways(ISMTestCase):
 				"status": "Provided",
 				"has_pin": True,
 				"can_reveal": True,
-				"pin": "9999",  # Must be stripped by get_board_thread!
+				"pin": "9999",
 			}
 		)
 		fake_vault.get_ro_pin_for_staff = MagicMock(
@@ -948,14 +432,9 @@ class TestBoardGateways(ISMTestCase):
 				"auto_mask_seconds": 15,
 			}
 		)
-		with patch.dict(
-			sys.modules,
-			{"ism.portal": fake_portal, "ism.portal.pin_vault": fake_vault},
-		):
+		with patch.dict(sys.modules, {"ism.portal": fake_portal, "ism.portal.pin_vault": fake_vault}):
 			present_view = board_api.get_board_thread(repair_order=ro.name)
 			self.assertTrue(present_view["pin_state"]["pin_feature_installed"])
-			self.assertEqual(present_view["pin_state"]["status"], "Provided")
-			self.assertTrue(present_view["pin_state"]["has_pin"])
 			self.assertTrue(present_view["pin_state"]["can_reveal"])
 			self.assertNotIn("pin", present_view["pin_state"])
 
@@ -971,514 +450,88 @@ class TestBoardGateways(ISMTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				board_api.reveal_ro_pin(ro.name)
 
-		frappe.set_user("Administrator")
-
-		# 5. get_thread_delta
-		delta = board_api.get_thread_delta(
-			thread_key=tkey,
-			after_event=ev_name,
-			known_projection_version=thread_view["thread"]["projection_version"],
-		)
-		self.assertTrue(delta["ok"])
-		self.assertFalse(delta["changed"])
-		self.assertEqual(delta["events"], [])
-
-		# 6. get_cockpit_dashboard & sync_cockpit_action (Manager ONLY)
-		cockpit_res = board_api.get_cockpit_dashboard()
-		self.assertTrue(cockpit_res["ok"])
-		self.assertIn("gauges", cockpit_res)
-		self.assertIn("action_queue", cockpit_res)
-
-		sync_res = board_api.sync_cockpit_action("board:test-rule", "snooze", snooze_minutes=30, notes="Testing")
-		self.assertTrue(sync_res["ok"])
-		if (sync_res.get("data") or {}).get("name"):
-			self.track("Shop Action Item", sync_res["data"]["name"])
-
-	def test_followup_actions_chain_and_gate_rejection(self):
-		ro, _, _ = self._create_ro(approved=True)
+	def test_get_thread_delta_returns_updated_cards_on_auto_clear_dismiss_and_transcript(self):
+		ro, _, _ = self._create_ro(approved=True, status="Authorized - In Progress")
 		tkey = ensure_thread_for_ro(ro.name)
-		source = self._insert_capture_event(tkey, "Front left control arm torn")
-		part_item = self.create_test_item(
-			f"TEST-FU-{frappe.generate_hash(length=5)}", is_stock_item=1, standard_rate=75.0
-		)
-		supplier_name = self._create_supplier("FUP")
+		src = self._insert_capture_event(tkey, "Voice capture pending transcript")
 
-		out = dispatch_orchestrator_decision(
-			source,
+		res = dispatch_board_ai_result(
+			src,
 			{
-				"intent": "supplement",
-				"confidence": 0.96,
-				"summary": "Add FL Control Arm supplement, draft PO, and stage customer SMS",
-				"action": "ADD_SUPPLEMENT_DRAFT",
-				"action_payload": {
-					"repair_order": ro.name,
-					"service_title": "Front Left Control Arm Replacement",
-					"labor_hours": 1.5,
-					"parts": [{"item_code": part_item.name, "qty": 1, "cost": 75.0}],
-				},
-				"followup_actions": [
+				"transcript": "",
+				"summary": "Two cards for delta test",
+				"followup_question": None,
+				"action_items": [
 					{
-						"action": "DRAFT_PURCHASE_ORDER",
-						"action_payload": {
-							"repair_order": ro.name,
-							"parts_data": [
-								{
-									"item_code": part_item.name,
-									"supplier": supplier_name,
-									"qty": 1,
-									"rate": 75.0,
-									"order_mode": "Purchase Order",
-								}
-							],
-						},
+						"title": "Add rear caliper supplement",
+						"details": "Rear caliper seized.",
+						"category": "Quote / Supplement",
+						"priority": "High",
+						"suggested_action": "ADD_SUPPLEMENT",
+						"clearing_condition_type": "ro_has_supplement_or_service",
 					},
 					{
-						"action": "DISPATCH_CUSTOMER_SMS",
-						"action_payload": {
-							"repair_order": ro.name,
-							"finding_summary": "Front left control arm bushing is worn and recommended for replacement.",
-						},
+						"title": "Check customer callback",
+						"details": "Optional manual follow-up.",
+						"category": "Customer Comms",
+						"priority": "Low",
+						"suggested_action": "MANUAL_REVIEW",
+						"clearing_condition_type": "manual",
 					},
 				],
 			},
 		)
-		self.assertEqual(out["outcome"], "EXECUTED")
-		# 2 autonomous receipts (ADD_SUPPLEMENT_DRAFT + DRAFT_PURCHASE_ORDER)
-		self.assertEqual(len(out["receipts"]), 2)
-		# 2 manager gates (auto-spawned SUBMIT_PO + followup DISPATCH_CUSTOMER_SMS)
-		self.assertEqual(len(out["gates"]), 2)
-		gate_types = [
-			json.loads(frappe.db.get_value("Shop Board Event", g, "card_schema"))["action_type"]
-			for g in out["gates"]
-		]
-		self.assertEqual(gate_types, ["SUBMIT_PO", "DISPATCH_CUSTOMER_SMS"])
+		self._track_ro_board_artifacts(ro.name)
+		act_auto, act_dismiss = res["action_items"][0], res["action_items"][1]
+		card_auto = frappe.db.get_value(
+			"Shop Board Event", {"payload_type": "ACTION_CARD", "action_item": act_auto}, "name"
+		)
+		card_dismiss = frappe.db.get_value(
+			"Shop Board Event", {"payload_type": "ACTION_CARD", "action_item": act_dismiss}, "name"
+		)
 
-		po_name = out["results"][1]["result"]["data"]["purchase_orders"][0]
-		self.track("Purchase Order", po_name)
-		self.assertEqual(int(frappe.db.get_value("Purchase Order", po_name, "docstatus")), 0)
+		ver_before = frappe.db.get_value("Shop Board Thread", tkey, "projection_version") or 1
+		after_event = card_dismiss
 
-		# Reject SUBMIT_PO gate -> zero submission, idempotent on second tap
-		rej1 = resolve_card_action(out["gates"][0], "reject", notes="Use stock instead")
-		self.assertFalse(rej1["already_resolved"])
-		self.assertEqual(rej1["resolution_state"], "REJECTED")
-		self.assertEqual(int(frappe.db.get_value("Purchase Order", po_name, "docstatus")), 0)
-		rej2 = resolve_card_action(out["gates"][0], "reject")
-		self.assertTrue(rej2["already_resolved"])
-
-	def test_real_non_admin_tech_and_manager_end_to_end_and_slot_normalization(self):
-		ensure_singleton_shop_threads()
-		tech_email = self._create_user_with_roles("real_tech_e2e@example.com", ["ISM Technician"])
-		mgr_email = self._create_user_with_roles("real_mgr_e2e@example.com", ["ISM Manager"])
-		advisor_email = self._create_user_with_roles("real_advisor_e2e@example.com", ["ISM Service Advisor"])
-
-		# Enable Mock AI auto-processing in ISM Settings
-		settings = frappe.get_single("ISM Settings")
-		orig_provider = getattr(settings, "board_ai_provider", None)
-		orig_auto = getattr(settings, "board_ai_auto_process", None)
-		settings.board_ai_provider = "Mock (Deterministic Test)"
-		settings.board_ai_auto_process = 1
-		settings.flags.ignore_permissions = True
-		settings.save()
-		frappe.clear_cache(doctype="ISM Settings")
-
-		try:
-			ro, _cust, _veh = self._create_ro(approved=True)
-			ro.db_set("odometer_out", 12000, update_modified=False)
-			tkey = ensure_thread_for_ro(ro.name)
-
-			# 1. Real ISM Technician: post_board_capture (sync Mock) + clarification resolve + undo + strict gate denial
-			frappe.set_user(tech_email)
-			cap_fyi = board_api.post_board_capture(
-				repair_order=ro.name,
-				text="FYI inspected brake lines, all dry.",
-				intent_tag="FYI",
-			)
-			self.assertTrue(cap_fyi["ok"])
-			self.assertEqual(cap_fyi["event"]["actor_user"], tech_email)
-			self.assertEqual(cap_fyi["event"]["ai_status"], "COMPLETED")
-			self.track("Shop Board Event", cap_fyi["event"]["name"])
-
-			# Find autonomous AI_RECEIPT and undo as real ISM Technician
-			receipts = frappe.get_all(
-				"Shop Board Event",
-				filters={"parent_event": cap_fyi["event"]["name"], "payload_type": "AI_RECEIPT"},
-				pluck="name",
-			)
-			self.assertTrue(receipts)
-			undo_res = board_api.undo_board_receipt(receipts[0], reason="Typo")
-			self.assertTrue(undo_res["ok"])
-			self.assertEqual(
-				frappe.db.get_value("Shop Board Event", receipts[0], "resolved_by"),
-				tech_email,
-			)
-
-			# Ambiguous finding capture by real ISM Technician -> CLARIFICATION_CARD -> Tech clarifies -> COMPLETED
-			cap_ambig = board_api.post_board_capture(
-				repair_order=ro.name,
-				text="Found a control arm bushing torn on front suspension.",
-				intent_tag="Parts",
-			)
-			self.assertTrue(cap_ambig["ok"])
-			self.assertEqual(cap_ambig["event"]["ai_status"], "COMPLETED")
-			self.track("Shop Board Event", cap_ambig["event"]["name"])
-			clar_cards = frappe.get_all(
-				"Shop Board Event",
-				filters={"parent_event": cap_ambig["event"]["name"], "payload_type": "CLARIFICATION_CARD"},
-				pluck="name",
-			)
-			self.assertEqual(len(clar_cards), 1)
-			clar_res = board_api.resolve_board_card(clar_cards[0], "clarify", selected_option="Front Left")
-			self.assertTrue(clar_res["ok"])
-			self.assertEqual(clar_res["resolution_state"], "RESOLVED")
-			self.assertEqual(
-				frappe.db.get_value("Shop Board Event", clar_cards[0], "resolved_by"),
-				tech_email,
-			)
-			self.assertEqual(clar_res["re_enqueued"].get("ai_status"), "COMPLETED")
-
-			# Tech MUST still be rejected on newly generated APPROVAL_GATEs and Manager endpoints
-			gates = frappe.get_all(
-				"Shop Board Event",
-				filters={"parent_event": cap_ambig["event"]["name"], "payload_type": "APPROVAL_GATE"},
-				pluck="name",
-			)
-			self.assertGreaterEqual(len(gates), 1)
-			for g in gates:
-				with self.assertRaises(frappe.PermissionError):
-					board_api.resolve_board_card(g, "approve")
-			with self.assertRaises(frappe.PermissionError):
-				board_api.get_cockpit_dashboard()
-			with self.assertRaises(frappe.PermissionError):
-				board_api.sync_cockpit_action("board:tech-deny", "dismiss")
-			with self.assertRaises(frappe.PermissionError):
-				board_api.price_part(tesla_oem_price=120.0, cost=50.0)
-			with self.assertRaises(frappe.PermissionError):
-				board_api.test_media_storage()
-
-			# 2. Real ISM Manager: INTAKE_QUOTE_AND_BOOK with find_available_slots "date" + "available_bay_ids",
-			#    omitted odometer_in, requested_services alias, AND provisional fallback without VIN
-			frappe.set_user("Administrator")
-			bay = self.create_test_service_bay() if hasattr(self, "create_test_service_bay") else None
-			intake_cust = self.create_test_customer()
-			intake_veh = self.create_test_vehicle(customer=intake_cust.name, model="Model Y")
-			intake_src = self._insert_capture_event("SHOP:INTAKE", "Book Model Y intake")
-			slot_day = add_days(today(), 6)
-			raw_slot = {"date": slot_day, "start_time": "10:00"}
-			if bay:
-				raw_slot["available_bay_ids"] = [bay.name]
-
-			g_intake = dispatch_orchestrator_decision(
-				intake_src,
-				{
-					"confidence": 0.96,
-					"action": "INTAKE_QUOTE_AND_BOOK",
-					"action_payload": {
-						"customer": intake_cust.name,
-						"customer_name": intake_cust.customer_name,
-						"vin": intake_veh.vin,
-						"requested_services": ["Annual Brake Inspection"],
-						"candidate_slots": [raw_slot],
-					},
-				},
-			)
-			# Approve as REAL non-Admin ISM Manager (NOT Administrator)
-			frappe.set_user(mgr_email)
-			res_in = board_api.resolve_board_card(g_intake["gates"][0], "approve", selected_option="0")
-			self.assertTrue(res_in["ok"])
-			self.assertEqual(
-				frappe.db.get_value("Shop Board Event", g_intake["gates"][0], "resolved_by"),
-				mgr_email,
-			)
-			exec_in = res_in["execution_result"]
-			self.assertTrue(exec_in["repair_order"])
-			self.track("Repair Order", exec_in["repair_order"])
-			self.assertIsNotNone(exec_in["booking"])
-			self.assertEqual(exec_in["chosen_slot"]["scheduled_date"], slot_day)
-			if exec_in["booking"] and (exec_in["booking"].get("data") or {}).get("name"):
-				self.track("Schedule Entry", exec_in["booking"]["data"]["name"])
-
-			# Provisional intake booking when VIN / vehicle is absent
-			frappe.set_user("Administrator")
-			g_prov = dispatch_orchestrator_decision(
-				intake_src,
-				{
-					"confidence": 0.95,
-					"action": "INTAKE_QUOTE_AND_BOOK",
-					"action_payload": {
-						"customer_name": "Provisional Walk-In",
-						"requested_services": ["Diagnostic Check"],
-						"candidate_slots": [{"date": add_days(today(), 7), "start_time": "14:00"}],
-					},
-				},
-			)
-			frappe.set_user(advisor_email)
-			res_prov = board_api.resolve_board_card(g_prov["gates"][0], "approve", selected_option="0")
-			self.assertTrue(res_prov["ok"])
-			self.assertIsNone(res_prov["execution_result"]["repair_order"])
-			self.assertIsNotNone(res_prov["execution_result"]["booking"])
-			self.assertEqual(
-				frappe.db.get_value("Shop Board Event", g_prov["gates"][0], "resolved_by"),
-				advisor_email,
-			)
-			if (res_prov["execution_result"]["booking"].get("data") or {}).get("name"):
-				self.track("Schedule Entry", res_prov["execution_result"]["booking"]["data"]["name"])
-
-			# 3. Real ISM Manager: RESCHEDULE_APPOINTMENT (with "date" slot key), RECORD_DEPOSIT, CHECKOUT_REPAIR_ORDER,
-			#    SUBMIT_PO, RECEIVE_PO, POST_PURCHASE_INVOICE (with "items"), PAY_PURCHASE (with "amount")
-			frappe.set_user("Administrator")
-			ro_bill, _, _ = self._create_ro(approved=True)
-			ro_bill.db_set("odometer_out", 12000, update_modified=False)
-			bill_tkey = ensure_thread_for_ro(ro_bill.name)
-			se = self.create_test_schedule_entry(
-				repair_order=ro_bill.name,
-				scheduled_date=add_days(today(), 2),
-				scheduled_time="09:00:00",
-				estimated_duration=60,
-			)
-			src_ro = self._insert_capture_event(bill_tkey, "Manager gates non-admin")
-			new_resched_day = add_days(today(), 8)
-			g_rs = dispatch_orchestrator_decision(
-				src_ro,
-				{
-					"confidence": 0.96,
-					"action": "RESCHEDULE_APPOINTMENT",
-					"action_payload": {
-						"repair_order": ro_bill.name,
-						"schedule_entry": se.name,
-						"candidate_slots": [{"date": new_resched_day, "start_time": "11:00"}],
-					},
-				},
-			)
-			g_dep = dispatch_orchestrator_decision(
-				src_ro,
-				{
-					"confidence": 0.96,
-					"action": "RECORD_DEPOSIT",
-					"action_payload": {"repair_order": ro_bill.name, "amount": 25.0},
-				},
-			)
-			g_chk = dispatch_orchestrator_decision(
-				src_ro,
-				{
-					"confidence": 0.96,
-					"action": "CHECKOUT_REPAIR_ORDER",
-					"action_payload": {"repair_order": ro_bill.name, "odometer_out": 12050},
-				},
-			)
-			ap_item = self.create_test_item(
-				f"TEST-MGR-AP-{frappe.generate_hash(length=5)}", is_stock_item=1, standard_rate=60.0
-			)
-			ap_sup = self._create_supplier("MGRAP")
-			ap_src = self._insert_capture_event("SHOP:AP_RECEIVING", "Manager AP non-admin")
-			g_po = dispatch_orchestrator_decision(
-				ap_src,
-				{
-					"confidence": 0.96,
-					"action": "SUBMIT_PO",
-					"action_payload": {
-						"items": [
-							{
-								"item_code": ap_item.name,
-								"supplier": ap_sup,
-								"qty": 1,
-								"rate": 60.0,
-								"order_mode": "Purchase Order",
-							}
-						]
-					},
-				},
-			)
-
-			frappe.set_user(mgr_email)
-			r_rs = board_api.resolve_board_card(g_rs["gates"][0], "approve", selected_option="0")
-			self.assertTrue(r_rs["ok"])
-			se.reload()
-			self.assertEqual(str(se.scheduled_date), str(new_resched_day))
-
-			r_dep = board_api.resolve_board_card(g_dep["gates"][0], "approve", selected_option="Debit / Interac")
-			self.assertTrue(r_dep["ok"])
-			if (r_dep["execution_result"].get("data") or {}).get("payment_entry"):
-				self.track("Payment Entry", r_dep["execution_result"]["data"]["payment_entry"])
-
-			r_chk = board_api.resolve_board_card(g_chk["gates"][0], "approve", selected_option="Credit Card")
-			self.assertTrue(r_chk["ok"])
-			chk_data = r_chk["execution_result"]["data"]
-			if chk_data.get("sales_invoice"):
-				self.track("Sales Invoice", chk_data["sales_invoice"])
-			if chk_data.get("payment_entry"):
-				self.track("Payment Entry", chk_data["payment_entry"])
-
-			r_po = board_api.resolve_board_card(g_po["gates"][0], "approve")
-			self.assertTrue(r_po["ok"])
-			po_name = r_po["execution_result"]["data"]["purchase_orders"][0]
-			self.track("Purchase Order", po_name)
-
-			g_rec = dispatch_orchestrator_decision(
-				ap_src,
-				{"confidence": 0.96, "action": "RECEIVE_PO", "action_payload": {"purchase_order": po_name}},
-			)
-			r_rec = board_api.resolve_board_card(g_rec["gates"][0], "approve")
-			self.assertTrue(r_rec["ok"])
-			self.track("Purchase Receipt", r_rec["execution_result"]["data"]["purchase_receipt"])
-
-			g_pi = dispatch_orchestrator_decision(
-				ap_src,
-				{
-					"confidence": 0.96,
-					"action": "POST_PURCHASE_INVOICE",
-					"action_payload": {
-						"purchase_order": po_name,
-						"bill_no": f"MGR-INV-{frappe.generate_hash(length=5)}",
-						"bill_date": today(),
-						"update_stock": False,
-					},
-				},
-			)
-			r_pi = board_api.resolve_board_card(g_pi["gates"][0], "approve")
-			self.assertTrue(r_pi["ok"])
-			pi_name = r_pi["execution_result"]["purchase_invoice_result"]["data"]["purchase_invoice"]
-			self.track("Purchase Invoice", pi_name)
-
-			g_pay = dispatch_orchestrator_decision(
-				ap_src,
-				{
-					"confidence": 0.96,
-					"action": "PAY_PURCHASE",
-					"action_payload": {
-						"purchase_invoice": pi_name,
-						"amount": 60.0,
-						"reference_no": "MGR-CHQ-1",
-						"reference_date": today(),
-					},
-				},
-			)
-			r_pay = board_api.resolve_board_card(g_pay["gates"][0], "approve", selected_option="E-Transfer")
-			self.assertTrue(r_pay["ok"])
-			self.track("Payment Entry", r_pay["execution_result"]["data"]["payment_entry"])
-			self.assertEqual(
-				frappe.db.get_value("Shop Board Event", g_pay["gates"][0], "resolved_by"),
-				mgr_email,
-			)
-
-			# Cockpit dashboard accessible for real non-Admin Manager
-			cockpit = board_api.get_cockpit_dashboard()
-			self.assertTrue(cockpit["ok"])
-		finally:
-			frappe.set_user("Administrator")
-			settings = frappe.get_single("ISM Settings")
-			settings.board_ai_provider = orig_provider
-			settings.board_ai_auto_process = orig_auto
-			settings.flags.ignore_permissions = True
-			settings.save()
-			frappe.clear_cache(doctype="ISM Settings")
-
-	def test_get_thread_delta_returns_updated_cards_on_resolve_reject_and_undo(self):
-		"""get_thread_delta must return mutated parent cards in updated_cards for live DOM transitions."""
-		ro, _, _ = self._create_ro(approved=False, with_service=True)
-		thread_key = f"RO:{ro.name}"
-		src = self._insert_capture_event(thread_key, "Inspection and quote update capture")
-
-		# 1. Autonomous action -> AI_RECEIPT
-		receipt_res = dispatch_orchestrator_decision(
-			src,
+		# 1. Auto-clear card_auto by adding a service row to the RO
+		ro.reload()
+		ro.append(
+			"services",
 			{
-				"confidence": 0.96,
-				"audio_clarity_score": 0.97,
-				"action": "LOG_RO_NOTE",
-				"action_payload": {
-					"repair_order": ro.name,
-					"note": "Front left control arm bushing cracked",
-				},
+				"service_title": "Rear Caliper Replacement",
+				"status": "Pending Approval",
+				"labor_hours": 1.0,
+				"labor_rate": 150.0,
+				"labor_amount": 150.0,
+				"parts_total": 0.0,
+				"total_amount": 150.0,
 			},
 		)
-		receipt_name = receipt_res["receipts"][0]
+		ro.save(ignore_permissions=True)
 
-		# 2. Clarification card -> CLARIFICATION_CARD
-		clar_res = dispatch_orchestrator_decision(
-			src,
-			{
-				"confidence": 0.72,
-				"audio_clarity_score": 0.95,
-				"action": "LOG_RO_NOTE",
-				"action_payload": {"repair_order": ro.name, "note": "Control arm play"},
-				"missing_fields": ["position"],
-				"clarification": {
-					"prompt": "Which corner?",
-					"input_field": "position",
-					"options": ["Front Left", "Front Right"],
-				},
-			},
-		)
-		clar_name = clar_res["cards"][0]
+		# 2. Dismiss card_dismiss manually
+		board_api.update_board_action_card(act_dismiss, "dismiss", notes="Handled")
 
-		# 3. Approval gate -> APPROVAL_GATE
-		gate_res = dispatch_orchestrator_decision(
-			src,
-			{
-				"confidence": 0.96,
-				"audio_clarity_score": 0.97,
-				"action": "AMEND_QUOTE",
-				"action_payload": {
-					"repair_order": ro.name,
-					"services": [{"description": "Alignment Check", "rate": 120.0, "qty": 1}],
-				},
-			},
-		)
-		gate_name = gate_res["gates"][0]
-
-		ver_before = frappe.db.get_value("Shop Board Thread", thread_key, "projection_version") or 1
-		after_event = gate_name
-
-		# Mutate all three cards: undo receipt, resolve clarification, reject gate
-		undo_res = board_api.undo_board_receipt(receipt_name, reason="Wrong corner logged")
-		self.assertTrue(undo_res["ok"])
-		self.assertEqual(undo_res["resolution_state"], "UNDONE")
-
-		resolve_res = board_api.resolve_board_card(
-			clar_name,
-			"approve",
-			selected_option="Front Left",
-		)
-		self.assertTrue(resolve_res["ok"])
-		self.assertEqual(resolve_res["resolution_state"], "RESOLVED")
-
-		reject_res = board_api.resolve_board_card(
-			gate_name,
-			"reject",
-			notes="Not needed",
-		)
-		self.assertTrue(reject_res["ok"])
-		self.assertEqual(reject_res["resolution_state"], "REJECTED")
+		# 3. Complete transcript on capture event
+		src.reload()
+		src.ai_status = "COMPLETED"
+		src.transcript = "Rear caliper is seized, need supplement"
+		src.save(ignore_permissions=True)
 
 		delta = board_api.get_thread_delta(
-			thread_key=thread_key,
+			thread_key=tkey,
 			after_event=after_event,
 			known_projection_version=ver_before,
 		)
 		self.assertTrue(delta["ok"])
 		self.assertTrue(delta["changed"])
-		self.assertIn("updated_cards", delta)
-
 		updated_by_name = {c["name"]: c for c in delta["updated_cards"]}
-		self.assertIn(receipt_name, updated_by_name)
-		self.assertIn(clar_name, updated_by_name)
-		self.assertIn(gate_name, updated_by_name)
 
-		self.assertEqual(updated_by_name[receipt_name]["resolution_state"], "UNDONE")
-		self.assertTrue(updated_by_name[receipt_name]["resolved_by"])
-		self.assertTrue(updated_by_name[receipt_name]["resolved_at"])
-		self.assertIsNotNone(updated_by_name[receipt_name]["resolution_payload"])
+		self.assertIn(card_auto, updated_by_name)
+		self.assertEqual(updated_by_name[card_auto]["resolution_state"], "RESOLVED")
 
-		self.assertEqual(updated_by_name[clar_name]["resolution_state"], "RESOLVED")
-		self.assertTrue(updated_by_name[clar_name]["resolved_by"])
-		self.assertTrue(updated_by_name[clar_name]["resolved_at"])
-		self.assertIsNotNone(updated_by_name[clar_name]["resolution_payload"])
+		self.assertIn(card_dismiss, updated_by_name)
+		self.assertEqual(updated_by_name[card_dismiss]["resolution_state"], "REJECTED")
 
-		self.assertEqual(updated_by_name[gate_name]["resolution_state"], "REJECTED")
-		self.assertTrue(updated_by_name[gate_name]["resolved_by"])
-		self.assertTrue(updated_by_name[gate_name]["resolved_at"])
-		self.assertIsNotNone(updated_by_name[gate_name]["resolution_payload"])
-
-		open_names = {c["name"] for c in delta["open_cards"]}
-		self.assertNotIn(clar_name, open_names)
-		self.assertNotIn(gate_name, open_names)
+		self.assertIn(src.name, updated_by_name)
+		self.assertEqual(updated_by_name[src.name]["transcript"], "Rear caliper is seized, need supplement")
