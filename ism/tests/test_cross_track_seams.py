@@ -13,17 +13,17 @@ from unittest.mock import patch
 
 import frappe
 from frappe.auth import CookieManager
-from frappe.utils import add_days, flt, getdate, now_datetime, nowdate
+from frappe.utils import add_days, flt, getdate, nowdate
 from werkzeug.test import EnvironBuilder
 from werkzeug.wrappers import Request
 
+import ism.api.agent_quotes as agent_quotes_api
 import ism.api.board as board_api
 import ism.api.booking as booking_api
 import ism.api.portal as portal_api
+from ism.api.sms import dispatch_sms
 from ism.board.cockpit_view import get_cockpit_view
-from ism.board.comms_firewall import resolve_customer_arrival_time
-from ism.board.gateways import dispatch_orchestrator_decision
-from ism.board.projections import ensure_singleton_shop_threads, ensure_thread_for_ro
+from ism.board.projections import ensure_thread_for_ro
 from ism.booking.anti_abuse import clear_booking_rate_limits, issue_booking_form_nonce
 from ism.comms.contracts import DEFAULT_PORTAL_COOKIE_NAME
 from ism.comms.otp import clear_comms_rate_limits, get_last_mock_otp
@@ -34,6 +34,7 @@ from ism.payments.deposit_requests import create_deposit_request
 from ism.payments.square_client import MockSquareClient
 from ism.portal.auth import clear_portal_auth_rate_limits
 from ism.portal.contracts import PIN_STATUS_PROVIDED
+from ism.scheduling.arrival_policy import to_customer_arrival_time
 from ism.scheduling.time_utils import invalidate_shop_settings_cache
 from ism.setup_tasks.seed import ensure_square_bank_account_and_mop, setup_default_ism_settings
 from ism.tests.base import ISMTestCase
@@ -70,6 +71,7 @@ class TestCrossTrackSeams(ISMTestCase):
 		"square_application_id",
 		"square_location_id",
 		"board_ai_provider",
+		"board_ai_model",
 		"board_ai_auto_process",
 		"self_serve_horizon_days",
 		"self_serve_min_lead_time_minutes",
@@ -119,7 +121,6 @@ class TestCrossTrackSeams(ISMTestCase):
 			}
 		)
 		ensure_square_bank_account_and_mop()
-		ensure_singleton_shop_threads()
 		clear_mock_sms_outbox()
 		clear_comms_rate_limits()
 		clear_portal_auth_rate_limits()
@@ -250,7 +251,7 @@ class TestCrossTrackSeams(ISMTestCase):
 		):
 			self.track("Shop Board Event", ev_name)
 
-	def test_seam1_ism_settings_14_sections_and_seed_idempotency(self) -> None:
+	def test_seam1_ism_settings_13_sections_and_seed_idempotency(self) -> None:
 		settings_path = (
 			Path(frappe.get_app_path("ism"))
 			/ "ism"
@@ -263,77 +264,56 @@ class TestCrossTrackSeams(ISMTestCase):
 		sections = [f["fieldname"] for f in schema["fields"] if f["fieldtype"] == "Section Break"]
 
 		self.assertEqual(len(fieldnames), len(set(fieldnames)))
-		self.assertEqual(len(sections), 14)
+		self.assertEqual(len(sections), 13)
 
 		self._save_settings(
 			{
 				"enable_self_serve_booking": 0,
 				"customer_arrival_offset_minutes": 0,
+				"board_ai_model": "gemini-3.8-flash",
 			}
 		)
 		setup_default_ism_settings()
 		reloaded = frappe.get_single("ISM Settings")
 		self.assertEqual(int(reloaded.enable_self_serve_booking), 0)
 		self.assertEqual(int(reloaded.customer_arrival_offset_minutes), 0)
+		self.assertEqual(reloaded.board_ai_model, "gemini-3.8-flash")
 
-	def test_seam2_board_sms_gate_uses_p1_bus_audit_and_opt_out(self) -> None:
-		mgr_user = self._create_user_with_roles("seam2_mgr", ["ISM Manager"])
+	def test_seam2_p1_sms_bus_audit_and_opt_out(self) -> None:
 		phone_ok = "+14165550901"
 		phone_opted_out = "+14165550911"
-		ro, _, _ = self._create_ro(phone=phone_ok, status="Authorized - In Progress", approval_status="Approved", service_status="Approved")
-		tkey = ensure_thread_for_ro(ro.name)
-
-		cap = frappe.get_doc(
-			{
-				"doctype": "Shop Board Event",
-				"thread": tkey,
-				"event_timestamp": now_datetime(),
-				"actor_type": "TECH",
-				"actor_user": "Administrator",
-				"payload_type": "TEXT",
-				"body_text": "Ready to message customer",
-				"resolution_state": "NONE",
-			}
-		).insert(ignore_permissions=True)
-		self.track(cap)
-
-		g_ok = dispatch_orchestrator_decision(
-			cap,
-			{
-				"confidence": 0.95,
-				"action": "DISPATCH_CUSTOMER_SMS",
-				"action_payload": {
-					"repair_order": ro.name,
-					"phone_number": phone_ok,
-					"finding_summary": "Front brake service completed.",
-				},
-			},
+		ro, _, _ = self._create_ro(
+			phone=phone_ok,
+			status="Authorized - In Progress",
+			approval_status="Approved",
+			service_status="Approved",
 		)
-		self.track("Shop Board Event", g_ok["gates"][0])
 
-		frappe.set_user(mgr_user)
-		res_ok = board_api.resolve_board_card(
-			g_ok["gates"][0],
-			"approve",
-			edited_message="Your Tesla front brake service is ready.",
+		res_ok = dispatch_sms(
+			phone_ok,
+			"Your Tesla front brake service is ready.",
+			message_type="Notification",
+			reference_doctype="Repair Order",
+			reference_name=ro.name,
 		)
-		self.assertTrue(res_ok["ok"])
-		self.assertEqual(res_ok["execution_result"]["delivery_status"], "SENT")
+		self.assertTrue(res_ok["success"])
+		self.assertFalse(res_ok["opted_out"])
+		self.assertEqual(res_ok["status"], "Sent")
 
 		outbox = get_mock_sms_outbox()
 		self.assertTrue(any(m.get("phone_e164") == phone_ok for m in outbox))
 
-		frappe.set_user("Administrator")
 		audit_logs = frappe.get_all(
 			"SMS Audit Log",
 			filters={"phone_e164": phone_ok},
-			fields=["name", "provider", "status"],
+			fields=["name", "provider", "status", "reference_name"],
 		)
 		self.assertGreaterEqual(len(audit_logs), 1)
 		for row in audit_logs:
 			self.track("SMS Audit Log", row["name"])
 		self.assertEqual(audit_logs[0]["provider"], "Mock (Deterministic Test)")
 		self.assertEqual(audit_logs[0]["status"], "Sent")
+		self.assertEqual(audit_logs[0]["reference_name"], ro.name)
 
 		opt_doc = frappe.get_doc(
 			{
@@ -346,32 +326,21 @@ class TestCrossTrackSeams(ISMTestCase):
 		).insert(ignore_permissions=True)
 		self.track(opt_doc)
 
-		g_blocked = dispatch_orchestrator_decision(
-			cap,
-			{
-				"confidence": 0.95,
-				"action": "DISPATCH_CUSTOMER_SMS",
-				"action_payload": {
-					"repair_order": ro.name,
-					"phone_number": phone_opted_out,
-					"finding_summary": "Second message",
-				},
-			},
+		res_blocked = dispatch_sms(
+			phone_opted_out,
+			"Second message after STOP",
+			message_type="Notification",
+			reference_doctype="Repair Order",
+			reference_name=ro.name,
 		)
-		self.track("Shop Board Event", g_blocked["gates"][0])
-
-		frappe.set_user(mgr_user)
-		res_blocked = board_api.resolve_board_card(g_blocked["gates"][0], "approve")
-		self.assertFalse(res_blocked["execution_result"]["success"])
-		self.assertTrue(res_blocked["execution_result"]["opted_out"])
-		self.assertEqual(res_blocked["execution_result"]["delivery_status"], "OPTED_OUT")
+		self.assertFalse(res_blocked["success"])
+		self.assertTrue(res_blocked["opted_out"])
 		self.assertFalse(any(m.get("phone_e164") == phone_opted_out for m in get_mock_sms_outbox()))
 
-		frappe.set_user("Administrator")
 		for log_name in frappe.get_all("SMS Audit Log", filters={"phone_e164": phone_opted_out}, pluck="name"):
 			self.track("SMS Audit Log", log_name)
 
-	def test_seam3_online_square_deposit_and_floor_checkout_reconcile_erpnext(self) -> None:
+	def test_seam3_online_square_deposit_and_agent_os_checkout_reconcile_erpnext(self) -> None:
 		mgr_user = self._create_user_with_roles("seam3_mgr", ["ISM Manager"])
 		phone = "+14165550902"
 		ro, customer, _ = self._create_ro(
@@ -426,40 +395,15 @@ class TestCrossTrackSeams(ISMTestCase):
 		):
 			self._track_action_item_and_events(sai_name)
 
-		tkey = ensure_thread_for_ro(ro.name)
-		cap = frappe.get_doc(
-			{
-				"doctype": "Shop Board Event",
-				"thread": tkey,
-				"event_timestamp": now_datetime(),
-				"actor_type": "TECH",
-				"actor_user": "Administrator",
-				"payload_type": "TEXT",
-				"body_text": "Checkout RO",
-				"resolution_state": "NONE",
-			}
-		).insert(ignore_permissions=True)
-		self.track(cap)
-
-		g_chk = dispatch_orchestrator_decision(
-			cap,
-			{
-				"confidence": 0.96,
-				"action": "CHECKOUT_REPAIR_ORDER",
-				"action_payload": {"repair_order": ro.name, "odometer_out": 40015},
-			},
-		)
-		self.track("Shop Board Event", g_chk["gates"][0])
-
 		frappe.set_user(mgr_user)
-		res_chk = board_api.resolve_board_card(
-			g_chk["gates"][0],
-			"approve",
-			selected_option="Debit / Interac",
-			form_patch={"odometer_out": 40015},
+		res_chk = agent_quotes_api.checkout_repair_order(
+			repair_order=ro.name,
+			payment_method="Debit / Interac",
+			odometer_out=40015,
+			confirm=True,
 		)
-		self.assertTrue(res_chk["ok"])
-		chk_data = res_chk["execution_result"]["data"]
+		self.assertTrue(res_chk["success"])
+		chk_data = res_chk["data"]
 		si_name = chk_data["sales_invoice"]
 		floor_pe = chk_data.get("payment_entry")
 		self.assertTrue(si_name)
@@ -483,16 +427,26 @@ class TestCrossTrackSeams(ISMTestCase):
 		sq_pe_doc = frappe.get_doc("Payment Entry", sq_pe)
 		floor_pe_doc = frappe.get_doc("Payment Entry", floor_pe)
 		self.assertAlmostEqual(flt(sq_pe_doc.paid_amount), 100.0, places=2)
-		self.assertAlmostEqual(flt(sq_pe_doc.paid_amount) + flt(floor_pe_doc.paid_amount), flt(si.grand_total), places=2)
+		self.assertAlmostEqual(
+			flt(sq_pe_doc.paid_amount) + flt(floor_pe_doc.paid_amount),
+			flt(si.grand_total),
+			places=2,
+		)
 
 	def test_seam4_unmocked_arrival_offset_parity_and_cockpit_internal_time(self) -> None:
-		# Unmocked P6 firewall -> real P3 arrival_policy (08:00 -> 07:45)
-		self.assertEqual(resolve_customer_arrival_time("08:00:00"), "07:45")
+		# P3 arrival_policy converts internal 08:00:00 -> customer arrival 07:45:00
+		self.assertEqual(to_customer_arrival_time("08:00:00"), "07:45:00")
+		self.assertEqual(to_customer_arrival_time("08:00:00")[:5], "07:45")
 
 		bay_name = self.get_manifest().bays["main_lift"]
 
 		target_day = self._next_weekday(3)
-		ro, customer, vehicle = self._create_ro(phone="+14165550903", status="Authorized - In Progress", approval_status="Approved", service_status="Approved")
+		ro, customer, vehicle = self._create_ro(
+			phone="+14165550903",
+			status="Authorized - In Progress",
+			approval_status="Approved",
+			service_status="Approved",
+		)
 		se = self.create_test_schedule_entry(
 			customer=customer.name,
 			vehicle=vehicle.name,
@@ -529,7 +483,8 @@ class TestCrossTrackSeams(ISMTestCase):
 		).insert(ignore_permissions=True)
 		self.track(pkg)
 
-		# 1. P5 Booking -> SHOP:INTAKE SYSTEM card
+		# 1. P5 unlinked self-serve booking creates Shop Action Item with
+		# clearing_condition_type='schedule_converted_to_ro' and ZERO board thread/event
 		self._attach_portal_request()
 		nonce = issue_booking_form_nonce(now_ts=int(time.time()) - 10)
 		frappe.set_user("Guest")
@@ -589,21 +544,36 @@ class TestCrossTrackSeams(ISMTestCase):
 		booking_sais = frappe.get_all(
 			"Shop Action Item",
 			filters={"reference_doctype": "Schedule Entry", "reference_name": se_name},
-			pluck="name",
+			fields=["name", "clearing_condition_type", "status"],
 		)
 		self.assertEqual(len(booking_sais), 1)
-		self._track_action_item_and_events(booking_sais[0])
+		self._track_action_item_and_events(booking_sais[0]["name"])
+		self.assertEqual(booking_sais[0]["clearing_condition_type"], "schedule_converted_to_ro")
+		self.assertEqual(booking_sais[0]["status"], "Open")
 
-		intake_ev = frappe.db.get_value(
-			"Shop Board Event",
-			{"idempotency_key": f"action_item:{booking_sais[0]}"},
-			["name", "thread", "actor_type", "payload_type"],
-			as_dict=True,
+		# Zero board thread or event created for unlinked self-serve booking
+		self.assertIsNone(
+			frappe.db.get_value(
+				"Shop Board Event",
+				{"idempotency_key": f"action_item:{booking_sais[0]['name']}"},
+				"name",
+			)
 		)
-		self.assertIsNotNone(intake_ev)
-		self.assertEqual(intake_ev["thread"], "SHOP:INTAKE")
-		self.assertEqual(intake_ev["actor_type"], "SYSTEM")
-		self.assertEqual(intake_ev["payload_type"], "STATE_MUTATION")
+		self.assertFalse(frappe.db.exists("Shop Board Thread", "SHOP:INTAKE"))
+
+		# Linking the Schedule Entry to an RO auto-clears the booking Shop Action Item!
+		converted_ro, _, _ = self._create_ro(phone="+14165550914", email="seam5conv@example.test")
+		se_doc = frappe.get_doc("Schedule Entry", se_name)
+		se_doc.repair_order = converted_ro.name
+		se_doc.save(ignore_permissions=True)
+		self.assertEqual(
+			frappe.db.get_value("Shop Action Item", booking_sais[0]["name"], "status"),
+			"Resolved",
+		)
+		self.assertEqual(
+			int(frappe.db.get_value("Shop Action Item", booking_sais[0]["name"], "auto_cleared")),
+			1,
+		)
 
 		# 2. P4 quote approval + PIN submit + repeat PIN update (.save()) -> RO:<id> SYSTEM cards
 		ro, customer, _ = self._create_ro(phone="+14165550905", email="seam5pin@example.test")
