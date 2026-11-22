@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, get_url, now_datetime
+from frappe.utils import add_to_date, cint, get_url, now_datetime
 
 from ism.api._validation import (
 	coerce_bool,
@@ -158,28 +158,39 @@ def list_shop_action_items(
 	if category:
 		filters["category"] = category
 
+	action_fields = [
+		"name",
+		"title",
+		"category",
+		"priority",
+		"status",
+		"source",
+		"dedup_key",
+		"snoozed_until",
+		"reference_doctype",
+		"reference_name",
+		"item_code",
+		"details",
+		"reported_by",
+		"resolved_by",
+		"resolved_at",
+		"creation",
+		"modified",
+	]
+	for extra_col in (
+		"board_event",
+		"action_payload_json",
+		"clearing_condition_type",
+		"clearing_condition_json",
+		"auto_cleared",
+	):
+		if frappe.db.has_column("Shop Action Item", extra_col):
+			action_fields.append(extra_col)
+
 	items = frappe.get_list(
 		"Shop Action Item",
 		filters=filters,
-		fields=[
-			"name",
-			"title",
-			"category",
-			"priority",
-			"status",
-			"source",
-			"dedup_key",
-			"snoozed_until",
-			"reference_doctype",
-			"reference_name",
-			"item_code",
-			"details",
-			"reported_by",
-			"resolved_by",
-			"resolved_at",
-			"creation",
-			"modified",
-		],
+		fields=action_fields,
 		order_by="creation desc",
 		limit_page_length=safe_limit,
 	)
@@ -385,9 +396,16 @@ def resolve_shop_action_item(
 		)
 	frappe.has_permission("Shop Action Item", "write", doc=action_item, throw=True)
 
-	_resolve_action_item_impl(name=action_item, resolution_notes=resolution_notes)
+	resolve_res = _resolve_action_item_impl(name=action_item, resolution_notes=resolution_notes)
+	already_resolved = bool(resolve_res.get("already_resolved")) if isinstance(resolve_res, dict) else False
 	doc = frappe.get_doc("Shop Action Item", action_item)
 	doc.check_permission("read")
+	auto_cleared = cint(getattr(doc, "auto_cleared", 0))
+	msg = (
+		_("Shop Action Item {0} was already Resolved.").format(doc.name)
+		if already_resolved
+		else _("Resolved Shop Action Item {0}.").format(doc.name)
+	)
 	return build_agent_envelope(
 		success=True,
 		urls=_action_item_urls(doc.name, doc.reference_doctype, doc.reference_name),
@@ -395,15 +413,19 @@ def resolve_shop_action_item(
 			"name": doc.name,
 			"title": doc.title,
 			"status": doc.status,
+			"already_resolved": already_resolved,
+			"auto_cleared": auto_cleared,
+			"clearing_condition_type": getattr(doc, "clearing_condition_type", None),
 			"resolution_notes": doc.resolution_notes,
 			"resolved_by": doc.resolved_by,
 			"resolved_at": doc.resolved_at,
 		},
-		message=_("Resolved Shop Action Item {0}.").format(doc.name),
+		message=msg,
 		include_summary=include_summary,
 		summary_builder=lambda: (
-			f"### Resolved Shop Action Item: `{doc.name}`\n"
-			f"- **Notes**: {doc.resolution_notes or 'None'}"
+			f"### Resolved Shop Action Item: `{doc.name}`"
+			+ (" (already resolved)" if already_resolved else "")
+			+ f"\n- **Notes**: {doc.resolution_notes or 'None'}"
 		),
 	)
 
