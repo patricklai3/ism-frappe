@@ -33,10 +33,16 @@ function loadSquareSdkScript(sdkUrl) {
 			if (window.Square && typeof window.Square.payments === "function") {
 				resolve(window.Square);
 			} else {
+				loadedSdkUrls.delete(sdkUrl);
+				script.remove();
 				reject(new Error("Square Web Payments SDK failed to initialize."));
 			}
 		};
-		script.onerror = () => reject(new Error("Unable to load Square Web Payments SDK."));
+		script.onerror = () => {
+			loadedSdkUrls.delete(sdkUrl);
+			script.remove();
+			reject(new Error("Unable to load Square Web Payments SDK."));
+		};
 		document.head.appendChild(script);
 	});
 
@@ -189,13 +195,49 @@ export function renderPaymentsSection(container, { visit, onHubUpdated, notify }
 	const emailInput = container.querySelector("#portal-payment-email");
 	const payBtn = container.querySelector("#portal-pay-submit-btn");
 
-	const showError = (msg) => {
-		errorEl.textContent = msg;
+	const showError = (msg, { allowSdkRetry = false } = {}) => {
+		errorEl.innerHTML = "";
+		const msgSpan = document.createElement("span");
+		msgSpan.textContent = msg;
+		errorEl.appendChild(msgSpan);
+		if (allowSdkRetry) {
+			const retryBtn = document.createElement("button");
+			retryBtn.type = "button";
+			retryBtn.className = "portal-btn portal-btn--outline portal-btn--sm";
+			retryBtn.id = "portal-retry-square-btn";
+			retryBtn.style.marginLeft = "10px";
+			retryBtn.textContent = "Retry Loading Payment Form";
+			retryBtn.addEventListener("click", () => {
+				errorEl.classList.add("is-hidden");
+				mountSquareCard();
+			});
+			errorEl.appendChild(retryBtn);
+		}
 		errorEl.classList.remove("is-hidden");
 	};
 
 	let squareCard = null;
 	const isMock = sdkConfig.mode === "mock";
+
+	const mountSquareCard = () => {
+		mountEl.innerHTML = `<p class="portal-help" style="margin:0;">Loading secure Square card input...</p>`;
+		payBtn.disabled = true;
+		return loadSquareSdkScript(sdkConfig.sdk_url)
+			.then(async (Square) => {
+				const payments = Square.payments(sdkConfig.application_id, sdkConfig.location_id);
+				squareCard = await payments.card();
+				mountEl.innerHTML = "";
+				await squareCard.attach(mountEl);
+				payBtn.disabled = false;
+			})
+			.catch((err) => {
+				squareCard = null;
+				mountEl.innerHTML = "";
+				showError(err.message || "Unable to load secure payment form.", {
+					allowSdkRetry: true,
+				});
+			});
+	};
 
 	if (isMock) {
 		mountEl.innerHTML = `
@@ -205,20 +247,7 @@ export function renderPaymentsSection(container, { visit, onHubUpdated, notify }
 			</div>
 		`;
 	} else {
-		mountEl.innerHTML = `<p class="portal-help" style="margin:0;">Loading secure Square card input...</p>`;
-		payBtn.disabled = true;
-		loadSquareSdkScript(sdkConfig.sdk_url)
-			.then(async (Square) => {
-				const payments = Square.payments(sdkConfig.application_id, sdkConfig.location_id);
-				squareCard = await payments.card();
-				mountEl.innerHTML = "";
-				await squareCard.attach(mountEl);
-				payBtn.disabled = false;
-			})
-			.catch((err) => {
-				mountEl.innerHTML = "";
-				showError(err.message || "Unable to load secure payment form.");
-			});
+		mountSquareCard();
 	}
 
 	payBtn.addEventListener("click", async () => {

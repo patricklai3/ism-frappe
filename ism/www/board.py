@@ -14,8 +14,19 @@ from frappe import _
 from ism.api.board import list_board_threads
 from ism.board.gateways import resolve_actor_role
 from ism.board.projections import ensure_singleton_shop_threads, resolve_thread_key
+from ism.utils.web_security import apply_page_security_headers, compute_asset_version
 
 no_cache = 1
+
+_BOARD_ASSET_PATHS: tuple[str, ...] = (
+	"board/vendor/socket.io.min.js",
+	"board/board.css",
+	"board/api.js",
+	"board/realtime.js",
+	"board/capture.js",
+	"board/cards.js",
+	"board/app.js",
+)
 
 
 def _build_login_redirect() -> str:
@@ -61,6 +72,8 @@ def get_context(context):
 	context.show_sidebar = False
 	context.full_width = True
 	context.title = _("ISM Shop Floor Blackboard")
+	apply_page_security_headers(context)
+	context.asset_version = compute_asset_version(_BOARD_ASSET_PATHS)
 
 	if frappe.session.user == "Guest":
 		frappe.local.flags.redirect_location = _build_login_redirect()

@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
 import frappe
@@ -25,19 +23,21 @@ from ism.booking.contracts import (
 )
 from ism.booking.service import get_booking_boot_config
 from ism.comms.contracts import get_client_ip
+from ism.utils.web_security import (
+	DEFAULT_SECURITY_HEADERS,
+	apply_page_security_headers,
+	compute_asset_version,
+)
 
 no_cache = 1
 
-SECURITY_HEADERS: dict[str, str] = {
-	"X-Frame-Options": "DENY",
-	"Content-Security-Policy": "frame-ancestors 'none'",
-}
+SECURITY_HEADERS: dict[str, str] = dict(DEFAULT_SECURITY_HEADERS)
 
-_BOOK_ASSET_FILES: tuple[str, ...] = (
-	"book.css",
-	"api.js",
-	"state.js",
-	"app.js",
+_BOOK_ASSET_PATHS: tuple[str, ...] = (
+	"book/book.css",
+	"book/api.js",
+	"book/state.js",
+	"book/app.js",
 )
 
 
@@ -56,37 +56,12 @@ def _safe_json_for_script(payload: Any) -> str:
 
 def _compute_asset_version() -> str:
 	"""Compute a short deterministic cache-busting token from ism/public/book/* mtimes."""
-	book_dir = Path(__file__).resolve().parent.parent / "public" / "book"
-	digest = hashlib.sha256()
-	found = False
-	for filename in _BOOK_ASSET_FILES:
-		asset_path = book_dir / filename
-		try:
-			stat = asset_path.stat()
-		except OSError:
-			continue
-		found = True
-		digest.update(f"{filename}:{stat.st_mtime_ns}:{stat.st_size};".encode())
-	return digest.hexdigest()[:12] if found else "1"
+	return compute_asset_version(_BOOK_ASSET_PATHS)
 
 
 def _apply_security_headers(context: Any) -> dict[str, str]:
-	"""Enforce anti-clickjacking headers on Frappe response and page context."""
-	local_headers = getattr(frappe.local, "response_headers", None)
-	if local_headers is None:
-		frappe.local.response_headers = dict(SECURITY_HEADERS)
-	else:
-		for key, value in SECURITY_HEADERS.items():
-			local_headers[key] = value
-
-	for attr in ("response_headers", "headers", "http_headers"):
-		existing = context.get(attr)
-		if isinstance(existing, dict):
-			existing.update(SECURITY_HEADERS)
-		else:
-			context[attr] = dict(SECURITY_HEADERS)
-
-	return dict(SECURITY_HEADERS)
+	"""Enforce clickjacking, referrer, and no-store headers on Frappe response and page context."""
+	return apply_page_security_headers(context)
 
 
 def _fallback_disabled_boot_config() -> dict[str, Any]:
@@ -103,7 +78,7 @@ def _fallback_disabled_boot_config() -> dict[str, Any]:
 			"enable_waiter_preference": True,
 			"horizon_days": 30,
 			"min_lead_time_minutes": 120,
-			"currency": "USD",
+			"currency": "CAD",
 		},
 		"vehicle_models": list(ALLOWED_VEHICLE_MODELS),
 		"vehicle_year_min": VEHICLE_MIN_YEAR,

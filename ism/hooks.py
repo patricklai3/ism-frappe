@@ -187,6 +187,7 @@ doc_events = {
 	},
 	"Shop Action Item": {
 		"after_insert": "ism.board.projections.on_shop_action_item_after_insert",
+		"on_update": "ism.board.projections.on_shop_action_item_on_update",
 	},
 }
 

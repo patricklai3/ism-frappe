@@ -12,7 +12,16 @@ from typing import Any
 import frappe
 from frappe import _
 
+from ism.utils.web_security import apply_page_security_headers, compute_asset_version
+
 no_cache = 1
+
+_COCKPIT_ASSET_PATHS: tuple[str, ...] = (
+	"board/vendor/socket.io.min.js",
+	"board/board.css",
+	"cockpit/cockpit.css",
+	"cockpit/cockpit.js",
+)
 
 ALLOWED_COCKPIT_ROLES: frozenset[str] = frozenset(
 	{
@@ -43,6 +52,8 @@ def _sanitize_date(raw: Any) -> str:
 def get_context(context):
 	context.no_cache = 1
 	context.show_sidebar = False
+	apply_page_security_headers(context)
+	context.asset_version = compute_asset_version(_COCKPIT_ASSET_PATHS)
 
 	user = frappe.session.user
 	if not user or user == "Guest":

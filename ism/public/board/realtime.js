@@ -72,6 +72,7 @@ export class BoardRealtimeClient {
 			const { baseUrl, namespace } = this._buildSocketTarget();
 			try {
 				this.socket = window.io(`${baseUrl}/${namespace}`, {
+					path: "/socket.io/",
 					withCredentials: true,
 					transports: ["websocket", "polling"],
 					reconnection: true,

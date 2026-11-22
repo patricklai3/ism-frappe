@@ -457,12 +457,10 @@ def get_board_thread(
 		)
 		open_cards = [_serialize_event(r) for r in open_card_rows]
 
-		pin_state = _get_ro_pin_state_safe(
-			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
-		)
-		ro_summary = _get_ro_summary(
-			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
-		)
+		ro_for_pin = thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
+		ro_summary = _get_ro_summary(ro_for_pin)
+
+	pin_state = _get_ro_pin_state_safe(ro_for_pin)
 
 	return {
 		"ok": True,
@@ -587,9 +585,9 @@ def get_thread_delta(
 			)
 			updated_cards = [_serialize_event(r) for r in ordered_updated]
 
-		pin_state = _get_ro_pin_state_safe(
-			thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
-		)
+		ro_for_pin = thread_doc.repair_order if thread_doc.thread_type == "REPAIR_ORDER" else None
+
+	pin_state = _get_ro_pin_state_safe(ro_for_pin)
 
 	return {
 		"ok": True,

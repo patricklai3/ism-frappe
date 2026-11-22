@@ -8,6 +8,11 @@ from frappe import _
 
 from ism.api.approval import get_public_quote_approval
 from ism.portal.auth import exchange_ro_approval_token, get_public_portal_branding
+from ism.utils.web_security import (
+	PORTAL_ASSET_PATHS,
+	apply_page_security_headers,
+	compute_asset_version,
+)
 
 no_cache = 1
 
@@ -16,6 +21,8 @@ def get_context(context):
 	context.no_cache = 1
 	context.show_sidebar = False
 	context.full_width = True
+	apply_page_security_headers(context)
+	context.asset_version = compute_asset_version(PORTAL_ASSET_PATHS)
 	raw_token = frappe.form_dict.get("token")
 	token = raw_token.strip() if isinstance(raw_token, str) else ""
 

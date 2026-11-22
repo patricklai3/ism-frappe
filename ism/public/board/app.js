@@ -170,7 +170,7 @@ function renderPinPill(revealedPlaintext = null) {
 	const thread = state.activeThread;
 	const ps = state.pinState;
 	const shouldShow =
-		Boolean(thread && thread.repair_order && thread.board_status !== "CLOSED") &&
+		Boolean(thread && thread.repair_order) &&
 		Boolean(ps && ps.pin_feature_installed && ps.has_pin && ps.can_reveal);
 
 	if (!shouldShow) {

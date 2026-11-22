@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -487,16 +488,9 @@ def project_external_domain_event(
 	return ev.name
 
 
-def on_shop_action_item_after_insert(doc, method=None):
-	"""Seam 5 soft listener: project Shop Action Item alerts onto Shop Board threads."""
-	if not _board_tables_ready():
-		return None
-
+def _build_action_item_projection_payload(doc) -> dict[str, Any]:
 	dedup_key = (doc.get("dedup_key") or "").strip()
 	source = (doc.get("source") or "").strip()
-	if dedup_key.startswith(SELF_ECHO_DEDUP_PREFIX) or source == "Rule Snooze":
-		return None
-
 	ref_dt = (doc.get("reference_doctype") or "").strip()
 	ref_name = (doc.get("reference_name") or "").strip()
 
@@ -517,10 +511,68 @@ def on_shop_action_item_after_insert(doc, method=None):
 	elif ref_dt == "Schedule Entry" and ref_name:
 		payload["schedule_entry"] = ref_name
 
+	return payload
+
+
+def on_shop_action_item_after_insert(doc, method=None):
+	"""Seam 5 soft listener: project Shop Action Item alerts onto Shop Board threads."""
+	if not _board_tables_ready():
+		return None
+
+	dedup_key = (doc.get("dedup_key") or "").strip()
+	source = (doc.get("source") or "").strip()
+	if dedup_key.startswith(SELF_ECHO_DEDUP_PREFIX) or source == "Rule Snooze":
+		return None
+
+	payload = _build_action_item_projection_payload(doc)
 	return project_external_domain_event(
 		"shop_action_item",
 		payload,
 		idempotency_key=f"action_item:{doc.name}",
+	)
+
+
+def on_shop_action_item_on_update(doc, method=None):
+	"""Seam 5 soft listener: project meaningful repeat updates on open Shop Action Items."""
+	if not _board_tables_ready():
+		return None
+	if getattr(getattr(doc, "flags", None), "skip_board_projection", False):
+		return None
+	if (doc.get("status") or "").strip() not in ("Open", "In Progress"):
+		return None
+
+	dedup_key = (doc.get("dedup_key") or "").strip()
+	source = (doc.get("source") or "").strip()
+	if dedup_key.startswith(SELF_ECHO_DEDUP_PREFIX) or source == "Rule Snooze":
+		return None
+
+	prev = doc.get_doc_before_save() if hasattr(doc, "get_doc_before_save") else None
+	if prev is None:
+		return None
+
+	if (
+		str(prev.get("snoozed_until") or "") != str(doc.get("snoozed_until") or "")
+		or str(prev.get("resolved_at") or "") != str(doc.get("resolved_at") or "")
+		or str(prev.get("resolution_notes") or "") != str(doc.get("resolution_notes") or "")
+	):
+		return None
+
+	title = (doc.get("title") or "").strip()
+	details = (doc.get("details") or "").strip()
+	priority = (doc.get("priority") or "").strip()
+	prev_title = (prev.get("title") or "").strip()
+	prev_details = (prev.get("details") or "").strip()
+	prev_priority = (prev.get("priority") or "").strip()
+	if (title, details, priority) == (prev_title, prev_details, prev_priority):
+		return None
+
+	payload = _build_action_item_projection_payload(doc)
+	payload["is_update"] = True
+	digest = hashlib.sha256(f"{title}\x1f{details}\x1f{priority}".encode("utf-8")).hexdigest()[:12]
+	return project_external_domain_event(
+		"shop_action_item",
+		payload,
+		idempotency_key=f"action_item:{doc.name}:upd:{digest}",
 	)
 
 
@@ -531,6 +583,7 @@ __all__ = [
 	"on_repair_order_update",
 	"on_schedule_entry_update",
 	"on_shop_action_item_after_insert",
+	"on_shop_action_item_on_update",
 	"project_external_domain_event",
 	"recompute_thread_projection",
 	"resolve_thread_key",

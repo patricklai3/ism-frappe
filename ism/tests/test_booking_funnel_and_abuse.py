@@ -186,7 +186,9 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		for fieldname in self._SETTINGS_FIELDS:
 			self._saved_settings[fieldname] = getattr(settings, fieldname, None)
 
+		self._had_request_ip = hasattr(frappe.local, "request_ip")
 		self._orig_request_ip = getattr(frappe.local, "request_ip", None)
+		self._had_cookie_manager = hasattr(frappe.local, "cookie_manager")
 		self._orig_cookie_manager = getattr(frappe.local, "cookie_manager", None)
 
 		self._set_ism_settings(
@@ -259,7 +261,10 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 	def tearDown(self) -> None:
 		frappe.set_user("Administrator")
 		frappe.local.request_ip = self._orig_request_ip
-		frappe.local.cookie_manager = self._orig_cookie_manager
+		if self._had_cookie_manager:
+			frappe.local.cookie_manager = self._orig_cookie_manager
+		elif hasattr(frappe.local, "cookie_manager"):
+			delattr(frappe.local, "cookie_manager")
 		clear_booking_rate_limits()
 		clear_comms_rate_limits()
 		clear_mock_sms_outbox()

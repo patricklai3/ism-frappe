@@ -9,7 +9,7 @@
 	<meta name="mobile-web-app-capable" content="yes" />
 	<title>{{ title or "ISM Shop Floor Blackboard" }}</title>
 	<link rel="icon" href="data:," />
-	<link rel="stylesheet" href="/assets/ism/board/board.css" />
+	<link rel="stylesheet" href="/assets/ism/board/board.css?v={{ asset_version or '1' }}" />
 </head>
 <body class="shop-os-body">
 	<header class="shop-os-nav" role="banner">
@@ -201,7 +201,8 @@
 	<script>
 		window.ISM_BOARD_BOOT = {{ boot_json | safe }};
 	</script>
-	<script type="module" src="/assets/ism/board/app.js"></script>
+	<script src="/assets/ism/board/vendor/socket.io.min.js?v={{ asset_version or '1' }}"></script>
+	<script type="module" src="/assets/ism/board/app.js?v={{ asset_version or '1' }}"></script>
 	{% endif %}
 </body>
 </html>

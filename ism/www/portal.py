@@ -14,6 +14,11 @@ from ism.portal.auth import (
 	get_active_portal_session,
 	get_public_portal_branding,
 )
+from ism.utils.web_security import (
+	PORTAL_ASSET_PATHS,
+	apply_page_security_headers,
+	compute_asset_version,
+)
 
 no_cache = 1
 
@@ -32,6 +37,8 @@ def get_context(context):
 	context.show_sidebar = False
 	context.full_width = True
 	context.title = _("Customer Portal")
+	apply_page_security_headers(context)
+	context.asset_version = compute_asset_version(PORTAL_ASSET_PATHS)
 
 	csrf_token = frappe.sessions.get_csrf_token()
 	branding = get_public_portal_branding()

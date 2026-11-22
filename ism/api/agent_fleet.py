@@ -341,6 +341,7 @@ def sync_action_item_state(
 	if doc.is_new():
 		doc.insert()
 	else:
+		doc.flags.skip_board_projection = True
 		doc.save()
 	doc.check_permission("read")
 

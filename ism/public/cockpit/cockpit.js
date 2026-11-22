@@ -973,6 +973,22 @@ function syncDateToUrl(dateStr) {
   }
 }
 
+function startFallbackPolling() {
+  if (fallbackTimer) return;
+  fallbackTimer = setInterval(() => {
+    if (document.visibilityState === "visible" && Date.now() - state.lastFetchedAt >= 55000) {
+      loadDashboard({ silent: true });
+    }
+  }, 60000);
+}
+
+function stopFallbackPolling() {
+  if (fallbackTimer) {
+    clearInterval(fallbackTimer);
+    fallbackTimer = null;
+  }
+}
+
 function initRealtime() {
   const events = [
     "ism_board_thread_summary",
@@ -984,6 +1000,7 @@ function initRealtime() {
 
   // 1. Reuse Frappe's realtime wrapper if present
   if (window.frappe && window.frappe.realtime && typeof window.frappe.realtime.on === "function") {
+    stopFallbackPolling();
     events.forEach((evt) => {
       window.frappe.realtime.on(evt, () => scheduleDebouncedRefresh(500));
     });
@@ -1004,14 +1021,26 @@ function initRealtime() {
           ? `${window.location.protocol}//${window.location.hostname}:${port}`
           : window.location.origin;
       const namespace = siteName ? `/${siteName}` : "/";
+      startFallbackPolling();
       const socket = window.io(`${origin}${namespace}`, {
+        path: "/socket.io/",
+        transports: ["websocket", "polling"],
         withCredentials: true,
         reconnectionAttempts: 5,
       });
 
-      socket.on("connect", () => setRealtimeStatus("socketio", "Live · Socket.IO"));
-      socket.on("disconnect", () => setRealtimeStatus("fallback", "Live · Tab Sync"));
-      socket.on("connect_error", () => setRealtimeStatus("fallback", "Live · Tab Sync"));
+      socket.on("connect", () => {
+        stopFallbackPolling();
+        setRealtimeStatus("socketio", "Live · Socket.IO");
+      });
+      socket.on("disconnect", () => {
+        setRealtimeStatus("fallback", "Live · Tab Sync");
+        startFallbackPolling();
+      });
+      socket.on("connect_error", () => {
+        setRealtimeStatus("fallback", "Live · Tab Sync");
+        startFallbackPolling();
+      });
       events.forEach((evt) => {
         socket.on(evt, () => scheduleDebouncedRefresh(500));
       });
@@ -1023,11 +1052,7 @@ function initRealtime() {
 
   // 3. Graceful fallback: visibilitychange + gentle 60s refresh only when tab is visible
   setRealtimeStatus("fallback", "Live · Tab Sync");
-  fallbackTimer = setInterval(() => {
-    if (document.visibilityState === "visible" && Date.now() - state.lastFetchedAt >= 55000) {
-      loadDashboard({ silent: true });
-    }
-  }, 60000);
+  startFallbackPolling();
 }
 
 function bindEvents() {

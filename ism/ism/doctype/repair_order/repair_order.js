@@ -2,6 +2,7 @@
 // For license information, please see license.txt
 
 const CLOSED_RO_STATUSES = ["Cancelled", "Closed / Released", "Billed / Paid"];
+const PIN_PURGE_RO_STATUSES = ["Cancelled", "Closed / Released"];
 const WORKSHOP_RO_STATUSES = [
 	"Authorized - In Progress",
 	"Waiting on Parts",
@@ -1392,7 +1393,7 @@ frappe.ui.form.on("Repair Order", {
 	setup_pin_to_drive_controls(frm) {
 		if (frm.is_new() || frm.doc.docstatus === 2) return;
 		if (frm.doc.pin_to_drive_status !== "Provided") return;
-		if (CLOSED_RO_STATUSES.includes(frm.doc.status)) return;
+		if (PIN_PURGE_RO_STATUSES.includes(frm.doc.status)) return;
 
 		const allowed_roles = [
 			"ISM Technician",

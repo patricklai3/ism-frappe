@@ -71,15 +71,24 @@ class TestPaymentsApiE2E(ISMTestCase):
 		self.customer = self.create_test_customer()
 		self.vehicle = self.create_test_vehicle(customer=self.customer.name)
 		frappe.db.commit()
+		self._had_request = hasattr(frappe.local, "request")
 		self._prev_request = getattr(frappe.local, "request", None)
+		self._had_request_ip = hasattr(frappe.local, "request_ip")
 		self._prev_request_ip = getattr(frappe.local, "request_ip", None)
+		self._had_form_dict = hasattr(frappe.local, "form_dict")
 		self._prev_form_dict = getattr(frappe.local, "form_dict", None)
+
+	def _restore_request_attr(self) -> None:
+		if self._had_request:
+			frappe.local.request = self._prev_request
+		elif hasattr(frappe.local, "request"):
+			delattr(frappe.local, "request")
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		frappe.local.request = self._prev_request
+		self._restore_request_attr()
 		frappe.local.request_ip = self._prev_request_ip
-		if self._prev_form_dict is not None:
+		if self._had_form_dict and self._prev_form_dict is not None:
 			frappe.local.form_dict = self._prev_form_dict
 		payments_api.clear_payment_rate_limits()
 		MockSquareClient.reset_store()
@@ -184,7 +193,7 @@ class TestPaymentsApiE2E(ISMTestCase):
 			status_code = frappe.local.response.get("http_status_code")
 		finally:
 			frappe.set_user("Administrator")
-			frappe.local.request = self._prev_request
+			self._restore_request_attr()
 		return status_code, body
 
 	def test_01_staff_endpoints_rbac_and_round_trip(self):

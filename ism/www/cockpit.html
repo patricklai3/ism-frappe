@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#0b1120">
   <title>{{ title or "ISM Shop OS — Cockpit" }}</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/ism/board/board.css">
-  <link rel="stylesheet" href="/assets/ism/cockpit/cockpit.css">
+  <link rel="stylesheet" href="/assets/ism/board/board.css?v={{ asset_version or '1' }}">
+  <link rel="stylesheet" href="/assets/ism/cockpit/cockpit.css?v={{ asset_version or '1' }}">
 </head>
 <body class="cockpit-body">
   <div class="cockpit-shell">
@@ -139,6 +139,7 @@
   <script>
     window.ISM_COCKPIT_BOOT = {{ cockpit_boot_json | safe }};
   </script>
-  <script type="module" src="/assets/ism/cockpit/cockpit.js"></script>
+  <script src="/assets/ism/board/vendor/socket.io.min.js?v={{ asset_version or '1' }}"></script>
+  <script type="module" src="/assets/ism/cockpit/cockpit.js?v={{ asset_version or '1' }}"></script>
 </body>
 </html>
