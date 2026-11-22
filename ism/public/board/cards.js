@@ -1,33 +1,11 @@
 /**
- * Interactive Event & Action Card Renderer for /board.
- * Covers ALL Phase 1 + Phase 2 actions + Seam 5 SYSTEM notification pills.
- * Enforces client-side double-tap prevention & per-card idempotency keys.
+ * Event & Action Card Renderer for /board (Active RO Communications & AI Action Feed).
+ * Renders MEDIA_CAPTURE, TEXT (TECH / MANAGER / AI natural-language), ACTION_CARD, and STATE_MUTATION.
  */
 
-import { generateIdempotencyKey, getMediaUrl } from "./api.js";
+import { getMediaUrl } from "./api.js";
 
-const DEFAULT_PAYMENT_METHODS = [
-	"Debit / Interac",
-	"Credit Card",
-	"E-Transfer",
-	"Cash",
-];
-
-// Client-side double-tap guard & idempotency key cache per card action
-const _inFlightCards = new Set();
-const _cardIdempotencyKeys = new Map();
-
-function getActionIdempotencyKey(eventName, actionKey) {
-	const key = `${eventName}:${actionKey}`;
-	if (!_cardIdempotencyKeys.has(key)) {
-		_cardIdempotencyKeys.set(key, generateIdempotencyKey());
-	}
-	return _cardIdempotencyKeys.get(key);
-}
-
-function clearCardIdempotencyKey(eventName, actionKey) {
-	_cardIdempotencyKeys.delete(`${eventName}:${actionKey}`);
-}
+const _inFlightActionItems = new Set();
 
 export function escapeHtml(str) {
 	return String(str ?? "")
@@ -46,38 +24,6 @@ function formatShortTime(ts) {
 	return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatMoney(val) {
-	const num = Number(val);
-	if (Number.isNaN(num)) return "$0.00";
-	return `$${num.toFixed(2)}`;
-}
-
-function buildDeskLinkForReceipt(event, schema) {
-	const result = (schema && schema.result) || {};
-	const data = result.data || result;
-	const ro = data.repair_order || event.repair_order;
-	if (data.purchase_order) {
-		return {
-			label: `PO ${data.purchase_order}`,
-			href: `/app/purchase-order/${encodeURIComponent(data.purchase_order)}`,
-		};
-	}
-	if (Array.isArray(data.purchase_orders) && data.purchase_orders[0]) {
-		const po = data.purchase_orders[0];
-		return {
-			label: `PO ${po}`,
-			href: `/app/purchase-order/${encodeURIComponent(po)}`,
-		};
-	}
-	if (ro) {
-		return {
-			label: `RO ${ro}`,
-			href: `/app/repair-order/${encodeURIComponent(ro)}`,
-		};
-	}
-	return null;
-}
-
 function disableCardControls(cardEl, disabled) {
 	for (const btn of cardEl.querySelectorAll("button, input, textarea, select")) {
 		btn.disabled = disabled;
@@ -86,9 +32,10 @@ function disableCardControls(cardEl, disabled) {
 
 function buildEventHeader(event) {
 	const actor = event.actor_type || "SYSTEM";
-	const userLabel = event.actor_user && actor !== "AI" && actor !== "SYSTEM"
-		? `<span>${escapeHtml(event.actor_user)}</span>`
-		: "";
+	const userLabel =
+		event.actor_user && actor !== "AI" && actor !== "SYSTEM"
+			? `<span>${escapeHtml(event.actor_user)}</span>`
+			: "";
 	const intentHtml = event.intent_tag
 		? `<span class="intent-badge">${escapeHtml(event.intent_tag)}</span>`
 		: "";
@@ -140,23 +87,10 @@ function renderSystemNotificationPill(event) {
 	return el;
 }
 
-function renderCardResolutionPill(event) {
-	const el = document.createElement("article");
-	el.className = "system-pill-card";
-	el.dataset.eventName = event.name;
-	el.innerHTML = `
-		<div class="system-pill-card__main">
-			<span class="actor-pill actor-pill--${escapeHtml(event.actor_type || "MANAGER")}">${escapeHtml(event.actor_type || "STAFF")}</span>
-			<span>${escapeHtml(event.body_text || "Action resolved")}</span>
-		</div>
-		<time>${escapeHtml(formatShortTime(event.event_timestamp))}</time>
-	`;
-	return el;
-}
-
 function renderCaptureCard(event, { onOpenLightbox }) {
+	const isAiText = event.actor_type === "AI" && event.payload_type === "TEXT";
 	const el = document.createElement("article");
-	el.className = "event-card event-card--capture";
+	el.className = `event-card event-card--capture${isAiText ? " event-card--ai" : ""}`;
 	el.dataset.eventName = event.name;
 
 	const mediaList = Array.isArray(event.media_attachments) ? event.media_attachments : [];
@@ -236,647 +170,133 @@ function renderCaptureCard(event, { onOpenLightbox }) {
 	return el;
 }
 
-function renderReceiptCard(event, { onUndoReceipt }) {
+function getActionStatusMeta(resState, autoCleared) {
+	if (resState === "RESOLVED") {
+		return {
+			cls: "action-status--resolved",
+			cardCls: "action-card--resolved",
+			label: autoCleared ? "AUTO-CLEARED" : "CLEARED",
+		};
+	}
+	if (resState === "REJECTED") {
+		return {
+			cls: "action-status--dismissed",
+			cardCls: "action-card--dismissed",
+			label: "DISMISSED",
+		};
+	}
+	return {
+		cls: "action-status--open",
+		cardCls: "action-card--open",
+		label: "OPEN",
+	};
+}
+
+function renderActionCard(event, { canManage = false, onCopyForAgent, onDismissActionCard } = {}) {
 	const schema = event.card_schema || {};
-	const isUndone = event.resolution_state === "UNDONE";
-	const reversible = Boolean(schema.reversible && schema.undo_spec) && !isUndone;
-	const deskLink = buildDeskLinkForReceipt(event, schema);
+	const meta = event.metadata || {};
+	const resPayload = event.resolution_payload || {};
+
+	const actId =
+		event.action_item ||
+		schema.action_item ||
+		schema.name ||
+		meta.action_item ||
+		"";
+	const roName =
+		event.repair_order ||
+		schema.repair_order ||
+		schema.reference_name ||
+		meta.repair_order ||
+		"";
+	const title = schema.title || event.body_text || actId || "Action Item";
+	const details = schema.details || "";
+	const priority = schema.priority || "Medium";
+	const category = schema.category || "Action";
+	const resState = event.resolution_state || "PENDING";
+	const isOpen = resState === "PENDING" || resState === "NONE";
+	const autoCleared = Boolean(schema.auto_cleared || resPayload.auto_cleared);
+	const statusMeta = getActionStatusMeta(resState, autoCleared);
+
+	const clearingText =
+		schema.clearing_condition ||
+		schema.clearing_condition_description ||
+		resPayload.clearing_condition ||
+		"";
+	const resolutionNotes = resPayload.resolution_notes || schema.resolution_notes || "";
+
+	let clearingBadgeHtml = "";
+	if (resState === "RESOLVED") {
+		const clearedMsg = autoCleared
+			? resolutionNotes || "Cleared automatically"
+			: resolutionNotes || "Resolved";
+		clearingBadgeHtml = `<div class="action-card__clearing action-card__clearing--done">${escapeHtml(clearedMsg)}</div>`;
+	} else if (clearingText) {
+		clearingBadgeHtml = `<div class="action-card__clearing">Auto-clears: ${escapeHtml(clearingText)}</div>`;
+	}
+
+	const deskHref = actId ? `/app/shop-action-item/${encodeURIComponent(actId)}` : "";
 
 	const el = document.createElement("article");
-	el.className = `event-card event-card--receipt ${isUndone ? "is-undone" : ""}`;
+	el.className = `event-card action-card ${statusMeta.cardCls}`;
 	el.dataset.eventName = event.name;
-
-	const confText =
-		event.confidence_score !== null && event.confidence_score !== undefined
-			? `${Math.round(Number(event.confidence_score) * 100)}%`
-			: "";
+	if (actId) el.dataset.actionItem = actId;
 
 	el.innerHTML = `
-		${buildEventHeader(event)}
-		<div class="receipt-row">
-			<div>
-				<strong>${escapeHtml(schema.summary || event.body_text || "Action Executed")}</strong>
-				<div class="event-card__meta-stamp">
-					<span>${escapeHtml(schema.action_type || "")}</span>
-					${confText ? `<span>Confidence ${escapeHtml(confText)}</span>` : ""}
-					${isUndone ? `<span>UNDONE</span>` : ""}
-				</div>
+		<div class="event-card__header">
+			<div class="event-card__actor-group">
+				${actId ? `<span class="act-id-badge">${escapeHtml(actId)}</span>` : ""}
+				<span class="prio-badge prio-badge--${escapeHtml(priority)}">${escapeHtml(priority)}</span>
+				<span class="meta-chip">${escapeHtml(category)}</span>
+				<span class="action-status-pill ${statusMeta.cls}">${escapeHtml(statusMeta.label)}</span>
 			</div>
-			<div class="receipt-actions">
-				${deskLink ? `<a class="btn btn-sm btn-ghost" href="${escapeHtml(deskLink.href)}" target="_blank" rel="noopener">${escapeHtml(deskLink.label)}</a>` : ""}
-				${reversible ? `<button type="button" class="btn btn-sm btn-amber" data-action="undo">Undo</button>` : ""}
+			<time datetime="${escapeHtml(event.event_timestamp || "")}">${escapeHtml(formatShortTime(event.event_timestamp))}</time>
+		</div>
+		<div class="action-card__title">${escapeHtml(title)}</div>
+		${details ? `<div class="action-card__details">${escapeHtml(details)}</div>` : ""}
+		${clearingBadgeHtml}
+		<div class="action-card__footer">
+			<div class="action-card__links">
+				${deskHref ? `<a class="btn btn-sm btn-ghost" href="${escapeHtml(deskHref)}" target="_blank" rel="noopener">Desk</a>` : ""}
+			</div>
+			<div class="action-card__actions">
+				${
+					canManage && isOpen && actId
+						? `<button type="button" class="btn btn-sm btn-ghost js-dismiss-action-btn">Dismiss</button>`
+						: ""
+				}
+				<button type="button" class="btn btn-sm btn-primary js-copy-agent-btn">Copy for Agent</button>
 			</div>
 		</div>
 	`;
 
-	const undoBtn = el.querySelector('[data-action="undo"]');
-	if (undoBtn && onUndoReceipt) {
-		undoBtn.addEventListener("click", async () => {
-			if (_inFlightCards.has(event.name)) return;
-			_inFlightCards.add(event.name);
-			disableCardControls(el, true);
-			try {
-				await onUndoReceipt({
-					event_name: event.name,
-					idempotency_key: getActionIdempotencyKey(event.name, "undo"),
-				});
-				clearCardIdempotencyKey(event.name, "undo");
-			} finally {
-				_inFlightCards.delete(event.name);
-				if (el.isConnected) disableCardControls(el, false);
+	const copyBtn = el.querySelector(".js-copy-agent-btn");
+	if (copyBtn) {
+		copyBtn.addEventListener("click", () => {
+			if (onCopyForAgent) {
+				onCopyForAgent({ action_item: actId, repair_order: roName, title });
 			}
 		});
 	}
 
-	return el;
-}
-
-function renderClarificationCard(event, { onResolveCard }) {
-	const schema = event.card_schema || {};
-	const isPending = event.resolution_state === "PENDING";
-	const el = document.createElement("article");
-	el.className = `event-card event-card--clarification ${!isPending ? "event-card--resolved" : ""}`;
-	el.dataset.eventName = event.name;
-
-	const options = Array.isArray(schema.options) ? schema.options : [];
-	const inputField = schema.input_field || "";
-	const isNumericField = ["odometer_out", "odometer_in", "amount", "paid_amount"].includes(inputField);
-
-	let bodyHtml = `<div class="event-card__body"><strong>${escapeHtml(schema.prompt || event.body_text || "Clarification Needed")}</strong></div>`;
-
-	if (schema.acoustic_clarity_capped) {
-		bodyHtml += `<div class="capture-notice">Noisy shop audio detected — please confirm before updating ERP.</div>`;
-	}
-
-	if (!isPending) {
-		const resPayload = event.resolution_payload || {};
-		const answer = resPayload.selected_option || JSON.stringify(resPayload.form_patch || {});
-		bodyHtml += `
-			<div class="event-card__meta-stamp">
-				<span>Status: ${escapeHtml(event.resolution_state)}</span>
-				${event.resolved_by ? `<span>By: ${escapeHtml(event.resolved_by)}</span>` : ""}
-				${answer && answer !== "{}" ? `<span>Answer: ${escapeHtml(answer)}</span>` : ""}
-			</div>
-		`;
-	} else {
-		if (options.length) {
-			bodyHtml += `<div class="clarification-options">${options
-				.map(
-					(opt, idx) =>
-						`<button type="button" class="clarification-option-btn" data-opt-idx="${idx}">${escapeHtml(opt.label || opt.value)}</button>`
-				)
-				.join("")}</div>`;
-		}
-
-		if (inputField) {
-			const label = inputField.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-			bodyHtml += `
-				<div class="gate-field-group">
-					<label class="gate-field-label">${escapeHtml(label)}</label>
-					<div class="clarification-input-row">
-						<input
-							type="${isNumericField ? "number" : "text"}"
-							inputmode="${isNumericField ? "numeric" : "text"}"
-							class="gate-input"
-							data-clarify-input="${escapeHtml(inputField)}"
-							placeholder="Enter ${escapeHtml(label)}..."
-						/>
-						<button type="button" class="btn btn-primary btn-touch" data-clarify-submit="1">Submit</button>
-					</div>
-				</div>
-			`;
-		}
-	}
-
-	el.innerHTML = `${buildEventHeader(event)}${bodyHtml}`;
-
-	if (isPending && onResolveCard) {
-		for (const btn of el.querySelectorAll("[data-opt-idx]")) {
-			btn.addEventListener("click", async () => {
-				if (_inFlightCards.has(event.name)) return;
-				const idx = Number(btn.dataset.optIdx);
-				const chosen = options[idx];
-				if (!chosen) return;
-				_inFlightCards.add(event.name);
-				disableCardControls(el, true);
-				try {
-					await onResolveCard({
-						event_name: event.name,
-						decision: "clarify",
-						selected_option: chosen.value ?? chosen.label,
-						idempotency_key: getActionIdempotencyKey(event.name, `opt:${idx}`),
-					});
-					clearCardIdempotencyKey(event.name, `opt:${idx}`);
-				} finally {
-					_inFlightCards.delete(event.name);
-					if (el.isConnected) disableCardControls(el, false);
-				}
-			});
-		}
-
-		const submitBtn = el.querySelector("[data-clarify-submit]");
-		const fieldInput = el.querySelector("[data-clarify-input]");
-		if (submitBtn && fieldInput) {
-			submitBtn.addEventListener("click", async () => {
-				if (_inFlightCards.has(event.name)) return;
-				const rawVal = fieldInput.value.trim();
-				if (!rawVal) {
-					fieldInput.focus();
-					return;
-				}
-				const val = isNumericField ? Number(rawVal) : rawVal;
-				_inFlightCards.add(event.name);
-				disableCardControls(el, true);
-				try {
-					await onResolveCard({
-						event_name: event.name,
-						decision: "clarify",
-						form_patch: { [inputField]: val },
-						idempotency_key: getActionIdempotencyKey(event.name, `input:${inputField}`),
-					});
-					clearCardIdempotencyKey(event.name, `input:${inputField}`);
-				} finally {
-					_inFlightCards.delete(event.name);
-					if (el.isConnected) disableCardControls(el, false);
-				}
-			});
-		}
-	}
-
-	return el;
-}
-
-function normalizeSlotOption(opt, fallbackSlot, idx) {
-	const src = opt && typeof opt === "object" ? opt : {};
-	const fb = fallbackSlot && typeof fallbackSlot === "object" ? fallbackSlot : {};
-	const scheduledDate = src.scheduled_date || src.date || fb.scheduled_date || fb.date || "";
-	const startTime = src.start_time || src.scheduled_time || fb.start_time || fb.scheduled_time || "";
-	const serviceBay =
-		src.service_bay ||
-		src.bay ||
-		(Array.isArray(src.available_bay_ids) && src.available_bay_ids[0]) ||
-		fb.service_bay ||
-		fb.bay ||
-		(Array.isArray(fb.available_bay_ids) && fb.available_bay_ids[0]) ||
-		"";
-	const technician = src.technician || src.assigned_technician || fb.technician || fb.assigned_technician || "";
-
-	const labelParts = [];
-	const dt = `${scheduledDate} ${startTime}`.trim();
-	if (dt) labelParts.push(dt);
-	if (serviceBay) labelParts.push(String(serviceBay));
-	if (technician) labelParts.push(String(technician));
-	const computedLabel = labelParts.join(" · ");
-	const rawLabel = typeof src.label === "string" ? src.label.trim() : "";
-	const label =
-		rawLabel && (!scheduledDate || rawLabel.includes(scheduledDate))
-			? rawLabel
-			: computedLabel || rawLabel || `Slot ${idx + 1}`;
-
-	return {
-		value: src.value ?? src.slot_index ?? idx,
-		label,
-		scheduled_date: scheduledDate || undefined,
-		start_time: startTime || undefined,
-		service_bay: serviceBay || undefined,
-		technician: technician || undefined,
-	};
-}
-
-function buildGateSummaryHtml(actionType, schema, params) {
-	const items = [];
-	if (actionType === "SUBMIT_PO") {
-		const pos = params.purchase_orders || (params.purchase_order ? [params.purchase_order] : []);
-		if (pos.length) items.push(["Purchase Order(s)", pos.join(", ")]);
-		if (params.supplier) items.push(["Supplier", params.supplier]);
-		const poTotal = params.total_amount ?? params.grand_total ?? params.amount;
-		if (poTotal !== undefined && poTotal !== null) items.push(["Total", formatMoney(poTotal)]);
-	} else if (actionType === "AMEND_QUOTE") {
-		if (schema.current_grand_total !== undefined) items.push(["Current Total", formatMoney(schema.current_grand_total)]);
-		if (params.discount_amount !== undefined) items.push(["Discount", formatMoney(params.discount_amount)]);
-	} else if (actionType === "CHECKOUT_REPAIR_ORDER") {
-		if (schema.grand_total !== undefined) items.push(["Grand Total", formatMoney(schema.grand_total)]);
-		if (schema.deposit_amount !== undefined) items.push(["Deposits Paid", formatMoney(schema.deposit_amount)]);
-		if (schema.outstanding_amount !== undefined) items.push(["Balance Due", formatMoney(schema.outstanding_amount)]);
-	} else if (actionType === "RECORD_DEPOSIT") {
-		if (params.amount !== undefined) items.push(["Deposit Amount", formatMoney(params.amount)]);
-	} else if (actionType === "INTAKE_QUOTE_AND_BOOK") {
-		if (params.customer_name) items.push(["Customer", params.customer_name]);
-		if (params.vin || params.vehicle_identifier) items.push(["Vehicle / VIN", params.vin || params.vehicle_identifier]);
-		if (params.service_package) items.push(["Service Package", params.service_package]);
-		if (params.concern || params.customer_concern) items.push(["Concern", params.concern || params.customer_concern]);
-		if (params.odometer_in !== undefined && params.odometer_in !== null && params.odometer_in !== "") {
-			items.push(["Odometer In", String(params.odometer_in)]);
-		}
-	} else if (actionType === "CONVERT_APPOINTMENT_TO_RO") {
-		if (params.schedule_entry) items.push(["Appointment", params.schedule_entry]);
-	} else if (actionType === "RECEIVE_PO" || actionType === "POST_PURCHASE_INVOICE" || actionType === "PAY_PURCHASE") {
-		if (params.supplier) items.push(["Supplier", params.supplier]);
-		if (params.purchase_order) items.push(["Purchase Order", params.purchase_order]);
-		if (params.purchase_invoice) items.push(["Purchase Invoice", params.purchase_invoice]);
-		const apAmount =
-			actionType === "PAY_PURCHASE"
-				? (params.paid_amount ?? params.amount)
-				: (params.paid_amount ?? params.total_amount ?? params.grand_total ?? params.amount);
-		if (apAmount !== undefined && apAmount !== null) items.push(["Amount", formatMoney(apAmount)]);
-	} else if (actionType === "DISPATCH_CUSTOMER_SMS" || actionType === "SEND_QUOTE_APPROVAL") {
-		if (params.phone_number) items.push(["Phone", params.phone_number]);
-	} else if (actionType === "DISPATCH_CUSTOMER_EMAIL") {
-		if (params.recipient) items.push(["Email", params.recipient]);
-		if (schema.subject || params.subject) items.push(["Subject", schema.subject || params.subject]);
-	}
-
-	let html = "";
-	if (items.length) {
-		html += `<div class="gate-kv-grid">${items
-			.map(
-				([k, v]) =>
-					`<div><div class="gate-kv__label">${escapeHtml(k)}</div><div class="gate-kv__val">${escapeHtml(v)}</div></div>`
-			)
-			.join("")}</div>`;
-	}
-
-	const rawList =
-		params.add_services ||
-		params.services ||
-		params.requested_services ||
-		params.parts_data ||
-		params.parts ||
-		params.items ||
-		[];
-	const listItems = Array.isArray(rawList)
-		? rawList
-		: typeof rawList === "string" && rawList.trim()
-			? [rawList.trim()]
-			: [];
-	if (listItems.length) {
-		html += `<ul class="gate-items-list">${listItems
-			.slice(0, 8)
-			.map((row) => {
-				if (typeof row === "string") return `<li>${escapeHtml(row)}</li>`;
-				const name = row.service_name || row.item_name || row.part_name || row.description || row.item_code || "Item";
-				const qty = row.qty !== undefined ? ` ×${row.qty}` : "";
-				const unitPrice = row.sell_price ?? row.rate ?? row.unit_price ?? row.price;
-				const price =
-					unitPrice !== undefined && unitPrice !== null ? ` — ${formatMoney(unitPrice)}` : "";
-				return `<li>${escapeHtml(name)}${escapeHtml(qty)}${escapeHtml(price)}</li>`;
-			})
-			.join("")}</ul>`;
-	}
-
-	return html;
-}
-
-function getApproveButtonLabel(actionType) {
-	switch (actionType) {
-		case "SUBMIT_PO":
-			return "Approve & Submit PO";
-		case "AMEND_QUOTE":
-			return "Approve Quote Amendment";
-		case "SEND_QUOTE_APPROVAL":
-		case "DISPATCH_CUSTOMER_SMS":
-		case "DISPATCH_CUSTOMER_EMAIL":
-			return "Send to Customer";
-		case "CHECKOUT_REPAIR_ORDER":
-			return "Bill & Release";
-		case "RECORD_DEPOSIT":
-			return "Record Deposit";
-		case "RESCHEDULE_APPOINTMENT":
-			return "Confirm Reschedule";
-		case "INTAKE_QUOTE_AND_BOOK":
-			return "Book & Create RO";
-		case "CONVERT_APPOINTMENT_TO_RO":
-			return "Check In & Create RO";
-		case "RECEIVE_PO":
-			return "Receive Parts";
-		case "POST_PURCHASE_INVOICE":
-			return "Receive & Post Bill";
-		case "PAY_PURCHASE":
-			return "Mark Paid";
-		default:
-			return "Approve & Commit";
-	}
-}
-
-function renderApprovalGateCard(event, { canApprove, onResolveCard, onJumpThread }) {
-	const schema = event.card_schema || {};
-	const params = schema.params || {};
-	const actionType = schema.action_type || "";
-	const isPending = event.resolution_state === "PENDING";
-
-	const el = document.createElement("article");
-	const stateClass =
-		event.resolution_state === "RESOLVED"
-			? "event-card--resolved"
-			: event.resolution_state === "REJECTED"
-				? "event-card--rejected"
-				: "event-card--gate";
-	el.className = `event-card ${stateClass}`;
-	el.dataset.eventName = event.name;
-
-	const summaryHtml = buildGateSummaryHtml(actionType, schema, params);
-
-	if (!isPending) {
-		const resPayload = event.resolution_payload || {};
-		const execRes = resPayload.execution_result || {};
-		const jumpedKey = execRes.ro_thread_key || null;
-
-		el.innerHTML = `
-			${buildEventHeader(event)}
-			<h3 class="gate-title">${escapeHtml(schema.title || event.body_text || actionType)}</h3>
-			${summaryHtml}
-			<div class="event-card__meta-stamp">
-				<span>Status: <strong>${escapeHtml(event.resolution_state)}</strong></span>
-				${event.resolved_by ? `<span>By: ${escapeHtml(event.resolved_by)}</span>` : ""}
-			</div>
-			${jumpedKey ? `<div><button type="button" class="btn btn-sm btn-primary" data-jump-thread="${escapeHtml(jumpedKey)}">Open ${escapeHtml(jumpedKey)} &rarr;</button></div>` : ""}
-		`;
-
-		const jumpBtn = el.querySelector("[data-jump-thread]");
-		if (jumpBtn && onJumpThread) {
-			jumpBtn.addEventListener("click", () => onJumpThread(jumpBtn.dataset.jumpThread));
-		}
-		return el;
-	}
-
-	// Read-only view for ISM Technician
-	if (!canApprove) {
-		el.innerHTML = `
-			${buildEventHeader(event)}
-			<h3 class="gate-title">${escapeHtml(schema.title || event.body_text || actionType)}</h3>
-			${summaryHtml}
-			<div class="gate-readonly-banner">Pending Manager Approval</div>
-		`;
-		return el;
-	}
-
-	// Manager interactive controls
-	let interactiveHtml = "";
-
-	// 1. Editable sanitized customer message
-	if (
-		actionType === "DISPATCH_CUSTOMER_SMS" ||
-		actionType === "DISPATCH_CUSTOMER_EMAIL" ||
-		actionType === "SEND_QUOTE_APPROVAL"
-	) {
-		const msg = schema.message_preview || params.message || "";
-		interactiveHtml += `
-			<div class="gate-field-group">
-				<label class="gate-field-label">Sanitized Customer Message (Editable)</label>
-				<textarea class="gate-textarea" data-field="edited_message">${escapeHtml(msg)}</textarea>
-			</div>
-		`;
-	}
-
-	// 2. Payment method pills for CHECKOUT / DEPOSIT / PAY_PURCHASE
-	if (
-		actionType === "CHECKOUT_REPAIR_ORDER" ||
-		actionType === "RECORD_DEPOSIT" ||
-		actionType === "PAY_PURCHASE"
-	) {
-		const methods =
-			Array.isArray(schema.options) && schema.options.length
-				? schema.options.map((o) => ({ label: o.label || o.value, value: o.value || o.label }))
-				: DEFAULT_PAYMENT_METHODS.map((m) => ({ label: m, value: m }));
-		const defaultMethod = params.payment_method || methods[0].value;
-
-		if (actionType === "CHECKOUT_REPAIR_ORDER") {
-			const odoVal = params.odometer_out ?? schema.odometer_out ?? "";
-			interactiveHtml += `
-				<div class="gate-field-group">
-					<label class="gate-field-label">Verified Odometer Out</label>
-					<input type="number" inputmode="numeric" class="gate-input" data-patch="odometer_out" value="${escapeHtml(odoVal)}" placeholder="Enter odometer reading..." />
-				</div>
-			`;
-		}
-
-		if (actionType === "RECORD_DEPOSIT" || actionType === "PAY_PURCHASE") {
-			const refVal = params.reference_no || "";
-			interactiveHtml += `
-				<div class="gate-field-group">
-					<label class="gate-field-label">Reference # (Optional)</label>
-					<input type="text" class="gate-input" data-patch="reference_no" value="${escapeHtml(refVal)}" placeholder="Auth / e-transfer ref..." />
-				</div>
-			`;
-		}
-
-		interactiveHtml += `
-			<div class="gate-field-group">
-				<span class="gate-field-label">Payment Method</span>
-				<div class="gate-pill-group" data-choice-group="payment_method">
-					${methods
-						.map(
-							(m) =>
-								`<button type="button" class="gate-choice-pill ${m.value === defaultMethod ? "is-selected" : ""}" data-choice-val="${escapeHtml(m.value)}">${escapeHtml(m.label)}</button>`
-						)
-						.join("")}
-				</div>
-			</div>
-		`;
-	}
-
-	// 3. Slot picker for RESCHEDULE_APPOINTMENT / INTAKE_QUOTE_AND_BOOK
-	let normalizedSlots = [];
-	if (actionType === "RESCHEDULE_APPOINTMENT" || actionType === "INTAKE_QUOTE_AND_BOOK") {
-		const candidateSlots = Array.isArray(params.candidate_slots) ? params.candidate_slots : [];
-		const rawSlotOptions =
-			Array.isArray(schema.options) && schema.options.length ? schema.options : candidateSlots;
-		normalizedSlots = rawSlotOptions.map((opt, idx) =>
-			normalizeSlotOption(opt, candidateSlots[idx], idx)
-		);
-		if (normalizedSlots.length) {
-			interactiveHtml += `
-				<div class="gate-field-group">
-					<span class="gate-field-label">Select Time Slot (1-Tap)</span>
-					<div class="gate-pill-group" data-choice-group="slot_index">
-						${normalizedSlots
-							.map(
-								(opt, idx) =>
-									`<button type="button" class="gate-choice-pill ${idx === 0 ? "is-selected" : ""}" data-choice-val="${escapeHtml(opt.value)}" data-slot-idx="${idx}">${escapeHtml(opt.label)}</button>`
-							)
-							.join("")}
-					</div>
-				</div>
-			`;
-		}
-
-		if (actionType === "INTAKE_QUOTE_AND_BOOK") {
-			const odoVal = params.odometer_in ?? "";
-			interactiveHtml += `
-				<div class="gate-field-group">
-					<label class="gate-field-label">Odometer In (Optional)</label>
-					<input type="number" inputmode="numeric" min="0" class="gate-input" data-patch="odometer_in" value="${escapeHtml(odoVal)}" placeholder="0 (pre-arrival)" />
-				</div>
-			`;
-		}
-
-		if (actionType === "RESCHEDULE_APPOINTMENT") {
-			const checked = schema.send_customer_sms_default ? "checked" : "";
-			interactiveHtml += `
-				<label class="gate-toggle-row">
-					<input type="checkbox" data-patch-bool="send_customer_sms" ${checked} />
-					<span>Send Customer ETA SMS</span>
-				</label>
-			`;
-			if (schema.customer_eta_preview) {
-				interactiveHtml += `
-					<div class="gate-field-group">
-						<label class="gate-field-label">Customer ETA SMS Preview</label>
-						<textarea class="gate-textarea" data-field="edited_message">${escapeHtml(schema.customer_eta_preview)}</textarea>
-					</div>
-				`;
+	const dismissBtn = el.querySelector(".js-dismiss-action-btn");
+	if (dismissBtn && onDismissActionCard && actId) {
+		dismissBtn.addEventListener("click", async () => {
+			if (_inFlightActionItems.has(actId)) return;
+			_inFlightActionItems.add(actId);
+			disableCardControls(el, true);
+			try {
+				await onDismissActionCard({
+					action_item: actId,
+					event_name: event.name,
+					title,
+				});
+			} catch (_err) {
+				disableCardControls(el, false);
+			} finally {
+				_inFlightActionItems.delete(actId);
 			}
-		}
-	}
-
-	// 4. Walk-in conversion odometer_in
-	if (actionType === "CONVERT_APPOINTMENT_TO_RO") {
-		interactiveHtml += `
-			<div class="gate-field-group">
-				<label class="gate-field-label">Verified Odometer In (Required)</label>
-				<input type="number" inputmode="numeric" class="gate-input" data-patch="odometer_in" value="${escapeHtml(params.odometer_in ?? "")}" placeholder="Enter odometer in..." />
-			</div>
-		`;
-	}
-
-	// 5. AP Vendor Bill fields (POST_PURCHASE_INVOICE)
-	if (actionType === "POST_PURCHASE_INVOICE") {
-		const updateStockChecked = schema.update_stock || params.update_stock ? "checked" : "";
-		const alsoReceiveChecked = params.also_receive_po ? "checked" : "";
-		interactiveHtml += `
-			<div class="gate-kv-grid">
-				<div class="gate-field-group">
-					<label class="gate-field-label">Vendor Bill #</label>
-					<input type="text" class="gate-input" data-patch="bill_no" value="${escapeHtml(params.bill_no || "")}" placeholder="INV-12345" />
-				</div>
-				<div class="gate-field-group">
-					<label class="gate-field-label">Bill Date</label>
-					<input type="date" class="gate-input" data-patch="bill_date" value="${escapeHtml(params.bill_date || "")}" />
-				</div>
-			</div>
-			<label class="gate-toggle-row">
-				<input type="checkbox" data-patch-bool="update_stock" ${updateStockChecked} />
-				<span>Update Stock directly on Invoice</span>
-			</label>
-			<label class="gate-toggle-row">
-				<input type="checkbox" data-patch-bool="also_receive_po" ${alsoReceiveChecked} />
-				<span>Also create Purchase Receipt against PO</span>
-			</label>
-		`;
-	}
-
-	const approveLabel = getApproveButtonLabel(actionType);
-
-	el.innerHTML = `
-		${buildEventHeader(event)}
-		<h3 class="gate-title">${escapeHtml(schema.title || event.body_text || actionType)}</h3>
-		${summaryHtml}
-		${interactiveHtml}
-		<div class="gate-actions">
-			<button type="button" class="btn btn-green" data-gate-decision="approve">${escapeHtml(approveLabel)}</button>
-			<button type="button" class="btn btn-danger" data-gate-decision="reject">Reject</button>
-		</div>
-	`;
-
-	// Wire 1-tap choice pill groups
-	for (const group of el.querySelectorAll("[data-choice-group]")) {
-		const pills = group.querySelectorAll(".gate-choice-pill");
-		for (const pill of pills) {
-			pill.addEventListener("click", () => {
-				for (const other of pills) other.classList.remove("is-selected");
-				pill.classList.add("is-selected");
-			});
-		}
-	}
-
-	const handleDecision = async (decision) => {
-		if (_inFlightCards.has(event.name)) return;
-
-		const formPatch = {};
-		let selectedOption = null;
-		let editedMessage = null;
-
-		const msgBox = el.querySelector('[data-field="edited_message"]');
-		if (msgBox) editedMessage = msgBox.value.trim();
-
-		for (const input of el.querySelectorAll("[data-patch]")) {
-			const field = input.dataset.patch;
-			const raw = input.value.trim();
-			if (raw !== "") {
-				formPatch[field] = input.type === "number" ? Number(raw) : raw;
-			}
-		}
-
-		for (const cb of el.querySelectorAll("[data-patch-bool]")) {
-			formPatch[cb.dataset.patchBool] = Boolean(cb.checked);
-		}
-
-		for (const group of el.querySelectorAll("[data-choice-group]")) {
-			const key = group.dataset.choiceGroup;
-			const active = group.querySelector(".gate-choice-pill.is-selected");
-			if (active) {
-				const val = active.dataset.choiceVal;
-				if (key === "slot_index") {
-					formPatch.slot_index = Number.isNaN(Number(val)) ? val : Number(val);
-					const slotPos = Number(active.dataset.slotIdx);
-					const chosenSlot =
-						!Number.isNaN(slotPos) && normalizedSlots[slotPos]
-							? normalizedSlots[slotPos]
-							: null;
-					if (chosenSlot) {
-						if (chosenSlot.scheduled_date) formPatch.scheduled_date = chosenSlot.scheduled_date;
-						if (chosenSlot.start_time) formPatch.start_time = chosenSlot.start_time;
-						if (chosenSlot.service_bay) formPatch.service_bay = chosenSlot.service_bay;
-						if (chosenSlot.technician) formPatch.technician = chosenSlot.technician;
-					}
-					selectedOption = val;
-				} else {
-					formPatch[key] = val;
-					selectedOption = val;
-				}
-			}
-		}
-
-		if (
-			actionType === "INTAKE_QUOTE_AND_BOOK" &&
-			formPatch.odometer_in === undefined &&
-			(params.odometer_in === undefined || params.odometer_in === null || params.odometer_in === "")
-		) {
-			formPatch.odometer_in = 0;
-		}
-
-		_inFlightCards.add(event.name);
-		disableCardControls(el, true);
-		try {
-			const res = await onResolveCard({
-				event_name: event.name,
-				decision,
-				selected_option: selectedOption,
-				edited_message: editedMessage,
-				form_patch: Object.keys(formPatch).length ? formPatch : null,
-				idempotency_key: getActionIdempotencyKey(event.name, decision),
-			});
-			clearCardIdempotencyKey(event.name, decision);
-
-			// Jump to newly created RO thread after Intake booking / walk-in check-in
-			const nextThreadKey =
-				res && res.execution_result && res.execution_result.ro_thread_key;
-			if (decision === "approve" && nextThreadKey && onJumpThread) {
-				onJumpThread(nextThreadKey);
-			}
-		} finally {
-			_inFlightCards.delete(event.name);
-			if (el.isConnected) disableCardControls(el, false);
-		}
-	};
-
-	const approveBtn = el.querySelector('[data-gate-decision="approve"]');
-	const rejectBtn = el.querySelector('[data-gate-decision="reject"]');
-	if (approveBtn && onResolveCard) {
-		approveBtn.addEventListener("click", () => handleDecision("approve"));
-	}
-	if (rejectBtn && onResolveCard) {
-		rejectBtn.addEventListener("click", () => handleDecision("reject"));
+		});
 	}
 
 	return el;
@@ -886,20 +306,11 @@ export function renderEventCard(event, handlers = {}) {
 	if (!event) return document.createDocumentFragment();
 	const type = event.payload_type;
 
-	if (type === "STATE_MUTATION" && event.actor_type === "SYSTEM") {
+	if (type === "ACTION_CARD") {
+		return renderActionCard(event, handlers);
+	}
+	if (type === "STATE_MUTATION") {
 		return renderSystemNotificationPill(event);
-	}
-	if (type === "CARD_RESOLUTION") {
-		return renderCardResolutionPill(event);
-	}
-	if (type === "AI_RECEIPT") {
-		return renderReceiptCard(event, handlers);
-	}
-	if (type === "CLARIFICATION_CARD") {
-		return renderClarificationCard(event, handlers);
-	}
-	if (type === "APPROVAL_GATE") {
-		return renderApprovalGateCard(event, handlers);
 	}
 	return renderCaptureCard(event, handlers);
 }
