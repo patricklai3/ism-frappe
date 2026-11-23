@@ -194,6 +194,7 @@ doc_events = {
 	"Schedule Entry": {
 		"on_update": [
 			"ism.board.projections.on_schedule_entry_update",
+			"ism.portal.pin_vault.on_schedule_entry_update_sync_pin",
 			"ism.ism.doctype.shop_action_item.clearing.on_schedule_entry_update_clear_actions",
 		],
 	},

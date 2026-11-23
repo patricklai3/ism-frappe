@@ -86,6 +86,7 @@ __all__ = [
 	"get_booking_settings",
 	"get_shop_branding",
 	"is_booking_enabled",
+	"resolve_booking_pin_state",
 	"resolve_booking_portal_link",
 ]
 
@@ -128,6 +129,7 @@ class BookingConfirmationPayload:
 	portal_handoff: dict[str, Any]
 	notifications: dict[str, Any]
 	shop: dict[str, Any]
+	pin_to_drive: dict[str, Any] | None = None
 
 	def to_dict(self) -> dict[str, Any]:
 		return asdict(self)
@@ -248,3 +250,21 @@ def resolve_booking_portal_link(schedule_entry: str) -> tuple[str, bool]:
 			message=frappe.get_traceback(),
 		)
 		return fallback_url, False
+
+
+def resolve_booking_pin_state(schedule_entry: str) -> dict[str, Any] | None:
+	"""Resolve customer-safe PIN-to-Drive prompt state via soft P4 import for appointment confirmation."""
+	try:
+		from ism.portal.pin_vault import get_schedule_entry_pin_customer_state
+	except ImportError:
+		return None
+
+	try:
+		state = get_schedule_entry_pin_customer_state(schedule_entry)
+		return dict(state) if isinstance(state, dict) else None
+	except Exception:
+		frappe.log_error(
+			title="Booking PIN State Resolution Failed",
+			message=frappe.get_traceback(),
+		)
+		return None

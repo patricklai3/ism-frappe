@@ -204,12 +204,26 @@ export function submitPortalQuoteApproval({ repair_order, approvals, signer_name
 	});
 }
 
-export function submitPinToDrive({ repair_order, pin }) {
-	return portalPost("submit_pin_to_drive", { repair_order, pin });
+export function submitPinToDrive({ repair_order, schedule_entry, pin }) {
+	const body = { pin };
+	if (repair_order) {
+		body.repair_order = repair_order;
+	}
+	if (schedule_entry) {
+		body.schedule_entry = schedule_entry;
+	}
+	return portalPost("submit_pin_to_drive", body);
 }
 
-export function optOutPinToDrive({ repair_order }) {
-	return portalPost("opt_out_pin_to_drive", { repair_order });
+export function optOutPinToDrive({ repair_order, schedule_entry }) {
+	const body = {};
+	if (repair_order) {
+		body.repair_order = repair_order;
+	}
+	if (schedule_entry) {
+		body.schedule_entry = schedule_entry;
+	}
+	return portalPost("opt_out_pin_to_drive", body);
 }
 
 export function getRescheduleOptions({ schedule_entry, start_date, days_ahead } = {}) {

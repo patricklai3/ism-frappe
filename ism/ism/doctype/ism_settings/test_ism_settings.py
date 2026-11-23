@@ -1,6 +1,8 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+from unittest.mock import patch
+
 import frappe
 from ism.setup import setup_default_ism_settings
 from ism.tests.base import ISMTestCase
@@ -387,3 +389,44 @@ class TestISMSettings(ISMTestCase):
 		reloaded = frappe.get_single("ISM Settings")
 		self.assertEqual(int(reloaded.enable_self_serve_booking), 0)
 		self.assertEqual(int(reloaded.self_serve_honeypot_enabled), 0)
+
+	def test_self_serve_booking_warns_when_sms_unconfigured(self):
+		"""Verify enabling self-serve booking warns (non-blocking) when SMS is unconfigured."""
+		field = frappe.get_meta("ISM Settings").get_field("enable_self_serve_booking")
+		self.assertIsNotNone(field)
+		self.assertIn("SMS Gateway Provider", field.description or "")
+		self.assertIn("Allow Self-Serve Booking", field.description or "")
+
+		disabled_doc = frappe.new_doc("ISM Settings")
+		disabled_doc.enable_self_serve_booking = 1
+		disabled_doc.sms_gateway_provider = "Disabled"
+		with patch("frappe.msgprint") as mock_msgprint:
+			disabled_doc.validate()
+		mock_msgprint.assert_called_once()
+		msg = str(mock_msgprint.call_args.args[0])
+		self.assertIn("/book", msg)
+		self.assertIn("SMS", msg)
+		self.assertEqual(mock_msgprint.call_args.kwargs.get("indicator"), "orange")
+
+		telnyx_incomplete = frappe.new_doc("ISM Settings")
+		telnyx_incomplete.enable_self_serve_booking = 1
+		telnyx_incomplete.sms_gateway_provider = "Telnyx"
+		telnyx_incomplete.telnyx_api_key = ""
+		with patch("frappe.msgprint") as mock_msgprint:
+			telnyx_incomplete.validate()
+		mock_msgprint.assert_called_once()
+		self.assertIn("Telnyx API Key", str(mock_msgprint.call_args.args[0]))
+
+		configured_doc = frappe.new_doc("ISM Settings")
+		configured_doc.enable_self_serve_booking = 1
+		configured_doc.sms_gateway_provider = "Mock (Deterministic Test)"
+		with patch("frappe.msgprint") as mock_msgprint:
+			configured_doc.validate()
+		mock_msgprint.assert_not_called()
+
+		off_doc = frappe.new_doc("ISM Settings")
+		off_doc.enable_self_serve_booking = 0
+		off_doc.sms_gateway_provider = "Disabled"
+		with patch("frappe.msgprint") as mock_msgprint:
+			off_doc.validate()
+		mock_msgprint.assert_not_called()

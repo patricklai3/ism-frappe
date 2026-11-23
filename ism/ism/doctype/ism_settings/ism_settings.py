@@ -8,6 +8,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, flt
 
+from ism.comms.providers import get_sms_unconfigured_reason
 from ism.payments.contracts import (
 	SQUARE_CURRENCY,
 	SQUARE_ENV_DISABLED,
@@ -281,3 +282,19 @@ class ISMSettings(Document):
 			phone_limit = cint(self.self_serve_booking_phone_rate_limit_per_day)
 			if phone_limit < 1 or phone_limit > 20:
 				frappe.throw(_("Self-Serve Booking Phone Rate Limit must be between 1 and 20 per day."))
+
+		if (
+			cint(self.enable_self_serve_booking) == 1
+			and not (frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch)
+			and not getattr(self.flags, "ignore_self_serve_sms_warning", False)
+			and getattr(frappe.session, "user", None) != "Guest"
+		):
+			sms_reason = get_sms_unconfigured_reason(self)
+			if sms_reason:
+				frappe.msgprint(
+					_(
+						"Self-Serve Booking is enabled, but /book will remain unavailable until an SMS Gateway Provider is configured: {0}"
+					).format(sms_reason),
+					title=_("Self-Serve Booking Requires SMS"),
+					indicator="orange",
+				)

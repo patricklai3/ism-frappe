@@ -70,7 +70,7 @@ function renderApprovalLogs(logs, auditHash) {
 	`;
 }
 
-export function renderQuoteSection(container, { visit, onHubUpdated, onPromptPin, notify }) {
+export function renderQuoteSection(container, { visit, onHubUpdated, notify }) {
 	const quote = visit?.quote;
 	if (!quote || !Array.isArray(quote.services) || quote.services.length === 0) {
 		container.innerHTML = "";
@@ -408,9 +408,6 @@ export function renderQuoteSection(container, { visit, onHubUpdated, onPromptPin
 			if (res && res.hub) {
 				onHubUpdated(res.hub);
 			}
-			if (res && res.pin_prompt_required && onPromptPin) {
-				onPromptPin(visit.repair_order);
-			}
 		} catch (err) {
 			submitBtn.disabled = false;
 			submitBtn.textContent = "Submit Authorization";
@@ -421,7 +418,8 @@ export function renderQuoteSection(container, { visit, onHubUpdated, onPromptPin
 
 export function renderPinSection(container, { visit, onHubUpdated, notify }) {
 	const pin = visit?.pin_to_drive;
-	if (!visit?.repair_order || !pin) {
+	const hasTarget = Boolean(visit?.repair_order || visit?.schedule_entry);
+	if (!hasTarget || !pin) {
 		container.innerHTML = "";
 		return;
 	}
@@ -494,7 +492,8 @@ export function renderPinSection(container, { visit, onHubUpdated, notify }) {
 	if (openBtn) {
 		openBtn.addEventListener("click", () => {
 			openPinModal({
-				repairOrder: visit.repair_order,
+				repairOrder: visit.repair_order || null,
+				scheduleEntry: visit.schedule_entry || null,
 				pinState: pin,
 				isUpdate: status === "Provided",
 				onHubUpdated,
@@ -504,7 +503,14 @@ export function renderPinSection(container, { visit, onHubUpdated, notify }) {
 	}
 }
 
-export function openPinModal({ repairOrder, pinState, isUpdate = false, onHubUpdated, notify }) {
+export function openPinModal({
+	repairOrder = null,
+	scheduleEntry = null,
+	pinState,
+	isUpdate = false,
+	onHubUpdated,
+	notify,
+}) {
 	const existing = document.querySelector("#portal-pin-modal-backdrop");
 	if (existing) {
 		existing.remove();
@@ -579,7 +585,11 @@ export function openPinModal({ repairOrder, pinState, isUpdate = false, onHubUpd
 		saveBtn.disabled = true;
 		saveBtn.textContent = "Encrypting & Saving...";
 		try {
-			const res = await submitPinToDrive({ repair_order: repairOrder, pin: pinValue });
+			const res = await submitPinToDrive({
+				repair_order: repairOrder || undefined,
+				schedule_entry: !repairOrder ? scheduleEntry || undefined : undefined,
+				pin: pinValue,
+			});
 			close();
 			if (notify) {
 				notify("PIN-to-Drive saved securely.", "success");
@@ -600,7 +610,10 @@ export function openPinModal({ repairOrder, pinState, isUpdate = false, onHubUpd
 		optOutBtn.disabled = true;
 		optOutBtn.textContent = "Saving...";
 		try {
-			const res = await optOutPinToDrive({ repair_order: repairOrder });
+			const res = await optOutPinToDrive({
+				repair_order: repairOrder || undefined,
+				schedule_entry: !repairOrder ? scheduleEntry || undefined : undefined,
+			});
 			close();
 			if (notify) {
 				notify("Recorded: No PIN-to-Drive enabled.", "success");

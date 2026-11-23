@@ -52,6 +52,9 @@ RO_PIN_MUTATION_LOCKED_STATUSES: frozenset[str] = frozenset({
 	"Closed / Released",
 	"Cancelled",
 })
+SE_PIN_PROMPT_STATUSES: frozenset[str] = frozenset({"Scheduled", "Confirmed"})
+SE_PIN_PURGE_STATUSES: frozenset[str] = frozenset({"Completed", "Cancelled", "No Show"})
+SE_PIN_MUTATION_LOCKED_STATUSES: frozenset[str] = frozenset({"Completed", "Cancelled", "No Show"})
 
 PORTAL_BOOKING_TOKEN_TTL_MIN_DAYS: int = 1
 PORTAL_BOOKING_TOKEN_TTL_MAX_DAYS: int = 180

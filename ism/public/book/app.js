@@ -8,7 +8,9 @@ import {
 	confirmSelfServeBooking,
 	fetchPackages,
 	fetchSlots,
+	optOutBookingPinToDrive,
 	requestBookingOtp,
+	submitBookingPinToDrive,
 } from "./api.js";
 import { createBookingStore } from "./state.js";
 
@@ -344,6 +346,42 @@ function initBookingApp() {
 			return;
 		}
 		store.setError("An unexpected error occurred. Please try again or call the shop.");
+	}
+
+	async function handleSaveBookingPin() {
+		const state = store.getState();
+		const bookingRef = state.confirmation && state.confirmation.booking_reference;
+		if (!bookingRef) return;
+		const pinValue = (state.pin && state.pin.code ? state.pin.code : "").trim();
+		if (!/^\d{4}$/.test(pinValue)) {
+			store.setPinError("Please enter an exact 4-digit numeric PIN (0000–9999).");
+			return;
+		}
+		store.setPinSubmitting(true);
+		try {
+			const res = await submitBookingPinToDrive({
+				schedule_entry: bookingRef,
+				pin: pinValue,
+			});
+			store.setPinUpdated(res && res.pin_to_drive, "PIN-to-Drive saved securely.");
+		} catch (err) {
+			store.setPinError((err && err.message) || "Unable to save PIN-to-Drive. Please try again.");
+		}
+	}
+
+	async function handleOptOutBookingPin() {
+		const state = store.getState();
+		const bookingRef = state.confirmation && state.confirmation.booking_reference;
+		if (!bookingRef) return;
+		store.setPinSubmitting(true);
+		try {
+			const res = await optOutBookingPinToDrive({ schedule_entry: bookingRef });
+			store.setPinUpdated(res && res.pin_to_drive, "Recorded: No PIN-to-Drive enabled.");
+		} catch (err) {
+			store.setPinError(
+				(err && err.message) || "Unable to update PIN-to-Drive preference. Please try again."
+			);
+		}
 	}
 
 	function updateStepper(step) {
@@ -1026,6 +1064,161 @@ function initBookingApp() {
 		);
 	}
 
+	function renderStep5PinCard(state, conf) {
+		const sessionReady = Boolean(conf.portal_handoff && conf.portal_handoff.session_established);
+		if (!conf.booking_reference || !sessionReady || !conf.pin_to_drive) {
+			return null;
+		}
+
+		const pin = state.pin || {};
+		const status = pin.status || "Not Prompted";
+		const disclaimer =
+			pin.disclaimer ||
+			"Your 4-digit PIN-to-Drive is encrypted at rest, accessible only to authorized shop technicians while your vehicle is in service, and permanently purged as soon as your vehicle is released.";
+		const showForm = status === "Not Prompted" || Boolean(pin.editing);
+
+		let bodyNode;
+		if (showForm) {
+			bodyNode = el(
+				"form",
+				{
+					className: "ism-pin-form",
+					onSubmit: (e) => {
+						e.preventDefault();
+						handleSaveBookingPin();
+					},
+				},
+				el(
+					"div",
+					{ className: "ism-field" },
+					el("label", {
+						className: "ism-field__label",
+						for: "ism-booking-pin-input",
+						textContent: "4-Digit Numeric PIN-to-Drive",
+					}),
+					el("input", {
+						id: "ism-booking-pin-input",
+						className: "ism-input ism-pin-input",
+						type: "password",
+						inputmode: "numeric",
+						pattern: "\\d{4}",
+						maxlength: "4",
+						autocomplete: "off",
+						placeholder: "••••",
+						value: pin.code || "",
+						disabled: Boolean(pin.submitting),
+						onInput: (e) => store.setPinCode(e.target.value),
+					})
+				),
+				el(
+					"div",
+					{ className: "ism-pin-actions" },
+					el("button", {
+						type: "submit",
+						id: "ism-booking-pin-save-btn",
+						className: "ism-btn ism-btn-primary",
+						disabled: Boolean(pin.submitting) || (pin.code || "").length !== 4,
+						textContent: pin.submitting ? "Encrypting & Saving..." : "Save 4-Digit PIN",
+					}),
+					el("button", {
+						type: "button",
+						id: "ism-booking-pin-optout-btn",
+						className: "ism-btn ism-btn-secondary",
+						disabled: Boolean(pin.submitting),
+						onClick: () => handleOptOutBookingPin(),
+						textContent: "No PIN-to-Drive enabled",
+					}),
+					pin.editing
+						? el("button", {
+								type: "button",
+								className: "ism-btn-link",
+								disabled: Boolean(pin.submitting),
+								onClick: () => store.setPinEditing(false),
+								textContent: "Cancel",
+							})
+						: null
+				)
+			);
+		} else if (status === "Provided") {
+			bodyNode = el(
+				"div",
+				{ className: "ism-pin-resolved" },
+				el(
+					"div",
+					null,
+					el("div", {
+						className: "ism-pin-masked",
+						"aria-label": "PIN-to-Drive stored",
+						textContent: pin.masked_display || "••••",
+					}),
+					el("p", {
+						className: "ism-pin-note",
+						textContent:
+							"Stored encrypted for shop technicians only. Automatically erased when your vehicle is released.",
+					})
+				),
+				el("button", {
+					type: "button",
+					className: "ism-btn ism-btn-secondary",
+					onClick: () => {
+						pendingFocusId = "ism-booking-pin-input";
+						store.setPinEditing(true);
+					},
+					textContent: "Update PIN",
+				})
+			);
+		} else if (status === "Opted Out") {
+			bodyNode = el(
+				"div",
+				{ className: "ism-pin-resolved" },
+				el("p", {
+					className: "ism-pin-note",
+					textContent: "You indicated that No PIN-to-Drive is enabled on this vehicle.",
+				}),
+				el("button", {
+					type: "button",
+					className: "ism-btn ism-btn-secondary",
+					onClick: () => {
+						pendingFocusId = "ism-booking-pin-input";
+						store.setPinEditing(true);
+					},
+					textContent: "Add 4-Digit PIN",
+				})
+			);
+		} else {
+			bodyNode = null;
+		}
+
+		return el(
+			"section",
+			{ id: "ism-booking-pin-card", className: "ism-pin-card", "aria-labelledby": "ism-booking-pin-heading" },
+			el(
+				"div",
+				{ className: "ism-pin-card__head" },
+				el("h2", {
+					id: "ism-booking-pin-heading",
+					className: "ism-pin-card__title",
+					textContent:
+						status === "Not Prompted"
+							? "Does Your Vehicle Use PIN-to-Drive?"
+							: "Vehicle PIN-to-Drive",
+				}),
+				el("span", {
+					className: `ism-status-badge${status === "Provided" ? " ism-status-badge--ok" : ""}`,
+					textContent: status === "Not Prompted" ? "Action Requested" : status,
+				})
+			),
+			el("p", { className: "ism-pin-card__disclaimer", textContent: disclaimer }),
+			pin.error
+				? el("div", { className: "ism-banner ism-banner--error", role: "alert", textContent: pin.error })
+				: null,
+			pin.feedback
+				? el("div", { className: "ism-banner ism-banner--info", role: "status", textContent: pin.feedback })
+				: null,
+			bodyNode
+		);
+	}
+
 	function renderStep5(state) {
 		const conf = state.confirmation || {};
 		const appt = conf.appointment || {};
@@ -1109,6 +1302,7 @@ function initBookingApp() {
 					)
 				: null,
 			el("div", { className: "ism-status-badges" }, badges),
+			renderStep5PinCard(state, conf),
 			el(
 				"div",
 				{ className: "ism-actions-row" },

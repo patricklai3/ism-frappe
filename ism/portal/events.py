@@ -28,12 +28,15 @@ __all__ = [
 	"emit_portal_pin_submitted_event",
 	"emit_portal_quote_approved_event",
 	"emit_portal_reschedule_event",
+	"emit_portal_schedule_entry_pin_purged_event",
+	"emit_portal_schedule_entry_pin_submitted_event",
 ]
 
 
-def _upsert_ro_action_item(
+def _upsert_portal_action_item(
 	*,
-	ro_name: str,
+	reference_doctype: str,
+	reference_name: str,
 	dedup_key: str,
 	title: str,
 	priority: str,
@@ -42,7 +45,7 @@ def _upsert_ro_action_item(
 	clearing_condition_type: str | None = None,
 	clearing_condition_json: str | dict[str, Any] | None = None,
 ) -> str:
-	"""Create or update an open Shop Action Item for a Repair Order (Seam 5)."""
+	"""Create or update an open Shop Action Item for a Repair Order or Schedule Entry (Seam 5)."""
 	existing_name = frappe.db.get_value(
 		"Shop Action Item",
 		{
@@ -56,8 +59,8 @@ def _upsert_ro_action_item(
 		legacy_rows = frappe.get_all(
 			"Shop Action Item",
 			filters={
-				"reference_doctype": "Repair Order",
-				"reference_name": ro_name,
+				"reference_doctype": reference_doctype,
+				"reference_name": reference_name,
 				"category": "General",
 				"status": ["in", ["Open", "In Progress"]],
 			},
@@ -83,8 +86,8 @@ def _upsert_ro_action_item(
 		item_doc.priority = priority
 		item_doc.source = "Agent"
 		item_doc.dedup_key = dedup_key
-		item_doc.reference_doctype = "Repair Order"
-		item_doc.reference_name = ro_name
+		item_doc.reference_doctype = reference_doctype
+		item_doc.reference_name = reference_name
 		item_doc.details = details
 		if clearing_condition_type:
 			item_doc.clearing_condition_type = clearing_condition_type
@@ -100,8 +103,8 @@ def _upsert_ro_action_item(
 	item_doc.status = "Open"
 	item_doc.source = "Agent"
 	item_doc.dedup_key = dedup_key
-	item_doc.reference_doctype = "Repair Order"
-	item_doc.reference_name = ro_name
+	item_doc.reference_doctype = reference_doctype
+	item_doc.reference_name = reference_name
 	item_doc.details = details
 	if clearing_condition_type:
 		item_doc.clearing_condition_type = clearing_condition_type
@@ -109,6 +112,31 @@ def _upsert_ro_action_item(
 		item_doc.clearing_condition_json = serialized_clearing_json
 	item_doc.insert(ignore_permissions=True)
 	return item_doc.name
+
+
+def _upsert_ro_action_item(
+	*,
+	ro_name: str,
+	dedup_key: str,
+	title: str,
+	priority: str,
+	details: str,
+	match_legacy_unkeyed: bool = False,
+	clearing_condition_type: str | None = None,
+	clearing_condition_json: str | dict[str, Any] | None = None,
+) -> str:
+	"""Create or update an open Shop Action Item for a Repair Order (Seam 5)."""
+	return _upsert_portal_action_item(
+		reference_doctype="Repair Order",
+		reference_name=ro_name,
+		dedup_key=dedup_key,
+		title=title,
+		priority=priority,
+		details=details,
+		match_legacy_unkeyed=match_legacy_unkeyed,
+		clearing_condition_type=clearing_condition_type,
+		clearing_condition_json=clearing_condition_json,
+	)
 
 
 def emit_portal_quote_approved_event(
@@ -237,6 +265,58 @@ def emit_portal_pin_purged_event(ro_name: str, *, reason: str = "Closed / Releas
 		{
 			"event_type": "pin_purged",
 			"repair_order": ro_name,
+			"pin_status": PIN_STATUS_PURGED,
+			"reason": reason,
+		},
+		after_commit=True,
+	)
+
+
+def emit_portal_schedule_entry_pin_submitted_event(se_name: str, pin_status: str) -> None:
+	"""Upsert a non-sensitive Shop Action Item and realtime event for Schedule Entry PIN updates.
+
+	Strictly NEVER includes PIN digits in any title, details, or realtime payload.
+	"""
+	if pin_status == PIN_STATUS_PROVIDED:
+		title = _("Customer Provided Vehicle PIN-to-Drive for Appointment {0}").format(se_name)
+		details = _(
+			"Customer submitted an encrypted PIN-to-Drive for their confirmed appointment. "
+			"Authorized staff can view it on the Schedule Entry (or linked Repair Order once checked in)."
+		)
+	elif pin_status == PIN_STATUS_OPTED_OUT:
+		title = _("Customer Opted Out of PIN-to-Drive for Appointment {0}").format(se_name)
+		details = _("Customer confirmed that PIN-to-Drive is not enabled on this vehicle.")
+	else:
+		title = _("Vehicle PIN-to-Drive Status Updated for Appointment {0}").format(se_name)
+		details = _("Vehicle PIN-to-Drive status changed to {0}.").format(pin_status)
+
+	_upsert_portal_action_item(
+		reference_doctype="Schedule Entry",
+		reference_name=se_name,
+		dedup_key=f"portal:pin:se:{se_name}",
+		title=title,
+		priority="Low",
+		details=details,
+	)
+
+	frappe.publish_realtime(
+		"ism_portal_event",
+		{
+			"event_type": "pin_updated",
+			"schedule_entry": se_name,
+			"pin_status": pin_status,
+		},
+		after_commit=True,
+	)
+
+
+def emit_portal_schedule_entry_pin_purged_event(se_name: str, *, reason: str = "Cancelled") -> None:
+	"""Emit non-sensitive realtime notification after a Schedule Entry PIN is purged."""
+	frappe.publish_realtime(
+		"ism_portal_event",
+		{
+			"event_type": "pin_purged",
+			"schedule_entry": se_name,
 			"pin_status": PIN_STATUS_PURGED,
 			"reason": reason,
 		},

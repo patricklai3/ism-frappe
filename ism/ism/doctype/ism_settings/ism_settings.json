@@ -586,7 +586,7 @@
   },
   {
    "default": "0",
-   "description": "Master feature flag for the hosted /book self-serve booking funnel and guest booking endpoints.",
+   "description": "Master feature flag for the hosted /book self-serve booking funnel and guest booking endpoints. Requires a configured SMS Gateway Provider (for OTP verification) — otherwise /book stays unavailable — and at least one Service Package with 'Allow Self-Serve Booking' enabled.",
    "fieldname": "enable_self_serve_booking",
    "fieldtype": "Check",
    "label": "Enable Self-Serve Booking"
@@ -800,7 +800,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-22 00:00:00.000000",
+ "modified": "2026-11-22 04:55:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

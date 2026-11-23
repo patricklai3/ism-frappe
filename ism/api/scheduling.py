@@ -1237,6 +1237,12 @@ def create_repair_order_from_schedule_entry(
 	ro.insert()
 
 	se.db_set("repair_order", ro.name)
+	try:
+		from ism.portal.pin_vault import transfer_schedule_entry_pin_to_ro
+
+		transfer_schedule_entry_pin_to_ro(se.name, ro.name)
+	except ImportError:
+		pass
 	if hasattr(ro, "sync_schedule_entries"):
 		ro.sync_schedule_entries()
 

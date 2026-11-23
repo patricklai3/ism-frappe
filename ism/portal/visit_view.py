@@ -40,7 +40,10 @@ from ism.portal.contracts import (
 	PORTAL_STATUS_SCHEDULED,
 )
 from ism.portal.invoices import get_ro_invoice_summary
-from ism.portal.pin_vault import get_ro_pin_customer_state
+from ism.portal.pin_vault import (
+	get_ro_pin_customer_state,
+	get_schedule_entry_pin_customer_state,
+)
 from ism.scheduling.arrival_policy import format_customer_appointment_display
 from ism.scheduling.self_serve import evaluate_reschedule_eligibility
 
@@ -323,17 +326,16 @@ def _compute_action_badges(
 	payment_state: dict[str, Any] | None,
 ) -> list[str]:
 	badges: list[str] = []
-	if ro_doc is None:
-		return badges
 
 	if not is_read_only:
-		services = getattr(ro_doc, "services", None) or []
-		if any((_field(svc, "status") or "") in _PENDING_SERVICE_STATUSES for svc in services):
-			badges.append("Quote Approval Needed")
+		if ro_doc is not None:
+			services = getattr(ro_doc, "services", None) or []
+			if any((_field(svc, "status") or "") in _PENDING_SERVICE_STATUSES for svc in services):
+				badges.append("Quote Approval Needed")
 		if pin_state and pin_state.get("prompt_required"):
 			badges.append("PIN-to-Drive Requested")
 
-	if payment_state:
+	if ro_doc is not None and payment_state:
 		pay_badge = payment_state.get("portal_payment_badge")
 		if pay_badge == "Manual Deposit Requested" and not is_read_only:
 			badges.append("Deposit Requested")
@@ -417,7 +419,13 @@ def build_portal_hub_payload(
 			pickup_hours_text=pickup_hours,
 		)
 		vehicle_obj = _build_vehicle_section(ro_doc, primary_se)
-		pin_state = _to_plain_value(get_ro_pin_customer_state(ro_doc))
+		has_active_appointment = bool(
+			primary_se is not None
+			and (_field(primary_se, "status") or "").strip() in _ACTIVE_SCHEDULED_SE_STATUSES
+		)
+		pin_state = _to_plain_value(
+			get_ro_pin_customer_state(ro_doc, has_active_appointment=has_active_appointment)
+		)
 		payment_state = _to_plain_value(get_ro_payment_state(ro_doc.name))
 		badges = _compute_action_badges(
 			ro_doc=ro_doc,
@@ -451,6 +459,13 @@ def build_portal_hub_payload(
 			pickup_hours_text=pickup_hours,
 		)
 		vehicle_obj = _build_vehicle_section(None, se_doc)
+		pin_state = _to_plain_value(get_schedule_entry_pin_customer_state(se_doc))
+		badges = _compute_action_badges(
+			ro_doc=None,
+			is_read_only=is_read_only,
+			pin_state=pin_state,
+			payment_state=None,
+		)
 		records.append({
 			"visit_key": f"se:{se_doc.name}",
 			"kind": "booking",
@@ -462,9 +477,9 @@ def build_portal_hub_payload(
 			"is_read_only": is_read_only,
 			"status": status_obj,
 			"vehicle": vehicle_obj,
-			"pin_state": None,
+			"pin_state": pin_state,
 			"payment_state": None,
-			"action_required_badges": [],
+			"action_required_badges": badges,
 		})
 
 	records.sort(key=_visit_sort_key, reverse=True)
