@@ -491,18 +491,18 @@ class TestBoardMediaStorage(ISMTestCase):
 		self.assertEqual(resp.headers.get("Content-Range"), f"bytes 0-7/{len(SAMPLE_PNG)}")
 		self.assertEqual(resp.get_data(), SAMPLE_PNG[:8])
 
-		# Upload with repair_order=None (gracefully handles Shop Board Thread absent in Wave 1B)
+		# Upload with repair_order=None (gracefully handles unattached active-RO thread ref)
 		orphan_ref = media_storage.store_media_payload(
-			"intake_note.ogg",
+			"ro_note.ogg",
 			"audio/ogg",
 			SAMPLE_OGG,
-			thread_key="SHOP:INTAKE",
+			thread_key="RO:RO-TEST-001",
 			repair_order=None,
-			thread_name="SHOP:INTAKE",
+			thread_name="RO:RO-TEST-001",
 			settings=settings,
 		)
 		self._created_files.append(orphan_ref["storage_id"])
-		self.assertEqual(orphan_ref["folder_name"], "SHOP_INTAKE")
+		self.assertEqual(orphan_ref["folder_name"], "RO-TEST-001")
 		orphan_doc = frappe.get_doc("File", orphan_ref["storage_id"])
 		self.assertEqual(orphan_doc.is_private, 1)
 

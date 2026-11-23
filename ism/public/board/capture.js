@@ -8,29 +8,13 @@
 
 import { generateIdempotencyKey, postBoardCapture } from "./api.js";
 
-const INTENT_PILLS_BY_THREAD_TYPE = {
-	REPAIR_ORDER: [
-		{ label: "Blocker", value: "BLOCKER" },
-		{ label: "Parts", value: "PARTS" },
-		{ label: "Checkout", value: "CHECKOUT" },
-		{ label: "FYI", value: "FYI" },
-	],
-	INTAKE: [
-		{ label: "New Quote", value: "NEW_QUOTE" },
-		{ label: "Walk-In", value: "WALK_IN" },
-		{ label: "VIN Photo", value: "VIN_PHOTO" },
-	],
-	AP_RECEIVING: [
-		{ label: "Packing Slip", value: "PACKING_SLIP" },
-		{ label: "Vendor Bill", value: "VENDOR_BILL" },
-		{ label: "Paid", value: "PAID" },
-	],
-	DISPATCH: [
-		{ label: "Floor Alert", value: "FLOOR_ALERT" },
-		{ label: "Bay Update", value: "BAY_UPDATE" },
-		{ label: "FYI", value: "FYI" },
-	],
-};
+const ACTIVE_RO_INTENT_PILLS = [
+	{ label: "Blocker", value: "BLOCKER" },
+	{ label: "Parts", value: "PARTS" },
+	{ label: "Supplement", value: "SUPPLEMENT" },
+	{ label: "Question", value: "QUESTION" },
+	{ label: "FYI", value: "FYI" },
+];
 
 const AUDIO_MIME_CANDIDATES = [
 	{ mime: "audio/webm;codecs=opus", ext: "webm" },
@@ -127,6 +111,7 @@ export class BoardCaptureController {
 		this.selectedIntent = null;
 		this.stagedPhotos = [];
 		this.isSending = false;
+		this.isReadOnly = false;
 		this.lastFailedCapture = null;
 
 		// PTT recording state
@@ -143,8 +128,8 @@ export class BoardCaptureController {
 		this._bindEvents();
 	}
 
-	setThreadType(threadType) {
-		const pills = INTENT_PILLS_BY_THREAD_TYPE[threadType] || INTENT_PILLS_BY_THREAD_TYPE.REPAIR_ORDER;
+	setThreadType(_threadType) {
+		const pills = ACTIVE_RO_INTENT_PILLS;
 		this.selectedIntent = null;
 		this.el.intentPills.innerHTML = "";
 
@@ -154,7 +139,9 @@ export class BoardCaptureController {
 			btn.className = "intent-pill";
 			btn.textContent = pill.label;
 			btn.dataset.intent = pill.value;
+			btn.disabled = this.isReadOnly;
 			btn.addEventListener("click", () => {
+				if (this.isReadOnly) return;
 				if (this.selectedIntent === pill.value) {
 					this.selectedIntent = null;
 					btn.classList.remove("is-active");
@@ -166,6 +153,36 @@ export class BoardCaptureController {
 				}
 			});
 			this.el.intentPills.appendChild(btn);
+		}
+	}
+
+	setReadOnly(locked, reason = "") {
+		this.isReadOnly = Boolean(locked);
+		if (this.isReadOnly && this.isRecording) {
+			this._stopRecording({ send: false });
+		}
+		if (this.el.pttBtn) this.el.pttBtn.disabled = this.isReadOnly;
+		if (this.el.cameraInput) {
+			this.el.cameraInput.disabled = this.isReadOnly;
+			const camLabel = this.el.cameraInput.closest(".capture-btn--cam");
+			if (camLabel) camLabel.classList.toggle("is-disabled", this.isReadOnly);
+		}
+		if (this.el.textInput) this.el.textInput.disabled = this.isReadOnly;
+		if (this.el.sendBtn) this.el.sendBtn.disabled = this.isReadOnly || this.isSending;
+		if (this.el.intentPills) {
+			for (const btn of this.el.intentPills.querySelectorAll(".intent-pill")) {
+				btn.disabled = this.isReadOnly;
+			}
+		}
+		if (this.el.readonlyBanner) {
+			if (this.isReadOnly) {
+				this.el.readonlyBanner.textContent =
+					reason || "This Repair Order is closed or cancelled. Captures are disabled.";
+				this.el.readonlyBanner.classList.remove("is-hidden");
+			} else {
+				this.el.readonlyBanner.textContent = "";
+				this.el.readonlyBanner.classList.add("is-hidden");
+			}
 		}
 	}
 
@@ -309,6 +326,7 @@ export class BoardCaptureController {
 	}
 
 	async _startRecording() {
+		if (this.isReadOnly) return;
 		this._showNotice("");
 		if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") {
 			this._showNotice("Voice recording is not supported in this browser. Type your update or attach a photo.");
@@ -409,7 +427,7 @@ export class BoardCaptureController {
 	}
 
 	async sendCurrent({ extraFile = null } = {}) {
-		if (this.isSending) return;
+		if (this.isSending || this.isReadOnly) return;
 		const ctx = this.getContext();
 		if (!ctx || !ctx.thread_key) {
 			this.onToast("Select a thread first.", "warn");
@@ -483,7 +501,7 @@ export class BoardCaptureController {
 			this.onToast(err.message || "Failed to post update.", "error");
 		} finally {
 			this.isSending = false;
-			this.el.sendBtn.disabled = false;
+			this.el.sendBtn.disabled = this.isReadOnly;
 			this.el.uploadProgress.classList.add("is-hidden");
 		}
 	}

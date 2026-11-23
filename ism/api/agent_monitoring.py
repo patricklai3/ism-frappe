@@ -537,28 +537,39 @@ def get_cockpit_snapshot(
 			"desk_url": f"{base_url}/app/schedule-entry/{quote(entry['name'], safe='')}",
 		})
 
+	action_fields = [
+		"name",
+		"title",
+		"category",
+		"priority",
+		"status",
+		"source",
+		"dedup_key",
+		"snoozed_until",
+		"reference_doctype",
+		"reference_name",
+		"item_code",
+		"details",
+		"reported_by",
+		"resolved_by",
+		"resolved_at",
+		"creation",
+		"modified",
+	]
+	for extra_col in (
+		"board_event",
+		"action_payload_json",
+		"clearing_condition_type",
+		"clearing_condition_json",
+		"auto_cleared",
+	):
+		if frappe.db.has_column("Shop Action Item", extra_col):
+			action_fields.append(extra_col)
+
 	raw_actions = frappe.get_list(
 		"Shop Action Item",
 		filters={"status": ["in", ["Open", "In Progress", "Dismissed"]]},
-		fields=[
-			"name",
-			"title",
-			"category",
-			"priority",
-			"status",
-			"source",
-			"dedup_key",
-			"snoozed_until",
-			"reference_doctype",
-			"reference_name",
-			"item_code",
-			"details",
-			"reported_by",
-			"resolved_by",
-			"resolved_at",
-			"creation",
-			"modified",
-		],
+		fields=action_fields,
 		order_by="modified desc",
 		limit_page_length=200,
 	)

@@ -12,9 +12,16 @@ class ShopBoardThread(Document):
 	def validate(self):
 		if self.thread_key:
 			self.thread_key = self.thread_key.strip()
-		if self.thread_type not in THREAD_TYPES:
+		if self.thread_type != "REPAIR_ORDER" or self.thread_type not in THREAD_TYPES:
 			frappe.throw(
-				_("Invalid Shop Board Thread type: {0}").format(self.thread_type),
+				_("Invalid Shop Board Thread type: {0}. Only REPAIR_ORDER threads are supported.").format(
+					self.thread_type
+				),
+				frappe.ValidationError,
+			)
+		if not (self.repair_order or "").strip():
+			frappe.throw(
+				_("Shop Board Thread requires a linked Repair Order."),
 				frappe.ValidationError,
 			)
 		if self.board_status and self.board_status not in BOARD_STATUSES:

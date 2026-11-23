@@ -31,6 +31,7 @@
   "resolution_payload",
   "cb_links",
   "parent_event",
+  "action_item",
   "idempotency_key",
   "ai_status",
   "ai_error"
@@ -114,7 +115,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Payload Type",
-   "options": "MEDIA_CAPTURE\nTEXT\nAI_RECEIPT\nCLARIFICATION_CARD\nAPPROVAL_GATE\nSTATE_MUTATION\nCARD_RESOLUTION",
+   "options": "MEDIA_CAPTURE\nTEXT\nACTION_CARD\nSTATE_MUTATION",
    "reqd": 1
   },
   {
@@ -174,7 +175,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Resolution State",
-   "options": "NONE\nPENDING\nEXECUTING\nRESOLVED\nREJECTED\nUNDONE\nEXPIRED",
+   "options": "NONE\nPENDING\nRESOLVED\nREJECTED",
    "search_index": 1
   },
   {
@@ -205,6 +206,14 @@
    "options": "Shop Board Event"
   },
   {
+   "fieldname": "action_item",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Action Item",
+   "options": "Shop Action Item",
+   "search_index": 1
+  },
+  {
    "fieldname": "idempotency_key",
    "fieldtype": "Data",
    "label": "Idempotency Key",
@@ -226,7 +235,7 @@
   }
  ],
  "links": [],
- "modified": "2026-11-21 00:00:00.000000",
+ "modified": "2026-11-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Shop Board Event",

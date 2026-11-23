@@ -296,10 +296,43 @@ class ISMTestCase(unittest.TestCase):
 		else:
 			_cancel_and_delete(doc.doctype, doc.name)
 
+	def _clear_board_event_links(self, event_names):
+		names = [n for n in set(event_names or ()) if n]
+		if not names:
+			return
+		if (
+			frappe.db.exists("DocType", "Shop Action Item")
+			and frappe.db.has_column("Shop Action Item", "board_event")
+		):
+			for sai_name in frappe.get_all(
+				"Shop Action Item",
+				filters={"board_event": ["in", names]},
+				pluck="name",
+			):
+				frappe.db.set_value(
+					"Shop Action Item", sai_name, "board_event", None, update_modified=False
+				)
+		if frappe.db.exists("DocType", "Shop Board Event"):
+			if frappe.db.has_column("Shop Board Event", "action_item"):
+				for ev_name in names:
+					if frappe.db.exists("Shop Board Event", ev_name):
+						frappe.db.set_value(
+							"Shop Board Event", ev_name, "action_item", None, update_modified=False
+						)
+			for child_ev in frappe.get_all(
+				"Shop Board Event",
+				filters={"parent_event": ["in", names]},
+				pluck="name",
+			):
+				frappe.db.set_value(
+					"Shop Board Event", child_ev, "parent_event", None, update_modified=False
+				)
+
 	def _teardown_shop_board_event(self, doc):
 		prev = getattr(frappe.flags, "in_board_teardown", False)
 		frappe.flags.in_board_teardown = True
 		try:
+			self._clear_board_event_links([doc.name])
 			_cancel_and_delete("Shop Board Event", doc.name)
 		finally:
 			frappe.flags.in_board_teardown = prev
@@ -310,11 +343,47 @@ class ISMTestCase(unittest.TestCase):
 		prev = getattr(frappe.flags, "in_board_teardown", False)
 		frappe.flags.in_board_teardown = True
 		try:
-			for ev_name in frappe.get_all(
-				"Shop Board Event",
-				filters={"idempotency_key": f"action_item:{sai_name}"},
-				pluck="name",
+			if frappe.db.has_column("Shop Action Item", "board_event") and frappe.db.exists(
+				"Shop Action Item", sai_name
 			):
+				frappe.db.set_value(
+					"Shop Action Item", sai_name, "board_event", None, update_modified=False
+				)
+
+			event_names = set(
+				frappe.get_all(
+					"Shop Board Event",
+					filters={
+						"idempotency_key": [
+							"in",
+							[
+								f"action_item:{sai_name}",
+								f"action_card:{sai_name}",
+								f"action_resolved:{sai_name}",
+							],
+						]
+					},
+					pluck="name",
+				)
+			)
+			event_names.update(
+				frappe.get_all(
+					"Shop Board Event",
+					filters={"idempotency_key": ["like", f"action_resolved:{sai_name}:%"]},
+					pluck="name",
+				)
+			)
+			if frappe.db.has_column("Shop Board Event", "action_item"):
+				event_names.update(
+					frappe.get_all(
+						"Shop Board Event",
+						filters={"action_item": sai_name},
+						pluck="name",
+					)
+				)
+
+			self._clear_board_event_links(event_names)
+			for ev_name in event_names:
 				_cancel_and_delete("Shop Board Event", ev_name)
 		finally:
 			frappe.flags.in_board_teardown = prev
@@ -374,6 +443,7 @@ class ISMTestCase(unittest.TestCase):
 						pluck="name",
 					)
 				)
+				self._clear_board_event_links(event_names)
 				for ev_name in event_names:
 					_cancel_and_delete("Shop Board Event", ev_name)
 			finally:

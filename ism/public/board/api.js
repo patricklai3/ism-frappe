@@ -130,15 +130,14 @@ async function callJsonEndpoint(methodName, params = {}, { httpMethod = "POST" }
 }
 
 export async function listBoardThreads({
-	thread_type = null,
-	status = null,
+	status = "OPEN",
 	assigned_only = false,
 	query = null,
 	limit = 100,
 } = {}) {
 	return callJsonEndpoint(
 		"list_board_threads",
-		{ thread_type, status, assigned_only, query, limit },
+		{ status, assigned_only, query, limit },
 		{ httpMethod: "GET" }
 	);
 }
@@ -254,35 +253,28 @@ export function postBoardCapture({
 	});
 }
 
-export async function resolveBoardCard({
-	event_name,
-	decision,
-	selected_option = null,
-	edited_message = null,
-	form_patch = null,
-	notes = null,
-	idempotency_key = null,
+export async function listBoardActionFeed({
+	status = "Open",
+	repair_order = null,
+	priority = null,
+	limit = 50,
 } = {}) {
-	return callJsonEndpoint("resolve_board_card", {
-		event_name,
-		decision,
-		selected_option,
-		edited_message,
-		form_patch,
-		notes,
-		idempotency_key: idempotency_key || generateIdempotencyKey(),
-	});
+	return callJsonEndpoint(
+		"list_board_action_feed",
+		{ status, repair_order, priority, limit },
+		{ httpMethod: "GET" }
+	);
 }
 
-export async function undoBoardReceipt({
-	event_name,
-	reason = null,
-	idempotency_key = null,
+export async function updateBoardActionCard({
+	action_item,
+	action,
+	notes = null,
 } = {}) {
-	return callJsonEndpoint("undo_board_receipt", {
-		event_name,
-		reason,
-		idempotency_key: idempotency_key || generateIdempotencyKey(),
+	return callJsonEndpoint("update_board_action_card", {
+		action_item,
+		action,
+		notes,
 	});
 }
 

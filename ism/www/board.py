@@ -11,9 +11,9 @@ from urllib.parse import quote, unquote
 import frappe
 from frappe import _
 
-from ism.api.board import list_board_threads
+from ism.api import board as board_api
 from ism.board.gateways import resolve_actor_role
-from ism.board.projections import ensure_singleton_shop_threads, resolve_thread_key
+from ism.board.projections import resolve_thread_key
 from ism.utils.web_security import apply_page_security_headers, compute_asset_version
 
 no_cache = 1
@@ -92,9 +92,7 @@ def get_context(context):
 		context.boot_json = "{}"
 		return
 
-	ensure_singleton_shop_threads()
-
-	can_approve = actor_role == "MANAGER"
+	can_manage = actor_role == "MANAGER"
 	can_access_cockpit = actor_role == "MANAGER"
 	tech_id = frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "name")
 	user_full_name = frappe.utils.get_fullname(frappe.session.user) or frappe.session.user
@@ -104,7 +102,7 @@ def get_context(context):
 
 	initial_threads = []
 	try:
-		listing = list_board_threads(limit=100)
+		listing = board_api.list_board_threads(status="OPEN", limit=100)
 		initial_threads = listing.get("threads") or []
 	except Exception:
 		frappe.log_error(
@@ -112,11 +110,24 @@ def get_context(context):
 			message=frappe.get_traceback(),
 		)
 
+	initial_action_feed = []
+	try:
+		feed_fn = getattr(board_api, "list_board_action_feed", None)
+		if callable(feed_fn):
+			feed_res = feed_fn(status="Open", limit=50)
+			initial_action_feed = feed_res.get("items") or []
+	except Exception:
+		frappe.log_error(
+			title="Shop Board Boot Action Feed Error",
+			message=frappe.get_traceback(),
+		)
+
 	boot_data = {
 		"user": frappe.session.user,
 		"full_name": user_full_name,
 		"actor_role": actor_role,
-		"can_approve": can_approve,
+		"can_manage": can_manage,
+		"can_approve": can_manage,
 		"can_access_cockpit": can_access_cockpit,
 		"tech_id": tech_id,
 		"csrf_token": csrf_token,
@@ -125,11 +136,13 @@ def get_context(context):
 		"initial_thread_key": initial_thread_key,
 		"initial_thread_error": initial_thread_error,
 		"initial_threads": initial_threads,
+		"initial_action_feed": initial_action_feed,
 	}
 
 	context.authorized = True
 	context.actor_role = actor_role
-	context.can_approve = can_approve
+	context.can_manage = can_manage
+	context.can_approve = can_manage
 	context.can_access_cockpit = can_access_cockpit
 	context.user_full_name = user_full_name
 	context.tech_id = tech_id

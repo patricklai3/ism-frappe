@@ -146,8 +146,9 @@ function boardStatusPill(status) {
   if (!status) return "";
   const map = {
     ACTIVE: { cls: "cockpit-pill--green", label: "Active" },
+    NEEDS_ACTION: { cls: "cockpit-pill--amber", label: "Needs Action" },
     BLOCKED_PARTS: { cls: "cockpit-pill--red", label: "Blocked: Parts" },
-    BLOCKED_DECISION: { cls: "cockpit-pill--amber", label: "Blocked: Decision" },
+    BLOCKED_DECISION: { cls: "cockpit-pill--amber", label: "Needs Action" },
     WAITING_CUSTOMER: { cls: "cockpit-pill--sky", label: "Waiting Customer" },
     CLOSED: { cls: "cockpit-pill--muted", label: "Closed" },
   };
@@ -429,24 +430,37 @@ function renderActionCard(it) {
   const deskHref = safeHref(it.deep_link);
   const showDeskLink = deskHref && !deskHref.startsWith("/board");
 
-  const approvals = Number(it.open_approval_count || 0);
-  const clarifications = Number(it.open_clarification_count || 0);
+  const openActions = Number(it.open_action_count || 0);
+  const actId =
+    it.action_item ||
+    (typeof it.name === "string" && it.name.startsWith("ACT-") ? it.name : "");
+  const roName =
+    it.repair_order ||
+    (it.reference_doctype === "Repair Order" && it.reference_name ? it.reference_name : "");
+  const clearingHint = it.clearing_condition_description || it.clearing_condition || "";
 
   const boardBadges = [
-    boardStatusPill(it.board_status),
-    approvals > 0
-      ? `<span class="cockpit-pill cockpit-pill--amber">${approvals} Approval${approvals > 1 ? "s" : ""}</span>`
+    actId ? `<span class="cockpit-pill cockpit-pill--sky">${esc(actId)}</span>` : "",
+    it.source === "Board AI"
+      ? `<span class="cockpit-pill cockpit-pill--amber">Board AI</span>`
       : "",
-    clarifications > 0
-      ? `<span class="cockpit-pill cockpit-pill--sky">${clarifications} Clarification${clarifications > 1 ? "s" : ""}</span>`
+    boardStatusPill(it.board_status),
+    openActions > 0
+      ? `<span class="cockpit-pill cockpit-pill--amber">${openActions} Action${openActions > 1 ? "s" : ""}</span>`
       : "",
   ]
     .filter(Boolean)
     .join("");
 
+  const copyBtnHtml = actId
+    ? `<button type="button" class="cockpit-btn cockpit-btn--sm cockpit-btn--subtle js-copy-agent-btn" ` +
+      `data-act-id="${esc(actId)}" data-ro="${esc(roName)}" data-title="${esc(it.title || "")}">Copy for Agent</button>`
+    : "";
+
   let actionsHtml = "";
   if (isSuppressed) {
     actionsHtml =
+      copyBtnHtml +
       `<button type="button" class="cockpit-btn cockpit-btn--sm cockpit-btn--reopen js-sync-btn" ` +
       `data-action="reopen" data-key="${esc(it.dedup_key)}" data-title="${esc(it.title)}">Reopen</button>`;
   } else {
@@ -461,7 +475,7 @@ function renderActionCard(it) {
       ? `<button type="button" class="cockpit-btn cockpit-btn--sm cockpit-btn--subtle cockpit-btn--danger js-sync-btn" ` +
         `data-action="dismiss" data-key="${esc(it.dedup_key)}" data-title="${esc(it.title)}">Dismiss</button>`
       : "";
-    actionsHtml = snoozeBtns + dismissBtn;
+    actionsHtml = copyBtnHtml + snoozeBtns + dismissBtn;
   }
 
   const stateBadge =
@@ -484,6 +498,7 @@ function renderActionCard(it) {
     `</div>` +
     `<div class="cockpit-card-title">${esc(it.title || it.dedup_key || "Action Item")}</div>` +
     (it.subtitle ? `<div class="cockpit-card-sub">${esc(it.subtitle)}</div>` : "") +
+    (clearingHint ? `<div class="cockpit-card-sub">Auto-clears: ${esc(clearingHint)}</div>` : "") +
     (boardBadges ? `<div class="cockpit-card-board-meta">${boardBadges}</div>` : "") +
     `<div class="cockpit-card-foot">` +
     `<div class="cockpit-card-links">` +
@@ -656,12 +671,11 @@ function renderLaneBlocksHtml(blocks, swim) {
         .filter(Boolean)
         .join(" ");
 
-      const pendingCount =
-        Number(b.open_approval_count || 0) + Number(b.open_clarification_count || 0);
+      const actionCount = Number(b.open_action_count || 0);
       const badgeHtml = isCollision
         ? `<span class="cockpit-job-badge">Overlap</span>`
-        : pendingCount > 0
-          ? `<span class="cockpit-job-badge">${pendingCount} Pending</span>`
+        : actionCount > 0
+          ? `<span class="cockpit-job-badge">${actionCount} Action${actionCount > 1 ? "s" : ""}</span>`
           : "";
 
       const tooltip = `${b.label || ""} — ${b.sublabel || ""} [${b.status || ""}]${
@@ -1130,7 +1144,33 @@ function bindEvents() {
   }
 
   if (actionQueueList) {
-    actionQueueList.addEventListener("click", (ev) => {
+    actionQueueList.addEventListener("click", async (ev) => {
+      const copyBtn = ev.target.closest("button.js-copy-agent-btn");
+      if (copyBtn) {
+        const actId = copyBtn.getAttribute("data-act-id") || "";
+        const ro = copyBtn.getAttribute("data-ro") || "";
+        const title = copyBtn.getAttribute("data-title") || "";
+        const text = `Address ${actId}${ro ? ` (${ro})` : ""}${title ? `: ${title}` : ""}`.trim();
+        try {
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.setAttribute("readonly", "");
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            ta.remove();
+          }
+          showToast(`Copied ${actId} for Agent.`);
+        } catch (_err) {
+          showError("Unable to copy to clipboard.");
+        }
+        return;
+      }
       const btn = ev.target.closest("button.js-sync-btn");
       if (btn) handleSyncAction(btn);
     });

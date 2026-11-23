@@ -23,8 +23,6 @@
   "blocked_since",
   "sec_projection",
   "open_action_count",
-  "open_approval_count",
-  "open_clarification_count",
   "projection_version",
   "cb_projection",
   "last_event_at",
@@ -52,7 +50,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Thread Type",
-   "options": "REPAIR_ORDER\nINTAKE\nAP_RECEIVING\nDISPATCH",
+   "options": "REPAIR_ORDER",
    "reqd": 1,
    "search_index": 1
   },
@@ -124,7 +122,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Board Status",
-   "options": "ACTIVE\nBLOCKED_PARTS\nBLOCKED_DECISION\nWAITING_CUSTOMER\nCLOSED",
+   "options": "ACTIVE\nNEEDS_ACTION\nBLOCKED_PARTS\nWAITING_CUSTOMER\nCLOSED",
    "search_index": 1
   },
   {
@@ -147,18 +145,6 @@
    "fieldname": "open_action_count",
    "fieldtype": "Int",
    "label": "Open Action Count"
-  },
-  {
-   "default": "0",
-   "fieldname": "open_approval_count",
-   "fieldtype": "Int",
-   "label": "Open Approval Count"
-  },
-  {
-   "default": "0",
-   "fieldname": "open_clarification_count",
-   "fieldtype": "Int",
-   "label": "Open Clarification Count"
   },
   {
    "default": "1",
@@ -189,7 +175,7 @@
   }
  ],
  "links": [],
- "modified": "2026-11-21 00:00:00.000000",
+ "modified": "2026-11-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Shop Board Thread",

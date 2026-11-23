@@ -17,15 +17,21 @@
   "reference_name",
   "item_code",
   "dedup_key",
+  "board_event",
   "snoozed_until",
   "reported_by",
   "sec_notes",
   "details",
+  "action_payload_json",
+  "sec_clearing",
+  "clearing_condition_type",
+  "clearing_condition_json",
   "sec_resolution",
   "resolution_notes",
   "col_break_res",
   "resolved_by",
-  "resolved_at"
+  "resolved_at",
+  "auto_cleared"
  ],
  "fields": [
   {
@@ -56,7 +62,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Category",
-   "options": "Shop Floor Discrepancy\nInventory / Parts\nReordering\nAnalytics Threshold\nGeneral",
+   "options": "Shop Floor Discrepancy\nInventory / Parts\nReordering\nQuote / Supplement\nCustomer Comms\nAnalytics Threshold\nGeneral",
    "reqd": 1,
    "search_index": 1
   },
@@ -87,7 +93,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "Source",
-   "options": "Manual\nAgent\nRule Snooze"
+   "options": "Manual\nAgent\nBoard AI\nRule Snooze"
   },
   {
    "fieldname": "col_break_ref",
@@ -124,6 +130,14 @@
    "search_index": 1
   },
   {
+   "fieldname": "board_event",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Board Event",
+   "options": "Shop Board Event",
+   "search_index": 1
+  },
+  {
    "fieldname": "snoozed_until",
    "fieldtype": "Datetime",
    "label": "Snoozed Until"
@@ -145,6 +159,32 @@
    "fieldname": "details",
    "fieldtype": "Small Text",
    "label": "Details"
+  },
+  {
+   "fieldname": "action_payload_json",
+   "fieldtype": "Code",
+   "label": "Action Payload JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "sec_clearing",
+   "fieldtype": "Section Break",
+   "label": "Auto-Clearing Condition"
+  },
+  {
+   "default": "manual",
+   "fieldname": "clearing_condition_type",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Clearing Condition Type",
+   "options": "manual\nro_status_in\nro_approval_status_in\nro_has_supplement_or_service\nro_parts_covered\nro_parts_hold_cleared\nro_schedule_updated\nro_sms_or_email_sent\npo_submitted_or_received\nschedule_converted_to_ro\nro_closed",
+   "search_index": 1
+  },
+  {
+   "fieldname": "clearing_condition_json",
+   "fieldtype": "Code",
+   "label": "Clearing Condition JSON",
+   "options": "JSON"
   },
   {
    "fieldname": "sec_resolution",
@@ -172,10 +212,17 @@
    "fieldtype": "Datetime",
    "label": "Resolved At",
    "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "auto_cleared",
+   "fieldtype": "Check",
+   "label": "Auto Cleared",
+   "read_only": 1
   }
  ],
  "links": [],
- "modified": "2026-10-18 00:00:00.000000",
+ "modified": "2026-11-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Shop Action Item",

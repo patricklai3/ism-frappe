@@ -1,7 +1,7 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-"""Bounded Frappe RQ multimodal AI orchestrator for Shop OS Blackboard events."""
+"""Lightweight Active-RO Shop Board AI orchestrator (STT + Action Item Feed + natural-language follow-up)."""
 
 from __future__ import annotations
 
@@ -9,36 +9,56 @@ import json
 import re
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import asdict
 from typing import Any
 
 import frappe
-from frappe.utils import now_datetime
 
-from ism.board.ai_providers import MultimodalProvider, get_ai_provider, normalize_decision
-from ism.board.contracts import BoardContractError
+from ism.board.ai_providers import BoardAIProvider, get_ai_provider, normalize_ai_result
+from ism.board.contracts import BoardContractError, parse_ro_from_thread_key
 from ism.board.media_storage import (
 	DEFAULT_MAX_AUDIO_MB,
 	DEFAULT_MAX_IMAGE_MB,
 	fetch_event_media_bytes,
 )
-from ism.board.pricing import load_server_pricing_config
-from ism.board.projections import recompute_thread_projection
 
 MAX_TOTAL_MEDIA_BYTES = 20 * 1024 * 1024  # 20 MB aggregate multimodal cap per capture
 MAX_AI_ERROR_LENGTH = 280
+MAX_RECENT_MESSAGES = 4
+MAX_RECENT_MESSAGE_CHARS = 250
 
-_VIN_RE = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b", re.IGNORECASE)
-_DELAY_HINT_RE = re.compile(
-	r"\b(?:delay(?:ed)?|seized|reschedule|extra\s+\d|extra\s+hour|behind\s+schedule|push\s+back|move\s+slot)\b",
+_SECRET_SCRUB_RE = re.compile(
+	r"(?:key|token|bearer|authorization)\s*[:=]\s*\S+|\bbearer\s+\S+|\bsk-[A-Za-z0-9_-]+",
 	re.IGNORECASE,
 )
-_SECRET_SCRUB_RE = re.compile(r"(?:key|token|bearer|authorization)\s*[:=]\s*\S+", re.IGNORECASE)
+_SHORT_ACK_SET: frozenset[str] = frozenset(
+	{
+		"ok",
+		"okay",
+		"got it",
+		"thanks",
+		"thank you",
+		"copy",
+		"copy that",
+		"roger",
+		"k",
+		"kk",
+		"yep",
+		"yes",
+		"no",
+		"done",
+		"thx",
+		"np",
+		"all good",
+		"sounds good",
+		"will do",
+		"noted",
+	}
+)
 
 
 @contextmanager
 def _as_system_user():
-	"""Temporarily elevate to Administrator for verified internal ERP context & event writes."""
+	"""Temporarily elevate to Administrator for verified internal RO context & event updates."""
 	prev_user = getattr(frappe.session, "user", None) or "Administrator"
 	if prev_user == "Administrator":
 		yield prev_user
@@ -69,13 +89,23 @@ def _safe_json_loads(raw: Any, default: Any) -> Any:
 		return default
 
 
+def _is_truthy_flag(val: Any) -> bool:
+	if isinstance(val, bool):
+		return val
+	if isinstance(val, (int, float)):
+		return val != 0
+	if isinstance(val, str):
+		return val.strip().lower() in ("1", "true", "yes", "y", "on")
+	return False
+
+
 def _safe_error_text(exc: Exception) -> str:
 	raw = f"{type(exc).__name__}: {exc}".strip()
 	cleaned = _SECRET_SCRUB_RE.sub("[REDACTED]", raw)
 	cleaned = re.sub(r"\s+", " ", cleaned).strip()
 	if len(cleaned) > MAX_AI_ERROR_LENGTH:
 		cleaned = cleaned[: MAX_AI_ERROR_LENGTH - 1].rstrip() + "…"
-	return cleaned or "Unexpected AI orchestrator error."
+	return cleaned or "Unexpected Board AI error."
 
 
 def _publish_ai_status(
@@ -103,356 +133,177 @@ def _publish_ai_status(
 	)
 
 
-def _gather_repair_order_context(
-	ro_name: str,
-	text: str,
-	intent_tag: str,
-	clarification_patch: dict[str, Any] | None,
-) -> dict[str, Any]:
-	from ism.api.agent_serializers import serialize_repair_order_compact
+def should_skip_ai_for_capture(
+	text: str | None,
+	intent_tag: str | None,
+	attachments: list[dict[str, Any]] | None,
+	metadata: dict[str, Any] | None,
+	*,
+	actor_type: str | None = None,
+) -> bool:
+	"""Zero-cost pre-filter skipping AI when capture needs neither STT nor action extraction."""
+	meta = metadata if isinstance(metadata, dict) else {}
+	effective_actor = str(actor_type or meta.get("actor_type") or "").strip().upper()
+	if effective_actor in ("AI", "SYSTEM"):
+		return True
 
-	context: dict[str, Any] = {"repair_order_name": ro_name}
-	if not ro_name or not frappe.db.exists("Repair Order", ro_name):
-		return context
+	if _is_truthy_flag(meta.get("skip_ai")):
+		return True
 
-	ro_doc = frappe.get_doc("Repair Order", ro_name)
-	vehicle_meta: dict[str, Any] = {}
-	if ro_doc.vehicle and frappe.db.exists("Repair Vehicle", ro_doc.vehicle):
-		vehicle_meta = (
-			frappe.db.get_value(
-				"Repair Vehicle",
-				ro_doc.vehicle,
-				["vin", "license_plate", "model_year", "manufacturer", "model"],
-				as_dict=True,
-			)
-			or {}
-		)
-
-	compact_ro = serialize_repair_order_compact(ro_doc, vehicle_meta=vehicle_meta)
-	compact_ro["deposit_amount"] = float(getattr(ro_doc, "deposit_amount", 0.0) or 0.0)
-	compact_ro["paid_amount"] = float(getattr(ro_doc, "paid_amount", 0.0) or 0.0)
-	compact_ro["outstanding_amount"] = float(
-		getattr(ro_doc, "outstanding_amount", compact_ro.get("grand_total", 0.0)) or 0.0
+	items = attachments if isinstance(attachments, list) else []
+	has_audio = any(
+		isinstance(a, dict)
+		and str(a.get("content_type") or a.get("mime_type") or "").strip().lower().startswith("audio/")
+		for a in items
 	)
-	compact_ro["sales_invoice"] = getattr(ro_doc, "sales_invoice", None)
-	compact_ro["payment_status"] = getattr(ro_doc, "payment_status", None)
-	compact_ro["manual_parts_hold"] = int(getattr(ro_doc, "manual_parts_hold", 0) or 0)
-	if ro_doc.customer:
-		cust_name = frappe.db.get_value("Customer", ro_doc.customer, "customer_name")
-		if cust_name:
-			compact_ro["customer_name"] = cust_name
-	if vehicle_meta:
-		compact_ro["model_year"] = vehicle_meta.get("model_year")
-		compact_ro["manufacturer"] = vehicle_meta.get("manufacturer")
-		compact_ro["model"] = vehicle_meta.get("model")
+	if has_audio:
+		return False
 
-	context["repair_order"] = compact_ro
+	norm_intent = str(intent_tag or meta.get("intent_tag") or "").strip().upper()
+	if norm_intent == "FYI":
+		return True
 
-	# Parts stock check (guarded)
-	try:
-		from ism.api.agent_procurement import check_parts_stock
+	has_any_attachment = len(items) > 0
+	if not has_any_attachment:
+		cleaned = re.sub(r"[.!?,;:]+$", "", " ".join(str(text or "").split())).strip().lower()
+		if not cleaned or cleaned in _SHORT_ACK_SET:
+			return True
 
-		stock_env = check_parts_stock(repair_order=ro_name)
-		if isinstance(stock_env, dict):
-			context["parts_stock"] = stock_env.get("data", stock_env)
-	except Exception:
-		context["parts_stock"] = {}
-
-	# Vehicle intelligence (guarded)
-	if ro_doc.vehicle:
-		try:
-			from ism.api.agent_fleet import get_vehicle_intelligence
-
-			intel_env = get_vehicle_intelligence(vehicle=ro_doc.vehicle, history_limit=5)
-			if isinstance(intel_env, dict):
-				context["vehicle_intelligence"] = intel_env.get("data", intel_env)
-		except Exception:
-			context["vehicle_intelligence"] = {}
-
-	# Active schedule entries linked to this RO
-	try:
-		active_schedules = frappe.get_all(
-			"Schedule Entry",
-			filters={
-				"repair_order": ro_name,
-				"status": ["not in", ["Cancelled", "Completed"]],
-			},
-			fields=[
-				"name",
-				"status",
-				"scheduled_date",
-				"scheduled_time",
-				"estimated_duration",
-				"service_bay",
-				"assigned_technician",
-			],
-			order_by="scheduled_date asc, scheduled_time asc",
-			limit=5,
-		)
-		context["active_schedule_entries"] = active_schedules
-	except Exception:
-		context["active_schedule_entries"] = []
-
-	# Candidate reschedule slots when delay/reschedule intent is present (strictly Internal Capacity T)
-	patch_str = json.dumps(clarification_patch or {}, default=str)
-	norm_intent = re.sub(r"[\s_-]+", " ", (intent_tag or "").strip().lower()).strip()
-	if (
-		_DELAY_HINT_RE.search(text or "")
-		or _DELAY_HINT_RE.search(patch_str)
-		or norm_intent in ("blocker", "reschedule", "delay")
-	):
-		try:
-			from ism.api.agent_scheduling import find_available_slots
-
-			slots_env = find_available_slots(
-				repair_order=ro_name,
-				duration_minutes=120,
-				days_ahead=5,
-				max_slots=5,
-			)
-			slots_data = slots_env.get("data", {}) if isinstance(slots_env, dict) else {}
-			context["candidate_slots"] = list(slots_data.get("slots") or [])
-		except Exception:
-			context["candidate_slots"] = []
-	else:
-		context["candidate_slots"] = []
-
-	# Internal server-side pricing config (never passed through Context Firewall)
-	try:
-		context["pricing_config"] = asdict(load_server_pricing_config())
-	except Exception:
-		context["pricing_config"] = {}
-
-	return context
+	return False
 
 
-def _gather_intake_context(
-	text: str,
-	metadata: dict[str, Any],
-	clarification_patch: dict[str, Any] | None,
-) -> dict[str, Any]:
-	context: dict[str, Any] = {
-		"decoded_vin": {},
-		"matched_vehicles": [],
-		"service_packages": [],
-		"open_appointments": [],
-		"candidate_slots": [],
-	}
-
-	patch = clarification_patch or {}
-	vin = str(patch.get("vin") or metadata.get("vin") or "").strip().upper()
-	if not vin:
-		vin_match = _VIN_RE.search(text or "")
-		if vin_match:
-			vin = vin_match.group(1).upper()
-
-	# VIN decode
-	if vin:
-		try:
-			from ism.api.agent_fleet import decode_vehicle_vin
-
-			decoded_env = decode_vehicle_vin(vin=vin)
-			if isinstance(decoded_env, dict):
-				context["decoded_vin"] = decoded_env.get("data", decoded_env)
-		except Exception:
-			context["decoded_vin"] = {"vin": vin}
-
-	# Vehicle / customer search
-	search_query = vin or str(metadata.get("plate") or metadata.get("customer") or "").strip()
-	if search_query:
-		try:
-			from ism.api.agent_fleet import search_vehicles
-
-			search_env = search_vehicles(query=search_query, limit=5)
-			search_data = search_env.get("data", {}) if isinstance(search_env, dict) else {}
-			context["matched_vehicles"] = list(search_data.get("vehicles") or [])
-		except Exception:
-			context["matched_vehicles"] = []
-
-	# Active service packages
-	try:
-		context["service_packages"] = frappe.get_all(
-			"Service Package",
-			fields=[
-				"name",
-				"package_name",
-				"applicable_model",
-				"standard_labor_hours",
-				"service_rate",
-				"correction_code",
-			],
-			limit=30,
-		)
-	except Exception:
-		context["service_packages"] = []
-
-	# Open upcoming appointments without an RO (for walk-in conversion)
-	try:
-		context["open_appointments"] = frappe.get_all(
-			"Schedule Entry",
-			filters={
-				"repair_order": ["in", ["", None]],
-				"status": ["not in", ["Cancelled", "Completed"]],
-			},
-			fields=[
-				"name",
-				"title",
-				"status",
-				"scheduled_date",
-				"scheduled_time",
-				"customer",
-				"provisional_customer_name",
-				"repair_vehicle",
-				"service_bay",
-				"assigned_technician",
-			],
-			order_by="scheduled_date asc, scheduled_time asc",
-			limit=10,
-		)
-	except Exception:
-		context["open_appointments"] = []
-
-	# Real candidate booking slots (Internal Capacity Time T)
-	try:
-		from ism.api.agent_scheduling import find_available_slots
-
-		slots_env = find_available_slots(duration_minutes=60, days_ahead=7, max_slots=5)
-		slots_data = slots_env.get("data", {}) if isinstance(slots_env, dict) else {}
-		context["candidate_slots"] = list(slots_data.get("slots") or [])
-	except Exception:
-		context["candidate_slots"] = []
-
-	try:
-		context["pricing_config"] = asdict(load_server_pricing_config())
-	except Exception:
-		context["pricing_config"] = {}
-
-	return context
-
-
-def _gather_ap_receiving_context() -> dict[str, Any]:
-	context: dict[str, Any] = {
-		"open_purchase_orders": [],
-		"suppliers": [],
-	}
-
-	try:
-		open_pos = frappe.get_all(
-			"Purchase Order",
-			filters={
-				"docstatus": 1,
-				"status": ["not in", ["Completed", "Closed", "Cancelled"]],
-			},
-			fields=[
-				"name",
-				"supplier",
-				"supplier_name",
-				"transaction_date",
-				"grand_total",
-				"per_received",
-				"per_billed",
-				"status",
-			],
-			order_by="transaction_date desc, creation desc",
-			limit=25,
-		)
-		po_names = [row["name"] for row in open_pos]
-		items_by_po: dict[str, list[dict[str, Any]]] = {name: [] for name in po_names}
-		if po_names:
-			po_items = frappe.get_all(
-				"Purchase Order Item",
-				filters={"parent": ["in", po_names]},
-				fields=[
-					"parent",
-					"item_code",
-					"item_name",
-					"qty",
-					"received_qty",
-					"rate",
-					"amount",
-					"uom",
-				],
-				order_by="idx asc",
-			)
-			for item in po_items:
-				parent = item.get("parent")
-				if parent in items_by_po:
-					items_by_po[parent].append(
-						{
-							"item_code": item.get("item_code"),
-							"item_name": item.get("item_name"),
-							"qty": float(item.get("qty") or 0.0),
-							"received_qty": float(item.get("received_qty") or 0.0),
-							"pending_qty": max(
-								0.0, float(item.get("qty") or 0.0) - float(item.get("received_qty") or 0.0)
-							),
-							"rate": float(item.get("rate") or 0.0),
-							"amount": float(item.get("amount") or 0.0),
-							"uom": item.get("uom"),
-						}
-					)
-
-		for po in open_pos:
-			po["items"] = items_by_po.get(po["name"], [])
-		context["open_purchase_orders"] = open_pos
-	except Exception:
-		context["open_purchase_orders"] = []
-
-	try:
-		suppliers = frappe.get_all("Supplier", fields=["name", "supplier_name"], limit=50)
-		context["suppliers"] = suppliers
-	except Exception:
-		context["suppliers"] = []
-
-	return context
-
-
-def gather_thread_context(
-	thread_doc: Any,
-	event_doc: Any,
-	clarification_patch: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-	"""Gather compact, thread-type-aware ERP context for multimodal AI orchestration."""
-	thread_type = str(getattr(thread_doc, "thread_type", None) or getattr(event_doc, "thread_type", None) or "REPAIR_ORDER").strip().upper()
+def gather_ro_comms_context(thread_doc: Any, event_doc: Any) -> dict[str, Any]:
+	"""Gather compact RO header + up to 4 recent thread messages (~150 tokens, zero heavy ERP queries)."""
+	thread_key = getattr(thread_doc, "name", None) or getattr(event_doc, "thread", "")
+	ro_name = (
+		getattr(event_doc, "repair_order", None)
+		or getattr(thread_doc, "repair_order", None)
+		or parse_ro_from_thread_key(thread_key)
+		or ""
+	)
 	metadata = _safe_json_loads(getattr(event_doc, "metadata_json", None), {})
 	if not isinstance(metadata, dict):
 		metadata = {}
-	media_attachments = _safe_json_loads(getattr(event_doc, "media_attachments", None), [])
-	if not isinstance(media_attachments, list):
-		media_attachments = []
 
-	base_context: dict[str, Any] = {
-		"thread_key": thread_doc.name,
-		"thread_type": thread_type,
-		"thread_title": getattr(thread_doc, "title", "") or "",
-		"event_name": event_doc.name,
-		"intent_tag": getattr(event_doc, "intent_tag", "") or "",
+	context: dict[str, Any] = {
+		"ro_name": ro_name,
+		"ro_status": None,
+		"approval_status": None,
+		"vehicle": getattr(thread_doc, "vehicle", None),
+		"customer": getattr(thread_doc, "customer", None),
+		"bay": getattr(thread_doc, "bay", None),
+		"assigned_technician": getattr(thread_doc, "assigned_technician", None),
+		"service_count": 0,
+		"odometer_in": None,
+		"odometer_out": None,
+		"intent_tag": getattr(event_doc, "intent_tag", None) or "",
+		"actor_role": getattr(event_doc, "actor_type", None) or "",
 		"event_metadata": metadata,
-		"media_attachments": media_attachments,
-		"clarification_patch": clarification_patch or {},
+		"recent_messages": [],
 	}
 
-	text = str(getattr(event_doc, "body_text", "") or "")
-
 	with _as_system_user():
-		if thread_type == "REPAIR_ORDER":
-			ro_name = getattr(event_doc, "repair_order", None) or getattr(thread_doc, "repair_order", None) or ""
-			base_context.update(
-				_gather_repair_order_context(
-					ro_name=ro_name,
-					text=text,
-					intent_tag=base_context["intent_tag"],
-					clarification_patch=clarification_patch,
-				)
+		if ro_name and frappe.db.exists("Repair Order", ro_name):
+			ro = frappe.db.get_value(
+				"Repair Order",
+				ro_name,
+				[
+					"name",
+					"status",
+					"approval_status",
+					"vehicle",
+					"customer",
+					"odometer_in",
+					"odometer_out",
+				],
+				as_dict=True,
 			)
-		elif thread_type == "INTAKE":
-			base_context.update(
-				_gather_intake_context(text=text, metadata=metadata, clarification_patch=clarification_patch)
-			)
-		elif thread_type == "AP_RECEIVING":
-			base_context.update(_gather_ap_receiving_context())
+			if ro:
+				context["ro_status"] = ro.get("status")
+				context["approval_status"] = ro.get("approval_status")
+				context["customer"] = ro.get("customer") or context["customer"]
+				context["odometer_in"] = ro.get("odometer_in")
+				context["odometer_out"] = ro.get("odometer_out")
 
-	return base_context
+				vehicle_name = ro.get("vehicle") or context["vehicle"]
+				if vehicle_name and frappe.db.exists("Repair Vehicle", vehicle_name):
+					veh = frappe.db.get_value(
+						"Repair Vehicle",
+						vehicle_name,
+						["model_year", "manufacturer", "model"],
+						as_dict=True,
+					)
+					if veh:
+						parts = [
+							str(veh.get("model_year") or "").strip(),
+							str(veh.get("manufacturer") or "").strip(),
+							str(veh.get("model") or "").strip(),
+						]
+						label = " ".join(p for p in parts if p)
+						context["vehicle"] = label or vehicle_name
+					else:
+						context["vehicle"] = vehicle_name
+				else:
+					context["vehicle"] = vehicle_name
+
+			try:
+				context["service_count"] = frappe.db.count(
+					"Repair Order Service",
+					{"parent": ro_name, "parenttype": "Repair Order"},
+				)
+			except Exception:
+				context["service_count"] = 0
+
+		# Last 4 TEXT / MEDIA_CAPTURE messages on this thread before event_doc
+		ev_name = getattr(event_doc, "name", None)
+		ev_ts = getattr(event_doc, "event_timestamp", None)
+		ev_creation = getattr(event_doc, "creation", None)
+
+		if thread_key:
+			if ev_name and ev_ts is not None and ev_creation is not None:
+				recent_rows = frappe.db.sql(
+					"""
+					SELECT actor_type, body_text, transcript
+					FROM `tabShop Board Event`
+					WHERE thread = %s
+						AND name != %s
+						AND payload_type IN ('TEXT', 'MEDIA_CAPTURE')
+						AND (event_timestamp, creation, name) < (%s, %s, %s)
+					ORDER BY event_timestamp DESC, creation DESC, name DESC
+					LIMIT %s
+					""",
+					(thread_key, ev_name, ev_ts, ev_creation, ev_name, MAX_RECENT_MESSAGES),
+					as_dict=True,
+				)
+			else:
+				recent_rows = frappe.db.sql(
+					"""
+					SELECT actor_type, body_text, transcript
+					FROM `tabShop Board Event`
+					WHERE thread = %s
+						AND name != %s
+						AND payload_type IN ('TEXT', 'MEDIA_CAPTURE')
+					ORDER BY event_timestamp DESC, creation DESC, name DESC
+					LIMIT %s
+					""",
+					(thread_key, ev_name or "", MAX_RECENT_MESSAGES),
+					as_dict=True,
+				)
+			recent_rows.reverse()
+			recent_msgs: list[dict[str, str]] = []
+			for row in recent_rows:
+				raw_txt = (row.get("transcript") or row.get("body_text") or "").strip()
+				if not raw_txt:
+					continue
+				recent_msgs.append(
+					{
+						"actor_type": str(row.get("actor_type") or ""),
+						"text": raw_txt[:MAX_RECENT_MESSAGE_CHARS],
+					}
+				)
+			context["recent_messages"] = recent_msgs
+
+	return context
 
 
 def _load_event_media_blobs(
@@ -473,8 +324,12 @@ def _load_event_media_blobs(
 		except Exception:
 			cfg = None
 
-	max_audio_bytes = int(float(getattr(cfg, "media_max_audio_mb", DEFAULT_MAX_AUDIO_MB) or DEFAULT_MAX_AUDIO_MB) * 1024 * 1024)
-	max_image_bytes = int(float(getattr(cfg, "media_max_image_mb", DEFAULT_MAX_IMAGE_MB) or DEFAULT_MAX_IMAGE_MB) * 1024 * 1024)
+	max_audio_bytes = int(
+		float(getattr(cfg, "media_max_audio_mb", DEFAULT_MAX_AUDIO_MB) or DEFAULT_MAX_AUDIO_MB) * 1024 * 1024
+	)
+	max_image_bytes = int(
+		float(getattr(cfg, "media_max_image_mb", DEFAULT_MAX_IMAGE_MB) or DEFAULT_MAX_IMAGE_MB) * 1024 * 1024
+	)
 
 	blobs: list[dict[str, Any]] = []
 	remaining_budget = max(0, int(max_total_bytes))
@@ -520,42 +375,8 @@ def _load_event_media_blobs(
 	return blobs
 
 
-def _append_ai_failure_event(thread_doc: Any, source_event: Any, safe_error: str) -> None:
-	try:
-		err_event = frappe.get_doc(
-			{
-				"doctype": "Shop Board Event",
-				"thread": thread_doc.name,
-				"thread_type": thread_doc.thread_type,
-				"repair_order": source_event.repair_order or thread_doc.repair_order,
-				"event_timestamp": now_datetime(),
-				"actor_type": "SYSTEM",
-				"payload_type": "STATE_MUTATION",
-				"target_role": "ALL",
-				"body_text": f"AI processing failed: {safe_error}",
-				"metadata_json": json.dumps(
-					{
-						"kind": "ai_error",
-						"source_event": source_event.name,
-						"error": safe_error,
-					}
-				),
-				"resolution_state": "NONE",
-				"parent_event": source_event.name,
-				"ai_status": "NONE",
-			}
-		)
-		err_event.insert(ignore_permissions=True)
-		recompute_thread_projection(thread_doc.name, publish=True)
-	except Exception:
-		pass
-
-
-def enqueue_board_event(
-	event_name: str,
-	clarification_patch: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-	"""Enqueue a ``Shop Board Event`` for bounded AI orchestration (synchronous under ``in_test`` or Mock provider)."""
+def enqueue_board_event(event_name: str) -> dict[str, Any]:
+	"""Enqueue a ``Shop Board Event`` for lightweight AI analysis (synchronous under ``in_test`` or Mock provider)."""
 	if not isinstance(event_name, str) or not event_name.strip():
 		raise BoardContractError("event_name must be a non-empty string.")
 	clean_name = event_name.strip()
@@ -563,6 +384,28 @@ def enqueue_board_event(
 	with _as_system_user():
 		event_doc = frappe.get_doc("Shop Board Event", clean_name)
 		thread_doc = frappe.get_doc("Shop Board Thread", event_doc.thread)
+
+		attachments = _safe_json_loads(getattr(event_doc, "media_attachments", None), [])
+		metadata = _safe_json_loads(getattr(event_doc, "metadata_json", None), {})
+		if (
+			str(getattr(event_doc, "actor_type", "") or "").strip().upper() in ("AI", "SYSTEM")
+			or should_skip_ai_for_capture(
+				getattr(event_doc, "body_text", None),
+				getattr(event_doc, "intent_tag", None),
+				attachments if isinstance(attachments, list) else [],
+				metadata if isinstance(metadata, dict) else {},
+				actor_type=getattr(event_doc, "actor_type", None),
+			)
+		):
+			event_doc.db_set({"ai_status": "NONE", "ai_error": ""}, update_modified=True)
+			return {
+				"event_name": clean_name,
+				"thread_key": thread_doc.name,
+				"ai_status": "NONE",
+				"queued": False,
+				"synchronous": False,
+				"skipped": True,
+			}
 
 		event_doc.db_set({"ai_status": "QUEUED", "ai_error": ""}, update_modified=True)
 		_publish_ai_status(
@@ -575,7 +418,7 @@ def enqueue_board_event(
 		)
 
 		if getattr(frappe.flags, "in_test", False) or _is_mock_ai_provider():
-			result = process_board_event(clean_name, clarification_patch=clarification_patch)
+			result = process_board_event(clean_name)
 			result["queued"] = False
 			result["synchronous"] = True
 			return result
@@ -585,7 +428,6 @@ def enqueue_board_event(
 			queue="default",
 			enqueue_after_commit=True,
 			event_name=clean_name,
-			clarification_patch=clarification_patch,
 			job_name=f"ism_board_event:{clean_name}",
 		)
 		return {
@@ -599,12 +441,11 @@ def enqueue_board_event(
 
 def process_board_event(
 	event_name: str,
-	clarification_patch: dict[str, Any] | None = None,
 	*,
-	provider: MultimodalProvider | None = None,
-	decision_dispatcher: Callable[[Any, dict[str, Any]], Any] | None = None,
+	provider: BoardAIProvider | None = None,
+	result_dispatcher: Callable[[Any, dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
-	"""Process a ``Shop Board Event`` with thread-aware context, media bytes, and AI decision routing."""
+	"""Process a ``Shop Board Event``: compact RO context + media -> STT / follow-up / Action Items."""
 	if not isinstance(event_name, str) or not event_name.strip():
 		raise BoardContractError("event_name must be a non-empty string.")
 	clean_name = event_name.strip()
@@ -636,37 +477,28 @@ def process_board_event(
 		)
 
 		try:
-			context = gather_thread_context(thread_doc, event_doc, clarification_patch=clarification_patch)
+			context = gather_ro_comms_context(thread_doc, event_doc)
 			media_blobs = _load_event_media_blobs(event_doc)
 
-			raw_decision = active_provider.analyze_capture(
-				thread_type=thread_doc.thread_type,
+			raw_result = active_provider.analyze_capture(
 				context=context,
 				text=event_doc.body_text,
 				media_blobs=media_blobs,
-				clarification_patch=clarification_patch,
 			)
-			decision = normalize_decision(raw_decision)
+			result = normalize_ai_result(raw_result)
 
-			# Persist transcript and confidence_score on the event (mutable fields)
-			persist_updates: dict[str, Any] = {
-				"confidence_score": decision["confidence"],
-			}
-			if decision["transcript"]:
-				persist_updates["transcript"] = decision["transcript"]
-			event_doc.db_set(persist_updates, update_modified=True)
-			event_doc.confidence_score = decision["confidence"]
-			if decision["transcript"]:
-				event_doc.transcript = decision["transcript"]
+			if result["transcript"]:
+				event_doc.db_set({"transcript": result["transcript"]}, update_modified=True)
+				event_doc.transcript = result["transcript"]
 
-			if decision_dispatcher is not None:
-				dispatch_fn = decision_dispatcher
+			if result_dispatcher is not None:
+				dispatch_fn = result_dispatcher
 			else:
-				from ism.board.gateways import dispatch_orchestrator_decision
+				from ism.board.gateways import dispatch_board_ai_result
 
-				dispatch_fn = dispatch_orchestrator_decision
+				dispatch_fn = dispatch_board_ai_result
 
-			dispatch_result = dispatch_fn(event_doc, decision)
+			dispatch_result = dispatch_fn(event_doc, result)
 
 			event_doc.db_set({"ai_status": "COMPLETED", "ai_error": ""}, update_modified=True)
 			_publish_ai_status(
@@ -681,13 +513,13 @@ def process_board_event(
 				"event_name": event_doc.name,
 				"thread_key": thread_doc.name,
 				"ai_status": "COMPLETED",
-				"decision": decision,
+				"outcome": dispatch_result.get("outcome") if isinstance(dispatch_result, dict) else None,
+				"ai_result": result,
 				"dispatch_result": dispatch_result,
 			}
 		except Exception as exc:
 			safe_err = _safe_error_text(exc)
 			event_doc.db_set({"ai_status": "FAILED", "ai_error": safe_err}, update_modified=True)
-			_append_ai_failure_event(thread_doc, event_doc, safe_err)
 			_publish_ai_status(
 				event_doc=event_doc,
 				thread_key=thread_doc.name,
@@ -698,7 +530,7 @@ def process_board_event(
 			)
 			try:
 				frappe.log_error(
-					title=f"Shop Board AI Orchestrator Failed: {event_doc.name}",
+					title=f"Shop Board AI Failed: {event_doc.name}",
 					message=safe_err,
 				)
 			except Exception:
@@ -713,8 +545,11 @@ def process_board_event(
 
 __all__ = [
 	"MAX_AI_ERROR_LENGTH",
+	"MAX_RECENT_MESSAGES",
+	"MAX_RECENT_MESSAGE_CHARS",
 	"MAX_TOTAL_MEDIA_BYTES",
 	"enqueue_board_event",
-	"gather_thread_context",
+	"gather_ro_comms_context",
 	"process_board_event",
+	"should_skip_ai_for_capture",
 ]

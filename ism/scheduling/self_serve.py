@@ -1404,6 +1404,17 @@ def emit_scheduling_domain_event(
 					{"dedup_key": dedup_key, "status": ["in", ["Open", "In Progress"]]},
 					"name",
 				)
+				clearing_type = "schedule_converted_to_ro" if event_type == "self_serve_booking_created" else "manual"
+				clearing_json = (
+					json.dumps(
+						{
+							"baseline_timestamp": now_datetime().strftime("%Y-%m-%d %H:%M:%S.%f"),
+							"description": "When provisional booking is converted to a Repair Order or cancelled",
+						}
+					)
+					if event_type == "self_serve_booking_created"
+					else None
+				)
 				if existing_name:
 					doc = frappe.get_doc("Shop Action Item", existing_name)
 					doc.title = title
@@ -1413,6 +1424,10 @@ def emit_scheduling_domain_event(
 					doc.reference_doctype = "Schedule Entry" if has_ref else None
 					doc.reference_name = se_name if has_ref else None
 					doc.details = details
+					if clearing_type:
+						doc.clearing_condition_type = clearing_type
+					if clearing_json is not None:
+						doc.clearing_condition_json = clearing_json
 					doc.save(ignore_permissions=True)
 					action_item_name = doc.name
 				else:
@@ -1427,6 +1442,9 @@ def emit_scheduling_domain_event(
 					doc.dedup_key = dedup_key
 					doc.reported_by = "Administrator"
 					doc.details = details
+					doc.clearing_condition_type = clearing_type
+					if clearing_json is not None:
+						doc.clearing_condition_json = clearing_json
 					doc.insert(ignore_permissions=True)
 					action_item_name = doc.name
 		except Exception:

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any
 
 import frappe
+
+from ism.ism.doctype.shop_action_item.clearing import CLEARING_CONDITION_DESCRIPTIONS
 
 DEAD_LIFT_MINUTES_THRESHOLD = 30
 COLD_QUOTE_MINUTES_THRESHOLD = 120
@@ -166,12 +169,13 @@ def _metric_title(metric_key: str) -> str:
 
 
 def _load_shop_board_threads_map() -> dict[str, dict[str, Any]]:
-	"""Defensively load Shop Board Thread summaries; returns {} if DocType/table is absent."""
+	"""Defensively load active-RO Shop Board Thread summaries; returns {} if DocType/table is absent."""
 	try:
 		if not getattr(frappe, "db", None) or not frappe.db.table_exists("Shop Board Thread"):
 			return {}
 		rows = frappe.get_all(
 			"Shop Board Thread",
+			filters={"thread_type": "REPAIR_ORDER"},
 			fields=[
 				"thread_key",
 				"thread_type",
@@ -181,8 +185,6 @@ def _load_shop_board_threads_map() -> dict[str, dict[str, Any]]:
 				"blocked_reason",
 				"blocked_since",
 				"open_action_count",
-				"open_approval_count",
-				"open_clarification_count",
 				"last_event_at",
 				"last_event_preview",
 			],
@@ -202,16 +204,14 @@ def _thread_enrichment_for_key(
 			"thread_key": None,
 			"board_url": None,
 			"board_status": None,
-			"open_approval_count": 0,
-			"open_clarification_count": 0,
+			"open_action_count": 0,
 		}
 	info = thread_map.get(thread_key) or {}
 	return {
 		"thread_key": thread_key,
 		"board_url": f"/board?thread={thread_key}",
 		"board_status": info.get("board_status"),
-		"open_approval_count": int(info.get("open_approval_count") or 0),
-		"open_clarification_count": int(info.get("open_clarification_count") or 0),
+		"open_action_count": int(info.get("open_action_count") or 0),
 	}
 
 
@@ -514,44 +514,10 @@ def build_cockpit_view(
 					"can_dismiss": False,
 				})
 
-	# Pending Board Decisions from Shop Board Thread (if present)
-	for thread_key, t_info in sorted(resolved_threads.items()):
-		if not isinstance(t_info, dict):
-			continue
-		open_approvals = int(t_info.get("open_approval_count") or 0)
-		open_clarifications = int(t_info.get("open_clarification_count") or 0)
-		if open_approvals <= 0 and open_clarifications <= 0:
-			continue
-		ro_ref = t_info.get("repair_order") or (thread_key[3:] if thread_key.startswith("RO:") else None)
-		age_min = _minutes_between(t_info.get("blocked_since") or t_info.get("last_event_at"), ref_now)
-		parts = []
-		if open_approvals:
-			parts.append(f"{open_approvals} approval(s)")
-		if open_clarifications:
-			parts.append(f"{open_clarifications} clarification(s)")
-		label = t_info.get("title") or thread_key
-		derived_items.append({
-			"id": f"board_decision:{thread_key}",
-			"dedup_key": f"board_decision:{thread_key}",
-			"kind": "derived",
-			"rule": "board_decision",
-			"priority": "High",
-			"title": f"Pending Board Decision — {label}",
-			"subtitle": " · ".join(parts) + (f" · {t_info.get('blocked_reason')}" if t_info.get("blocked_reason") else ""),
-			"age_minutes": age_min,
-			"age_display": _format_age(age_min),
-			"reference_doctype": "Repair Order" if ro_ref else "Shop Board Thread",
-			"reference_name": ro_ref or thread_key,
-			"thread_key": thread_key,
-			"deep_link": f"/board?thread={thread_key}",
-			"can_snooze": True,
-			"can_dismiss": False,
-		})
-
 	emitted_derived_keys = {it["dedup_key"] for it in derived_items}
 	all_candidates = list(derived_items)
 
-	# Rule 8: Synced irregularities & manual Shop Action Items
+	# Rule 8: Synced irregularities, Board AI action cards, & manual Shop Action Items
 	for row in open_synced_items:
 		d_key = str(row.get("dedup_key") or "").strip() or f"sai:{row['name']}"
 		if d_key in emitted_derived_keys:
@@ -565,13 +531,36 @@ def build_cockpit_view(
 		subtitle = str(row.get("details") or "").strip()
 		if not subtitle:
 			subtitle = f"{row.get('category') or 'General'}" + (f" · {ref_nm}" if ref_nm else "")
+
+		ctype = str(row.get("clearing_condition_type") or "manual").strip() or "manual"
+		clearing_desc = ""
+		raw_cc_json = row.get("clearing_condition_json")
+		if isinstance(raw_cc_json, dict):
+			clearing_desc = str(raw_cc_json.get("description") or "").strip()
+		elif isinstance(raw_cc_json, str) and raw_cc_json.strip():
+			try:
+				parsed_cc = json.loads(raw_cc_json)
+				if isinstance(parsed_cc, dict):
+					clearing_desc = str(parsed_cc.get("description") or "").strip()
+			except Exception:
+				clearing_desc = ""
+		if not clearing_desc:
+			clearing_desc = CLEARING_CONDITION_DESCRIPTIONS.get(ctype, "")
+
+		row_name = str(row.get("name") or "")
 		all_candidates.append({
-			"id": str(row.get("name") or d_key),
+			"id": row_name or d_key,
+			"action_item_name": row_name,
+			"action_item": row_name,
 			"dedup_key": d_key,
 			"kind": "synced",
 			"rule": "synced_action",
+			"source": str(row.get("source") or "Manual"),
+			"board_event": row.get("board_event") or None,
+			"clearing_condition_type": ctype,
+			"clearing_condition_description": clearing_desc,
 			"priority": prio,
-			"title": str(row.get("title") or row.get("name")),
+			"title": str(row.get("title") or row_name),
 			"subtitle": subtitle,
 			"age_minutes": age_min,
 			"age_display": _format_age(age_min),
@@ -1165,7 +1154,14 @@ def build_cockpit_view(
 
 
 def get_cockpit_view(date: str | None = None) -> dict[str, Any]:
-	"""Fetch live cockpit snapshot from agent_monitoring and build the enriched cockpit view."""
+	"""Run lightweight clearing sweep, fetch live cockpit snapshot, and build the enriched cockpit view."""
+	try:
+		from ism.ism.doctype.shop_action_item.clearing import sweep_open_action_items
+
+		sweep_open_action_items()
+	except Exception:
+		pass
+
 	from ism.api.agent_monitoring import get_cockpit_snapshot
 
 	snapshot = get_cockpit_snapshot(date=date)

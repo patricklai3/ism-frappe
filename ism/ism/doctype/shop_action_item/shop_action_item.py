@@ -1,13 +1,33 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import now_datetime
+from frappe.utils import cint, now_datetime
+
+from ism.ism.doctype.shop_action_item.clearing import CLEARING_CONDITION_TYPES
+
+_VALID_SOURCES = ("Manual", "Agent", "Board AI", "Rule Snooze")
 
 
-_VALID_SOURCES = ("Manual", "Agent", "Rule Snooze")
+def _normalize_json_field(value, field_label):
+	if value is None:
+		return None
+	if isinstance(value, (dict, list)):
+		return json.dumps(value)
+	if isinstance(value, str):
+		cleaned = value.strip()
+		if not cleaned:
+			return None
+		try:
+			json.loads(cleaned)
+		except Exception:
+			frappe.throw(_("{0} must be valid JSON.").format(field_label), frappe.ValidationError)
+		return cleaned
+	frappe.throw(_("{0} must be a JSON string or object.").format(field_label), frappe.ValidationError)
 
 
 class ShopActionItem(Document):
@@ -20,6 +40,8 @@ class ShopActionItem(Document):
 		elif self.status in ["Open", "In Progress"]:
 			self.resolved_by = None
 			self.resolved_at = None
+			if hasattr(self, "auto_cleared"):
+				self.auto_cleared = 0
 
 		if self.source and self.source not in _VALID_SOURCES:
 			frappe.throw(
@@ -27,18 +49,53 @@ class ShopActionItem(Document):
 				frappe.ValidationError,
 			)
 
+		if hasattr(self, "clearing_condition_type"):
+			ctype = (self.clearing_condition_type or "").strip() or "manual"
+			if ctype not in CLEARING_CONDITION_TYPES:
+				frappe.throw(
+					_("Invalid Clearing Condition Type: {0}.").format(ctype),
+					frappe.ValidationError,
+				)
+			self.clearing_condition_type = ctype
+
+		if hasattr(self, "action_payload_json") and self.action_payload_json is not None:
+			self.action_payload_json = _normalize_json_field(
+				self.action_payload_json, "Action Payload JSON"
+			)
+
+		if hasattr(self, "clearing_condition_json") and self.clearing_condition_json is not None:
+			self.clearing_condition_json = _normalize_json_field(
+				self.clearing_condition_json, "Clearing Condition JSON"
+			)
+
 	@frappe.whitelist()
 	def resolve(self, resolution_notes=None):
 		self.check_permission("write")
 		if resolution_notes is not None and not isinstance(resolution_notes, str):
 			frappe.throw(_("Resolution Notes must be a string."), frappe.ValidationError)
+		if self.status == "Resolved":
+			return {
+				"status": "success",
+				"already_resolved": True,
+				"auto_cleared": cint(getattr(self, "auto_cleared", 0)),
+				"resolved_by": self.resolved_by,
+				"resolved_at": self.resolved_at,
+				"message": _("Action item is already Resolved."),
+			}
 		self.status = "Resolved"
 		if resolution_notes:
 			self.resolution_notes = resolution_notes
 		self.resolved_by = frappe.session.user
 		self.resolved_at = now_datetime()
 		self.save()
-		return {"status": "success", "message": _("Action item marked as Resolved.")}
+		return {
+			"status": "success",
+			"already_resolved": False,
+			"auto_cleared": cint(getattr(self, "auto_cleared", 0)),
+			"resolved_by": self.resolved_by,
+			"resolved_at": self.resolved_at,
+			"message": _("Action item marked as Resolved."),
+		}
 
 
 @frappe.whitelist()
@@ -54,6 +111,10 @@ def create_shop_action_item(
 	dedup_key=None,
 	source=None,
 	snoozed_until=None,
+	board_event=None,
+	action_payload_json=None,
+	clearing_condition_type=None,
+	clearing_condition_json=None,
 	**kwargs,
 ):
 	frappe.has_permission("Shop Action Item", "create", throw=True)
@@ -70,6 +131,8 @@ def create_shop_action_item(
 		("Reported By", reported_by),
 		("Deduplication Key", dedup_key),
 		("Source", source),
+		("Board Event", board_event),
+		("Clearing Condition Type", clearing_condition_type),
 	):
 		if val is not None and not isinstance(val, str):
 			frappe.throw(_("{0} must be a string.").format(field_label), frappe.ValidationError)
@@ -77,6 +140,23 @@ def create_shop_action_item(
 	clean_source = source.strip() if isinstance(source, str) and source.strip() else None
 	if clean_source and clean_source not in _VALID_SOURCES:
 		frappe.throw(_("Invalid Action Item source: {0}.").format(clean_source), frappe.ValidationError)
+
+	clean_clearing_type = (
+		clearing_condition_type.strip()
+		if isinstance(clearing_condition_type, str) and clearing_condition_type.strip()
+		else None
+	)
+	if clean_clearing_type and clean_clearing_type not in CLEARING_CONDITION_TYPES:
+		frappe.throw(
+			_("Invalid Clearing Condition Type: {0}.").format(clean_clearing_type),
+			frappe.ValidationError,
+		)
+
+	clean_board_event = (
+		board_event.strip() if isinstance(board_event, str) and board_event.strip() else None
+	)
+	clean_action_payload = _normalize_json_field(action_payload_json, "Action Payload JSON")
+	clean_clearing_json = _normalize_json_field(clearing_condition_json, "Clearing Condition JSON")
 
 	clean_dedup_key = dedup_key.strip() if isinstance(dedup_key, str) and dedup_key.strip() else None
 
@@ -134,6 +214,14 @@ def create_shop_action_item(
 				doc.source = clean_source
 			if snoozed_until is not None:
 				doc.snoozed_until = snoozed_until or None
+			if clean_board_event is not None:
+				doc.board_event = clean_board_event
+			if action_payload_json is not None:
+				doc.action_payload_json = clean_action_payload
+			if clean_clearing_type is not None:
+				doc.clearing_condition_type = clean_clearing_type
+			if clearing_condition_json is not None:
+				doc.clearing_condition_json = clean_clearing_json
 			doc.save()
 			return doc.name
 
@@ -147,9 +235,13 @@ def create_shop_action_item(
 	doc.reference_name = ref_name or None
 	doc.item_code = clean_item_code
 	doc.dedup_key = clean_dedup_key
+	doc.board_event = clean_board_event
 	doc.snoozed_until = snoozed_until or None
 	doc.reported_by = resolved_reported_by
 	doc.details = clean_details
+	doc.action_payload_json = clean_action_payload
+	doc.clearing_condition_type = clean_clearing_type or "manual"
+	doc.clearing_condition_json = clean_clearing_json
 	doc.insert()
 	return doc.name
 

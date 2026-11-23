@@ -373,32 +373,109 @@ def _cleanup_shop_health_snapshots(log, errors):
 			_delete_doc_safe("Shop Health Snapshot", shs.name, log, errors)
 
 
+def _unlink_and_delete_board_events(event_names, log, errors):
+	names = [n for n in set(event_names or ()) if n]
+	if not names or not frappe.db.exists("DocType", "Shop Board Event"):
+		return
+	prev_board_td = getattr(frappe.flags, "in_board_teardown", False)
+	frappe.flags.in_board_teardown = True
+	try:
+		if (
+			frappe.db.exists("DocType", "Shop Action Item")
+			and frappe.db.has_column("Shop Action Item", "board_event")
+		):
+			for sai_name in frappe.get_all(
+				"Shop Action Item",
+				filters={"board_event": ["in", names]},
+				pluck="name",
+			):
+				frappe.db.set_value(
+					"Shop Action Item", sai_name, "board_event", None, update_modified=False
+				)
+		if frappe.db.has_column("Shop Board Event", "action_item"):
+			for ev_name in names:
+				if frappe.db.exists("Shop Board Event", ev_name):
+					frappe.db.set_value(
+						"Shop Board Event", ev_name, "action_item", None, update_modified=False
+					)
+		for child_ev in frappe.get_all(
+			"Shop Board Event",
+			filters={"parent_event": ["in", names]},
+			pluck="name",
+		):
+			frappe.db.set_value(
+				"Shop Board Event", child_ev, "parent_event", None, update_modified=False
+			)
+		for ev_name in names:
+			_delete_doc_safe("Shop Board Event", ev_name, log, errors)
+	finally:
+		frappe.flags.in_board_teardown = prev_board_td
+
+
 def _cleanup_shop_action_items(test_customers, test_ros, log, errors):
 	if not frappe.db.exists("DocType", "Shop Action Item"):
 		return
 	fields = ["name"]
-	optional_cols = ["title", "dedup_key", "repair_order", "customer", "vehicle"]
+	optional_cols = [
+		"title",
+		"dedup_key",
+		"repair_order",
+		"reference_doctype",
+		"reference_name",
+		"board_event",
+		"customer",
+		"vehicle",
+	]
 	available_cols = [c for c in optional_cols if frappe.db.has_column("Shop Action Item", c)]
 	for sai in frappe.get_all("Shop Action Item", fields=fields + available_cols):
 		if (
 			_has_test_prefix(sai.get("title"))
 			or _has_test_prefix(sai.get("dedup_key"))
 			or (sai.get("repair_order") and sai.get("repair_order") in test_ros)
+			or (
+				sai.get("reference_doctype") == "Repair Order"
+				and sai.get("reference_name") in test_ros
+			)
 			or _is_test_customer_party(sai.get("customer"), test_customers)
 			or _is_test_vin(sai.get("vehicle"))
 		):
+			if "board_event" in available_cols and sai.get("board_event"):
+				frappe.db.set_value(
+					"Shop Action Item", sai.name, "board_event", None, update_modified=False
+				)
 			if frappe.db.exists("DocType", "Shop Board Event"):
-				prev_board_td = getattr(frappe.flags, "in_board_teardown", False)
-				frappe.flags.in_board_teardown = True
-				try:
-					for ev_name in frappe.get_all(
+				event_names = set(
+					frappe.get_all(
 						"Shop Board Event",
-						filters={"idempotency_key": f"action_item:{sai.name}"},
+						filters={
+							"idempotency_key": [
+								"in",
+								[
+									f"action_item:{sai.name}",
+									f"action_card:{sai.name}",
+									f"action_resolved:{sai.name}",
+								],
+							]
+						},
 						pluck="name",
-					):
-						_delete_doc_safe("Shop Board Event", ev_name, log, errors)
-				finally:
-					frappe.flags.in_board_teardown = prev_board_td
+					)
+				)
+				event_names.update(
+					frappe.get_all(
+						"Shop Board Event",
+						filters={"idempotency_key": ["like", f"action_resolved:{sai.name}:%"]},
+						pluck="name",
+					)
+				)
+				if frappe.db.has_column("Shop Board Event", "action_item"):
+					event_names.update(
+						frappe.get_all(
+							"Shop Board Event",
+							filters={"action_item": sai.name},
+							pluck="name",
+						)
+					)
+				_unlink_and_delete_board_events(event_names, log, errors)
 			_delete_doc_safe("Shop Action Item", sai.name, log, errors)
 
 
@@ -410,6 +487,25 @@ def _cleanup_repair_orders(test_ros, log, errors):
 			if frappe.db.exists("DocType", "Schedule Entry"):
 				for se_name in frappe.get_all("Schedule Entry", filters={"repair_order": ro_name}, pluck="name"):
 					_delete_doc_safe("Schedule Entry", se_name, log, errors)
+
+			if frappe.db.exists("DocType", "Shop Board Event"):
+				event_names = set(
+					frappe.get_all("Shop Board Event", filters={"repair_order": ro_name}, pluck="name")
+				)
+				event_names.update(
+					frappe.get_all("Shop Board Event", filters={"thread": f"RO:{ro_name}"}, pluck="name")
+				)
+				_unlink_and_delete_board_events(event_names, log, errors)
+
+			if frappe.db.exists("DocType", "Shop Board Thread"):
+				thread_names = set(
+					frappe.get_all("Shop Board Thread", filters={"repair_order": ro_name}, pluck="name")
+				)
+				ro_key = f"RO:{ro_name}"
+				if frappe.db.exists("Shop Board Thread", ro_key):
+					thread_names.add(ro_key)
+				for thread_name in thread_names:
+					_delete_doc_safe("Shop Board Thread", thread_name, log, errors)
 
 			doc = frappe.get_doc("Repair Order", ro_name)
 			if doc.sales_invoice:

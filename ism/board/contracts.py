@@ -1,7 +1,7 @@
 # Copyright (c) 2026, patricklai3 and contributors
 # For license information, please see license.txt
 
-"""Frozen contracts, enums, and card payload validators for Shop OS Blackboard."""
+"""Frozen contracts, enums, and action-card validators for Active-RO Shop Board."""
 
 from __future__ import annotations
 
@@ -9,30 +9,21 @@ from typing import Any
 
 import frappe
 
-THREAD_TYPES: tuple[str, ...] = (
-	"REPAIR_ORDER",
-	"INTAKE",
-	"AP_RECEIVING",
-	"DISPATCH",
-)
+from ism.ism.doctype.shop_action_item.clearing import CLEARING_CONDITION_TYPES
 
-SINGLETON_THREADS: dict[str, tuple[str, str]] = {
-	"SHOP:INTAKE": ("INTAKE", "Front Desk Intake & Booking"),
-	"SHOP:AP_RECEIVING": ("AP_RECEIVING", "Dock Receiving & Vendor Bills"),
-	"SHOP:DISPATCH": ("DISPATCH", "Shop Dispatch & Floor Alerts"),
-}
+THREAD_TYPES: tuple[str, ...] = ("REPAIR_ORDER",)
 
 BOARD_STATUSES: tuple[str, ...] = (
 	"ACTIVE",
+	"NEEDS_ACTION",
 	"BLOCKED_PARTS",
-	"BLOCKED_DECISION",
 	"WAITING_CUSTOMER",
 	"CLOSED",
 )
 
 BLOCKED_BOARD_STATUSES: tuple[str, ...] = (
+	"NEEDS_ACTION",
 	"BLOCKED_PARTS",
-	"BLOCKED_DECISION",
 	"WAITING_CUSTOMER",
 )
 
@@ -40,6 +31,11 @@ CLOSED_RO_STATUSES: tuple[str, ...] = (
 	"Closed / Released",
 	"Cancelled",
 	"Billed / Paid",
+)
+
+CAPTURE_LOCKED_RO_STATUSES: tuple[str, ...] = (
+	"Closed / Released",
+	"Cancelled",
 )
 
 ACTOR_TYPES: tuple[str, ...] = (
@@ -52,26 +48,15 @@ ACTOR_TYPES: tuple[str, ...] = (
 PAYLOAD_TYPES: tuple[str, ...] = (
 	"MEDIA_CAPTURE",
 	"TEXT",
-	"AI_RECEIPT",
-	"CLARIFICATION_CARD",
-	"APPROVAL_GATE",
+	"ACTION_CARD",
 	"STATE_MUTATION",
-	"CARD_RESOLUTION",
-)
-
-PENDING_DECISION_PAYLOAD_TYPES: tuple[str, ...] = (
-	"CLARIFICATION_CARD",
-	"APPROVAL_GATE",
 )
 
 RESOLUTION_STATES: tuple[str, ...] = (
 	"NONE",
 	"PENDING",
-	"EXECUTING",
 	"RESOLVED",
 	"REJECTED",
-	"UNDONE",
-	"EXPIRED",
 )
 
 TARGET_ROLES: tuple[str, ...] = (
@@ -88,35 +73,50 @@ AI_STATUSES: tuple[str, ...] = (
 	"FAILED",
 )
 
-AUTONOMOUS_ACTIONS: tuple[str, ...] = (
-	"LOG_RO_NOTE",
-	"ATTACH_INSPECTION_MEDIA",
-	"ADD_SUPPLEMENT_DRAFT",
-	"SET_PARTS_HOLD",
-	"CLEAR_PARTS_HOLD",
-	"DRAFT_PURCHASE_ORDER",
-	"UPDATE_JOB_STATUS",
-	"TOGGLE_SERVICE_COMPLETION",
-	"ADD_DEFERRED_SERVICES",
+ACTION_CARD_CATEGORIES: tuple[str, ...] = (
+	"Shop Floor Discrepancy",
+	"Inventory / Parts",
+	"Reordering",
+	"Quote / Supplement",
+	"Customer Comms",
+	"Analytics Threshold",
+	"General",
 )
 
-MANAGER_GATED_ACTIONS: tuple[str, ...] = (
-	"SUBMIT_PO",
-	"AMEND_QUOTE",
-	"SEND_QUOTE_APPROVAL",
-	"DISPATCH_CUSTOMER_SMS",
-	"DISPATCH_CUSTOMER_EMAIL",
-	"RECORD_DEPOSIT",
-	"CHECKOUT_REPAIR_ORDER",
-	"RESCHEDULE_APPOINTMENT",
-	"INTAKE_QUOTE_AND_BOOK",
-	"CONVERT_APPOINTMENT_TO_RO",
-	"RECEIVE_PO",
-	"POST_PURCHASE_INVOICE",
-	"PAY_PURCHASE",
+ACTION_CARD_PRIORITIES: tuple[str, ...] = (
+	"Low",
+	"Medium",
+	"High",
+	"Critical",
 )
 
-ALL_ACTIONS: tuple[str, ...] = AUTONOMOUS_ACTIONS + MANAGER_GATED_ACTIONS
+SUGGESTED_ACTION_TO_CLEARING_CONDITION: dict[str, str] = {
+	"ADD_SUPPLEMENT": "ro_has_supplement_or_service",
+	"ADD_SERVICE": "ro_has_supplement_or_service",
+	"AMEND_QUOTE": "ro_has_supplement_or_service",
+	"SEND_APPROVAL": "ro_approval_status_in",
+	"SEND_QUOTE_APPROVAL": "ro_approval_status_in",
+	"ORDER_PARTS": "po_submitted_or_received",
+	"PROCURE_PARTS": "po_submitted_or_received",
+	"CREATE_PO": "po_submitted_or_received",
+	"RECEIVE_PARTS": "po_submitted_or_received",
+	"CHECK_PARTS": "ro_parts_covered",
+	"CLEAR_PARTS_HOLD": "ro_parts_hold_cleared",
+	"SET_PARTS_HOLD": "ro_parts_hold_cleared",
+	"UPDATE_JOB_STATUS": "ro_status_in",
+	"COMPLETE_JOB": "ro_status_in",
+	"WORK_COMPLETED": "ro_status_in",
+	"RESCHEDULE": "ro_schedule_updated",
+	"UPDATE_SCHEDULE": "ro_schedule_updated",
+	"NOTIFY_CUSTOMER": "ro_sms_or_email_sent",
+	"SEND_SMS": "ro_sms_or_email_sent",
+	"SEND_EMAIL": "ro_sms_or_email_sent",
+	"CUSTOMER_UPDATE": "ro_sms_or_email_sent",
+	"CONVERT_BOOKING": "schedule_converted_to_ro",
+	"CHECKOUT_RO": "ro_closed",
+	"CLOSE_RO": "ro_closed",
+	"MANUAL_REVIEW": "manual",
+}
 
 SELF_ECHO_DEDUP_PREFIX = "board:"
 
@@ -135,7 +135,7 @@ IMMUTABLE_EVENT_FIELDS: tuple[str, ...] = (
 
 
 class BoardContractError(frappe.ValidationError, ValueError):
-	"""Raised when a board identifier or card payload violates frozen contracts."""
+	"""Raised when a board identifier or action-card payload violates frozen contracts."""
 
 
 def ro_thread_key(ro_name: str) -> str:
@@ -162,154 +162,100 @@ def parse_ro_from_thread_key(thread_key: str | None) -> str | None:
 	return inner or None
 
 
-def _normalize_options(options: Any) -> list[dict[str, Any]]:
-	if not isinstance(options, list):
-		raise BoardContractError("Card 'options' must be a list.")
-	normalized: list[dict[str, Any]] = []
-	for idx, item in enumerate(options):
-		if isinstance(item, str):
-			val = item.strip()
-			if not val:
-				raise BoardContractError(f"Card option at index {idx} cannot be empty.")
-			normalized.append({"label": val, "value": val})
-		elif isinstance(item, dict):
-			label = item.get("label")
-			value = item.get("value", label)
-			if not isinstance(label, str) or not label.strip():
-				raise BoardContractError(f"Card option at index {idx} requires a non-empty 'label'.")
-			if value is None or (isinstance(value, str) and not value.strip()):
-				raise BoardContractError(f"Card option at index {idx} requires a non-empty 'value'.")
-			entry = dict(item)
-			entry["label"] = label.strip()
-			entry["value"] = value.strip() if isinstance(value, str) else value
-			normalized.append(entry)
-		else:
-			raise BoardContractError(f"Card option at index {idx} must be a string or dict.")
-	return normalized
-
-
-def validate_clarification_card(card: dict[str, Any]) -> dict[str, Any]:
-	"""Validate and normalize a ``CLARIFICATION_CARD`` payload."""
+def validate_action_card(card: dict[str, Any]) -> dict[str, Any]:
+	"""Validate and normalize an ``ACTION_CARD`` payload."""
 	if not isinstance(card, dict):
-		raise BoardContractError("Clarification card payload must be a dict.")
+		raise BoardContractError("Action card payload must be a dict.")
 
-	prompt = card.get("prompt") or card.get("question")
-	if not isinstance(prompt, str) or not prompt.strip():
-		raise BoardContractError("Clarification card requires a non-empty 'prompt' string.")
-
-	raw_options = card.get("options")
-	input_field = card.get("input_field")
-	if raw_options is None and not (isinstance(input_field, str) and input_field.strip()):
-		raise BoardContractError(
-			"Clarification card requires either non-empty 'options' or an 'input_field'."
-		)
-
-	options: list[dict[str, Any]] = []
-	if raw_options is not None:
-		options = _normalize_options(raw_options)
-		if not options and not (isinstance(input_field, str) and input_field.strip()):
-			raise BoardContractError(
-				"Clarification card 'options' cannot be empty unless 'input_field' is provided."
-			)
-
-	action_type = card.get("action_type")
-	if action_type is not None and action_type not in ALL_ACTIONS:
-		raise BoardContractError(f"Unknown clarification action_type: {action_type!r}.")
-
-	target_role = card.get("target_role", "TECH")
-	if target_role not in TARGET_ROLES:
-		raise BoardContractError(f"Invalid target_role for clarification card: {target_role!r}.")
-
-	result = dict(card)
-	result["prompt"] = prompt.strip()
-	result["options"] = options
-	result["target_role"] = target_role
-	if isinstance(input_field, str) and input_field.strip():
-		result["input_field"] = input_field.strip()
-	return result
-
-
-def validate_approval_gate_card(card: dict[str, Any]) -> dict[str, Any]:
-	"""Validate and normalize an ``APPROVAL_GATE`` payload."""
-	if not isinstance(card, dict):
-		raise BoardContractError("Approval gate card payload must be a dict.")
-
-	action_type = card.get("action_type")
-	if action_type not in MANAGER_GATED_ACTIONS:
-		raise BoardContractError(
-			f"Approval gate requires action_type in MANAGER_GATED_ACTIONS, got {action_type!r}."
-		)
-
-	title = card.get("title") or card.get("summary")
+	title = card.get("title")
 	if not isinstance(title, str) or not title.strip():
-		raise BoardContractError("Approval gate card requires a non-empty 'title' or 'summary'.")
+		raise BoardContractError("Action card requires a non-empty 'title' string.")
 
-	target_role = card.get("target_role", "MANAGER")
-	if target_role != "MANAGER":
-		raise BoardContractError("Approval gate cards must target 'MANAGER'.")
+	details = card.get("details", "")
+	if details is not None and not isinstance(details, str):
+		raise BoardContractError("Action card 'details' must be a string.")
 
-	params = card.get("params", {})
-	if params is not None and not isinstance(params, dict):
-		raise BoardContractError("Approval gate 'params' must be a dict.")
+	category = card.get("category") or "General"
+	if not isinstance(category, str) or category.strip() not in ACTION_CARD_CATEGORIES:
+		raise BoardContractError(f"Invalid action card category: {category!r}.")
+	clean_category = category.strip()
+
+	priority = card.get("priority") or "Medium"
+	if not isinstance(priority, str) or priority.strip() not in ACTION_CARD_PRIORITIES:
+		raise BoardContractError(f"Invalid action card priority: {priority!r}.")
+	clean_priority = priority.strip()
+
+	target_role = card.get("target_role") or "MANAGER"
+	if not isinstance(target_role, str) or target_role.strip() not in TARGET_ROLES:
+		raise BoardContractError(f"Invalid action card target_role: {target_role!r}.")
+	clean_target_role = target_role.strip()
+
+	action_item = card.get("action_item")
+	if action_item is not None:
+		if not isinstance(action_item, str) or not action_item.strip():
+			raise BoardContractError("Action card 'action_item' must be a non-empty string when provided.")
+		action_item = action_item.strip()
+
+	raw_suggested = card.get("suggested_action")
+	clean_suggested: str | None = None
+	if raw_suggested is not None:
+		if not isinstance(raw_suggested, str):
+			raise BoardContractError("Action card 'suggested_action' must be a string.")
+		clean_suggested = raw_suggested.strip().upper() or None
+
+	raw_ctype = card.get("clearing_condition_type")
+	if raw_ctype is None or (isinstance(raw_ctype, str) and not raw_ctype.strip()):
+		clean_ctype = SUGGESTED_ACTION_TO_CLEARING_CONDITION.get(clean_suggested or "", "manual")
+	elif isinstance(raw_ctype, str) and raw_ctype.strip() in CLEARING_CONDITION_TYPES:
+		clean_ctype = raw_ctype.strip()
+	else:
+		raise BoardContractError(f"Invalid action card clearing_condition_type: {raw_ctype!r}.")
+
+	raw_part_names = card.get("part_names")
+	clean_part_names: list[str] | None = None
+	if raw_part_names is not None:
+		if not isinstance(raw_part_names, list):
+			raise BoardContractError("Action card 'part_names' must be a list of strings.")
+		clean_part_names = [
+			str(p).strip() for p in raw_part_names if isinstance(p, str) and p.strip()
+		]
 
 	result = dict(card)
-	result["action_type"] = action_type
 	result["title"] = title.strip()
-	result["target_role"] = "MANAGER"
-	result["params"] = dict(params or {})
-
-	if "options" in card and card["options"] is not None:
-		result["options"] = _normalize_options(card["options"])
-
-	return result
-
-
-def validate_receipt_card(card: dict[str, Any]) -> dict[str, Any]:
-	"""Validate and normalize an ``AI_RECEIPT`` payload."""
-	if not isinstance(card, dict):
-		raise BoardContractError("Receipt card payload must be a dict.")
-
-	action_type = card.get("action_type")
-	if action_type not in ALL_ACTIONS:
-		raise BoardContractError(f"Receipt card requires valid action_type, got {action_type!r}.")
-
-	summary = card.get("summary") or card.get("title")
-	if not isinstance(summary, str) or not summary.strip():
-		raise BoardContractError("Receipt card requires a non-empty 'summary' or 'title'.")
-
-	undo_spec = card.get("undo_spec")
-	if undo_spec is not None and not isinstance(undo_spec, dict):
-		raise BoardContractError("Receipt card 'undo_spec' must be a dict or None.")
-
-	result = dict(card)
-	result["action_type"] = action_type
-	result["summary"] = summary.strip()
-	result["undo_spec"] = dict(undo_spec) if undo_spec is not None else None
-	result["reversible"] = bool(card.get("reversible", result["undo_spec"] is not None))
+	result["details"] = details.strip() if isinstance(details, str) else ""
+	result["category"] = clean_category
+	result["priority"] = clean_priority
+	result["target_role"] = clean_target_role
+	result["clearing_condition_type"] = clean_ctype
+	if action_item is not None:
+		result["action_item"] = action_item
+	if clean_suggested is not None:
+		result["suggested_action"] = clean_suggested
+	if clean_part_names is not None:
+		result["part_names"] = clean_part_names
+	if isinstance(card.get("clearing_condition_description"), str):
+		result["clearing_condition_description"] = card["clearing_condition_description"].strip()
 	return result
 
 
 __all__ = [
+	"ACTION_CARD_CATEGORIES",
+	"ACTION_CARD_PRIORITIES",
 	"ACTOR_TYPES",
 	"AI_STATUSES",
-	"ALL_ACTIONS",
-	"AUTONOMOUS_ACTIONS",
 	"BLOCKED_BOARD_STATUSES",
 	"BOARD_STATUSES",
+	"CAPTURE_LOCKED_RO_STATUSES",
 	"CLOSED_RO_STATUSES",
 	"IMMUTABLE_EVENT_FIELDS",
-	"MANAGER_GATED_ACTIONS",
 	"PAYLOAD_TYPES",
-	"PENDING_DECISION_PAYLOAD_TYPES",
 	"RESOLUTION_STATES",
 	"SELF_ECHO_DEDUP_PREFIX",
-	"SINGLETON_THREADS",
+	"SUGGESTED_ACTION_TO_CLEARING_CONDITION",
 	"TARGET_ROLES",
 	"THREAD_TYPES",
 	"BoardContractError",
 	"parse_ro_from_thread_key",
 	"ro_thread_key",
-	"validate_approval_gate_card",
-	"validate_clarification_card",
-	"validate_receipt_card",
+	"validate_action_card",
 ]
