@@ -353,6 +353,97 @@ def seed_equipment_tags():
 			doc.insert(ignore_permissions=True)
 
 
+_ISM_STANDARD_ROLES = (
+	"ISM Manager",
+	"ISM Service Advisor",
+	"ISM Technician",
+)
+
+_CUSTOM_DOCPERM_FLAGS = (
+	"select",
+	"read",
+	"write",
+	"create",
+	"delete",
+	"submit",
+	"cancel",
+	"amend",
+	"report",
+	"export",
+	"import",
+	"share",
+	"print",
+	"email",
+)
+
+
+def _sync_missing_ism_custom_docperms():
+	"""Backfill missing standard ISM role permissions when a site has Custom DocPerm overrides.
+
+	Frappe ignores standard DocPerm entries on any DocType that has Custom DocPerm rows.
+	When a migration adds a new ISM role permission to a DocType JSON (e.g. ISM Technician
+	on Schedule Entry), sites with existing Custom DocPerm rows would silently drop it unless
+	propagated. Only adds missing (parent, role, permlevel, if_owner) rows; never overwrites
+	existing customisations or creates Custom DocPerms on uncustomised DocTypes.
+	"""
+	if not frappe.db.exists("DocType", "Custom DocPerm"):
+		return
+
+	ism_doctypes = frappe.get_all(
+		"DocType",
+		filters={"module": "ISM", "istable": 0},
+		pluck="name",
+	)
+	if not ism_doctypes:
+		return
+
+	custom_rows = frappe.get_all(
+		"Custom DocPerm",
+		filters={"parent": ["in", ism_doctypes]},
+		fields=["parent", "role", "permlevel", "if_owner"],
+	)
+	if not custom_rows:
+		return
+
+	customised_doctypes = {row.parent for row in custom_rows}
+	existing_keys = {
+		(row.parent, row.role, int(row.permlevel or 0), int(row.if_owner or 0))
+		for row in custom_rows
+	}
+
+	standard_rows = frappe.get_all(
+		"DocPerm",
+		filters={
+			"parent": ["in", list(customised_doctypes)],
+			"role": ["in", list(_ISM_STANDARD_ROLES)],
+		},
+		fields=["parent", "role", "permlevel", "if_owner", *_CUSTOM_DOCPERM_FLAGS],
+	)
+
+	touched_doctypes: set[str] = set()
+	for std in standard_rows:
+		key = (std.parent, std.role, int(std.permlevel or 0), int(std.if_owner or 0))
+		if key in existing_keys:
+			continue
+		payload = {
+			"doctype": "Custom DocPerm",
+			"parent": std.parent,
+			"parenttype": "DocType",
+			"parentfield": "permissions",
+			"role": std.role,
+			"permlevel": int(std.permlevel or 0),
+			"if_owner": int(std.if_owner or 0),
+		}
+		for flag in _CUSTOM_DOCPERM_FLAGS:
+			payload[flag] = int(std.get(flag) or 0)
+		frappe.get_doc(payload).insert(ignore_permissions=True)
+		existing_keys.add(key)
+		touched_doctypes.add(std.parent)
+
+	for dt in touched_doctypes:
+		frappe.clear_cache(doctype=dt)
+
+
 def ensure_ism_roles():
 	"""Ensure standard ISM roles exist with appropriate Desk access."""
 	roles = [
@@ -371,6 +462,8 @@ def ensure_ism_roles():
 				doc.insert(ignore_permissions=True)
 			except Exception as exc:
 				frappe.logger("ism").warning(f"Could not seed role {r['role_name']}: {exc}")
+
+	_sync_missing_ism_custom_docperms()
 
 
 def seed_schedule_entry_types():
