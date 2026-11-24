@@ -49,6 +49,11 @@ _SERVICE_HOURS_ALIASES: Tuple[str, ...] = (
 	"hours",
 	"frt",
 )
+_TERMINAL_RO_STATUSES: Tuple[str, ...] = (
+	"Billed / Paid",
+	"Closed / Released",
+	"Cancelled",
+)
 
 
 def _require_str(value: Any, label: str) -> str:
@@ -787,6 +792,12 @@ def amend_quote(
 ) -> Dict[str, Any]:
 	"""Safely amend lines on an unapproved Repair Order in Draft Estimate state."""
 	ro = _get_ro_doc(repair_order, ptype="write")
+	if ro.status in _TERMINAL_RO_STATUSES:
+		frappe.throw(
+			_("Cannot amend a Repair Order in '{0}' status.").format(ro.status),
+			frappe.ValidationError,
+		)
+
 	parsed_remove_raw = parse_json_arg(remove_service_indices, [], label="remove_service_indices")
 	validated_remove: List[int] = []
 	if parsed_remove_raw not in (None, [], ""):
@@ -795,20 +806,36 @@ def amend_quote(
 		for entry in parsed_remove_raw:
 			validated_remove.append(require_int(entry, "Service Index", min_val=0))
 
-	has_updates = update_services not in (None, [], "")
-	if (
-		ro.docstatus != 0
-		or ro.approval_status == "Approved"
-		or (ro.approval_status == "Partially Approved" and (not has_updates or bool(validated_remove)))
-	):
+	if ro.docstatus != 0 or ro.approval_status == "Approved":
 		frappe.throw(
 			_("Cannot amend an approved or submitted Repair Order. Customer re-authorization is legally required."),
 			frappe.ValidationError,
 		)
 
+	parsed_add = _coerce_service_list(add_services, label="add_services")
+	has_updates = update_services not in (None, [], "") and not (
+		isinstance(update_services, str) and update_services.strip() in ("", "[]")
+	)
+	has_ro_fee_or_discount_mutation = any(
+		raw_val is not None and not (isinstance(raw_val, str) and not raw_val.strip())
+		for raw_val in (discount_amount, shop_supplies_amount, environmental_fee_amount)
+	)
+	if ro.approval_status == "Partially Approved" and (
+		not has_updates
+		or bool(validated_remove)
+		or bool(parsed_add)
+		or has_ro_fee_or_discount_mutation
+	):
+		frappe.throw(
+			_(
+				"Cannot add or remove services or modify order-level fees/discounts on a Partially Approved Repair Order. "
+				"Only in-place updates on unapproved service rows are allowed; customer re-authorization is legally required."
+			),
+			frappe.ValidationError,
+		)
+
 	_apply_service_row_updates(ro, update_services)
 
-	parsed_add = _coerce_service_list(add_services, label="add_services")
 	notes_str = optional_str(notes, "Notes")
 
 	if validated_remove:

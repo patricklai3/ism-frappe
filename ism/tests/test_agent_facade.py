@@ -2041,6 +2041,62 @@ class TestAgentFacade(ISMTestCase):
 		self.assertTrue(part_upd["success"])
 		self.assertEqual(frappe.get_doc("Repair Order", ro_name).services[1].labor_hours, 1.25)
 
+	def test_amend_quote_rejects_terminal_statuses_and_partial_approval_mutations(self):
+		"""Verify amend_quote blocks terminal RO statuses and non-row mutations on Partially Approved ROs."""
+		res = create_quote(
+			customer_name=f"{TEST_PREFIX}Amend Lock Cust",
+			vehicle_identifier="5YJ3E1EBXNF999199",
+			vehicle_color="Midnight Silver",
+			license_plate="LCK 199",
+			odometer_in=45000,
+			services=[
+				{"service_title": "Approved Job", "labor_hours": 1.0, "labor_rate": 140.0},
+				{"service_title": "Pending Job", "labor_hours": 0.5, "labor_rate": 140.0},
+			],
+		)
+		ro_name = self._track_quote_ro(res)
+		row_1_name = res["data"]["services"][0]["name"]
+		row_2_name = res["data"]["services"][1]["name"]
+
+		frappe.db.set_value("Repair Order Service", row_1_name, "status", "Approved")
+		frappe.db.set_value("Repair Order", ro_name, "approval_status", "Partially Approved")
+
+		# Combining valid unapproved row update with add_services or RO-level fee/discount mutations must fail
+		valid_update = [{"service_row_id": row_2_name, "labor_hours": 1.25}]
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(
+				repair_order=ro_name,
+				update_services=valid_update,
+				add_services=[{"service_title": "Unauthorized Extra", "labor_hours": 1.0}],
+			)
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=valid_update, discount_amount=15.0)
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=valid_update, shop_supplies_amount=10.0)
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=valid_update, environmental_fee_amount=5.0)
+		with self.assertRaises(frappe.ValidationError):
+			amend_quote(repair_order=ro_name, update_services=valid_update, remove_service_indices=[1])
+
+		ro_after = frappe.get_doc("Repair Order", ro_name)
+		self.assertEqual(len(ro_after.services), 2)
+		self.assertEqual(ro_after.services[1].labor_hours, 0.5)
+		self.assertEqual(ro_after.discount_amount or 0, 0)
+		self.assertEqual(ro_after.shop_supplies_amount or 0, 0)
+		self.assertEqual(ro_after.environmental_fee_amount or 0, 0)
+
+		# Terminal statuses must be rejected unconditionally even when approval_status != Approved
+		for terminal_status in ("Billed / Paid", "Closed / Released", "Cancelled"):
+			frappe.db.set_value(
+				"Repair Order",
+				ro_name,
+				{"status": terminal_status, "approval_status": "Pending"},
+			)
+			with self.assertRaises(frappe.ValidationError):
+				amend_quote(repair_order=ro_name, notes=f"Mutate in {terminal_status}")
+			with self.assertRaises(frappe.ValidationError):
+				amend_quote(repair_order=ro_name, update_services=valid_update)
+
 	def test_record_ro_deposit_facade_and_validation(self):
 		"""Verify record_ro_deposit validates inputs, delegates to RepairOrder.record_deposit, and returns envelope."""
 		res = create_quote(

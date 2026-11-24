@@ -41,6 +41,11 @@ _ACTIVE_RO_STATUSES: Tuple[str, ...] = (
 	"Waiting on Parts",
 	"Work Completed",
 )
+_NON_FIFO_RO_STATUSES: Tuple[str, ...] = (
+	"Billed / Paid",
+	"Closed / Released",
+	"Cancelled",
+)
 _APPROVED_RO_STATES = ("Approved", "Partially Approved")
 _VALID_HEALTH_GRADES = ("Healthy", "Watch", "Critical")
 
@@ -112,16 +117,31 @@ def _compute_batch_parts_summaries(
 ) -> Dict[str, Dict[str, Any]]:
 	"""Compute FIFO stock availability and open PO coverage for active approved ROs in batch."""
 	active_ro_names = {r["name"] for r in active_ros}
-	fifo_ros = frappe.get_all(
+	fifo_ros_raw = frappe.get_all(
 		"Repair Order",
 		filters={
 			"docstatus": ["<", 2],
-			"status": ["not in", ["Closed / Released", "Cancelled"]],
+			"status": ["not in", list(_NON_FIFO_RO_STATUSES)],
 			"approval_status": ["in", list(_APPROVED_RO_STATES)],
 		},
-		fields=["name", "company", "creation"],
+		fields=["name", "company", "creation", "sales_invoice"],
 		order_by="creation asc, name asc",
 	)
+
+	linked_si_names = list({r["sales_invoice"] for r in fifo_ros_raw if r.get("sales_invoice")})
+	stock_issued_sis: set[str] = set()
+	if linked_si_names:
+		stock_issued_sis = set(
+			frappe.get_all(
+				"Sales Invoice",
+				filters={"name": ["in", linked_si_names], "docstatus": 1, "update_stock": 1},
+				pluck="name",
+			)
+		)
+	stock_issued_ro_names = {
+		r["name"] for r in fifo_ros_raw if r.get("sales_invoice") and r["sales_invoice"] in stock_issued_sis
+	}
+	fifo_ros = [r for r in fifo_ros_raw if r["name"] not in stock_issued_ro_names]
 
 	fifo_ro_names = [r["name"] for r in fifo_ros]
 	missing_ro_names = [n for n in fifo_ro_names if n not in ro_required_parts]
@@ -238,7 +258,7 @@ def _compute_batch_parts_summaries(
 		is_approved = ro.get("approval_status") in _APPROVED_RO_STATES
 		req_map = ro_required_parts.get(ro_id, {})
 		stock_reqs = {code: flt(qty) for code, qty in req_map.items() if code in stock_item_meta and flt(qty) > 0}
-		if not is_approved or not stock_reqs:
+		if not is_approved or not stock_reqs or ro_id in stock_issued_ro_names:
 			summaries[ro_id] = {
 				"required_count": len(stock_reqs),
 				"deficit_items": [],

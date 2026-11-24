@@ -301,3 +301,100 @@ class TestMonitoringCockpit(ISMTestCase):
 		self.assertGreater(data["effective_labor_rate"], 0.0)
 		self.assertGreaterEqual(data["unbilled_completed_count"], 1)
 		self.assertGreater(data["unbilled_completed_total"], 0.0)
+
+	def test_cockpit_snapshot_excludes_billed_ro_from_fifo_parts(self):
+		"""Verify Billed / Paid and stock-invoiced ROs do not double-deduct FIFO stock for active ROs."""
+		from ism.api.parts_stock import _resolve_default_warehouse
+
+		sup_name = f"{TEST_PREFIX}FIFO Billed Sup"
+		cat = import_supplier_catalog(
+			raw_text="CKP-FIFO-01 | Cockpit FIFO Rotor | OEM | New | 220.00 | 110.00 | 0 | A | 1044622-00-A",
+			supplier=sup_name,
+			default_source="OEM",
+			default_condition="New",
+		)
+		self.track("Supplier", sup_name)
+		item_code = cat["data"]["created"][0]["item_code"]
+		self.track("Item", item_code)
+
+		q1 = create_quote(
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
+			odometer_in=45100,
+			services=[{
+				"service_title": "FIFO Rotor Install 1",
+				"labor_hours": 1.0,
+				"parts": [{"item_code": item_code, "qty": 1.0, "rate": 220.0}],
+			}],
+		)
+		ro1_name = q1["data"]["name"]
+		self.track("Repair Order", ro1_name)
+		ro1 = frappe.get_doc("Repair Order", ro1_name)
+		wh = _resolve_default_warehouse(ro1.company)
+
+		se = frappe.get_doc({
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": ro1.company,
+			"items": [{
+				"item_code": item_code,
+				"qty": 2.0,
+				"t_warehouse": wh,
+				"basic_rate": 110.0,
+			}],
+		}).insert(ignore_permissions=True)
+		se.submit()
+		self.track("Stock Entry", se.name)
+
+		ro1.authorize_jobs(approvals={ro1.services[0].name: "Approved"}, signer_name="FIFO Tester 1")
+		update_job_status(repair_order=ro1_name, action="complete", odometer_out=45105)
+		chk = checkout_repair_order(
+			repair_order=ro1_name,
+			payment_method="Cash",
+			odometer_out=45105,
+			confirm=True,
+		)
+		si_name = chk["data"].get("sales_invoice")
+		if si_name:
+			self.track("Sales Invoice", si_name)
+		if chk["data"].get("payment_entry"):
+			self.track("Payment Entry", chk["data"]["payment_entry"])
+
+		# Simulate RO1 sitting in Billed / Paid status after stock was already deducted by SI (1 unit left in Bin)
+		frappe.db.set_value("Repair Order", ro1_name, "status", "Billed / Paid")
+
+		q2 = create_quote(
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
+			odometer_in=45120,
+			services=[{
+				"service_title": "FIFO Rotor Install 2",
+				"labor_hours": 1.0,
+				"parts": [{"item_code": item_code, "qty": 1.0, "rate": 220.0}],
+			}],
+		)
+		ro2_name = q2["data"]["name"]
+		self.track("Repair Order", ro2_name)
+		ro2 = frappe.get_doc("Repair Order", ro2_name)
+		ro2.authorize_jobs(approvals={ro2.services[0].name: "Approved"}, signer_name="FIFO Tester 2")
+
+		# Active RO2 needs 1 unit and Bin has 1 unit left; Billed / Paid RO1 must not consume it again
+		snap = get_cockpit_snapshot(date=today())
+		ro2_entry = next(r for r in snap["data"]["active_repair_orders"] if r["name"] == ro2_name)
+		self.assertFalse(ro2_entry["parts_summary"]["has_stock_deficit"])
+		self.assertFalse(ro2_entry["parts_summary"]["has_uncovered_deficit"])
+		self.assertTrue(ro2_entry["parts_summary"]["all_parts_ready"])
+
+		# Even without a linked sales_invoice field, Billed / Paid status alone must be excluded from FIFO
+		frappe.db.set_value("Repair Order", ro1_name, "sales_invoice", None)
+		snap_no_si = get_cockpit_snapshot(date=today())
+		ro2_entry_2 = next(r for r in snap_no_si["data"]["active_repair_orders"] if r["name"] == ro2_name)
+		self.assertFalse(ro2_entry_2["parts_summary"]["has_stock_deficit"])
+		self.assertTrue(ro2_entry_2["parts_summary"]["all_parts_ready"])
+
+		# And an active-status RO with a submitted update_stock=1 Sales Invoice must not double-deduct either
+		frappe.db.set_value("Repair Order", ro1_name, {"status": "Work Completed", "sales_invoice": si_name})
+		snap_invoiced_active = get_cockpit_snapshot(date=today())
+		ro2_entry_3 = next(r for r in snap_invoiced_active["data"]["active_repair_orders"] if r["name"] == ro2_name)
+		self.assertFalse(ro2_entry_3["parts_summary"]["has_stock_deficit"])
+		self.assertTrue(ro2_entry_3["parts_summary"]["all_parts_ready"])
