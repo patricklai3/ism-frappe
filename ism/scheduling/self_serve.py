@@ -1150,9 +1150,7 @@ def normalize_provisional_intake(
 		if len(clean_raw_vin_or_plate.replace(" ", "")) != 17:
 			plate_source = clean_raw_vin_or_plate
 	clean_plate = normalize_license_plate(plate_source)
-	if not clean_plate:
-		frappe.throw(_("License plate is required."), frappe.ValidationError)
-	if len(clean_plate) < 2 or len(clean_plate) > 20:
+	if clean_plate and (len(clean_plate) < 2 or len(clean_plate) > 20):
 		frappe.throw(_("License plate must be between 2 and 20 characters."), frappe.ValidationError)
 
 	clean_vin_or_plate: Optional[str] = clean_vin or clean_plate

@@ -1537,6 +1537,65 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		self.assertIn(p_juniper_y.name, ids)
 		self.assertNotIn(p_old_y.name, ids)
 
+	def test_guest_booking_succeeds_without_license_plate(self) -> None:
+		phone_raw = "(416) 555-0192"
+		phone_e164 = "+14165550192"
+
+		frappe.local.cookie_manager = _RecordingCookieManager()
+		frappe.local.request_ip = "203.0.113.42"
+		frappe.set_user("Guest")
+
+		valid_nonce = self._fresh_valid_nonce()
+		otp_res = request_booking_otp(
+			package_ids=[self.bookable_pkg.name],
+			target_date=str(self.base_date),
+			customer_arrival_time="07:45",
+			customer_name="Morgan Lee",
+			phone=phone_raw,
+			vehicle_model="Model 3",
+			vehicle_year=2023,
+			vehicle_color="Stealth Grey",
+			license_plate=None,
+			vin_or_plate=None,
+			website_url="",
+			form_nonce=valid_nonce,
+		)
+		self.assertEqual(frappe.local.response.get("http_status_code"), 200)
+		self.assertTrue(otp_res["success"])
+
+		otp_code = get_last_mock_otp(phone_e164)
+		self.assertIsNotNone(otp_code)
+
+		with patch("frappe.sendmail"):
+			confirm_res = confirm_self_serve_booking(
+				challenge_id=otp_res["challenge_id"],
+				otp_code=otp_code,
+				package_ids=[self.bookable_pkg.name],
+				target_date=str(self.base_date),
+				customer_arrival_time="07:45",
+				customer_name="Morgan Lee",
+				phone=phone_raw,
+				vehicle_model="Model 3",
+				vehicle_year=2023,
+				vehicle_color="Stealth Grey",
+				license_plate=None,
+				vin_or_plate=None,
+				website_url="",
+				form_nonce=valid_nonce,
+				idempotency_key="idem-no-plate-001",
+			)
+		self._track_artifacts_for_phone(phone_e164)
+		self.assertEqual(frappe.local.response.get("http_status_code"), 200)
+		self.assertTrue(confirm_res["success"])
+		self.assertEqual(confirm_res["vehicle_display"], "2023 Stealth Grey Model 3")
+		self.assertIsNone(confirm_res["vehicle_info"]["license_plate"])
+
+		frappe.set_user("Administrator")
+		se = frappe.get_doc("Schedule Entry", confirm_res["booking_reference"])
+		self.assertFalse(se.provisional_license_plate)
+		self.assertEqual(se.provisional_vehicle_color, "Stealth Grey")
+		self.assertEqual(se.provisional_vehicle_info, "2023 Stealth Grey Model 3")
+
 
 class TestBookingHostedRoute(ISMTestCase):
 	"""Wave 3 hosted /book page controller, security headers, boot JSON, and asset hygiene tests."""
@@ -1699,4 +1758,8 @@ class TestBookingHostedRoute(ISMTestCase):
 			self.assertNotIn("innerHTML", content, f"innerHTML is forbidden in {asset_path.name}")
 			self.assertNotIn("localStorage", content, f"localStorage is forbidden in {asset_path.name}")
 			self.assertNotIn("sessionStorage", content, f"sessionStorage is forbidden in {asset_path.name}")
+
+		app_js = (ism_root / "public" / "book" / "app.js").read_text(encoding="utf-8")
+		self.assertIn("License Plate (Optional)", app_js)
+		self.assertNotIn("License plate is required.", app_js)
 

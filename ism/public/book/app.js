@@ -220,9 +220,7 @@ function initBookingApp() {
 		return Boolean(
 			state.vehicle.model &&
 				state.vehicle.color &&
-				state.vehicle.color.trim() &&
-				state.vehicle.license_plate &&
-				state.vehicle.license_plate.trim()
+				state.vehicle.color.trim()
 		);
 	}
 
@@ -236,11 +234,6 @@ function initBookingApp() {
 		if (!state.vehicle.color || !state.vehicle.color.trim()) {
 			pendingFocusId = "ism-vehicle-color";
 			store.setError("Please select or enter your vehicle color to continue.");
-			return;
-		}
-		if (!state.vehicle.license_plate || !state.vehicle.license_plate.trim()) {
-			pendingFocusId = "ism-vehicle-plate";
-			store.setError("Please enter your license plate number to continue.");
 			return;
 		}
 		store.clearError();
@@ -581,8 +574,6 @@ function initBookingApp() {
 
 		const missingModel = step1Attempted && !state.vehicle.model;
 		const missingColor = step1Attempted && !(state.vehicle.color && state.vehicle.color.trim());
-		const missingPlate =
-			step1Attempted && !(state.vehicle.license_plate && state.vehicle.license_plate.trim());
 
 		return el(
 			"section",
@@ -591,7 +582,7 @@ function initBookingApp() {
 			el("p", {
 				className: "ism-card__text",
 				textContent:
-					"Choose your model, color, and license plate so our team can identify your car easily at drop-off.",
+					"Choose your model and color (and license plate if handy) so our team can identify your car easily at drop-off.",
 			}),
 			el("div", { className: "ism-model-grid", role: "group", "aria-label": "Vehicle model" }, modelButtons),
 			missingModel
@@ -647,27 +638,21 @@ function initBookingApp() {
 				el(
 					"div",
 					{ className: "ism-field" },
-					el(
-						"label",
-						{ className: "ism-field__label", for: "ism-vehicle-plate" },
-						"License Plate ",
-						el("span", { className: "ism-field__required", textContent: "*" })
-					),
+					el("label", {
+						className: "ism-field__label",
+						for: "ism-vehicle-plate",
+						textContent: "License Plate (Optional)",
+					}),
 					el("input", {
 						id: "ism-vehicle-plate",
-						className: `ism-input ism-input--upper${missingPlate ? " is-invalid" : ""}`,
+						className: "ism-input ism-input--upper",
 						type: "text",
 						maxlength: "20",
-						required: true,
 						autocomplete: "off",
-						"aria-invalid": missingPlate ? "true" : null,
 						placeholder: "e.g. ABCD 123",
 						value: state.vehicle.license_plate,
 						onInput: (e) => store.setLicensePlate(e.target.value),
-					}),
-					missingPlate
-						? el("span", { className: "ism-field__error", role: "alert", textContent: "License plate is required." })
-						: null
+					})
 				)
 			),
 			(() => {
@@ -752,7 +737,7 @@ function initBookingApp() {
 				{ className: "ism-actions-row" },
 				el("span", {
 					className: "ism-field__hint",
-					textContent: canProceedStep1(state) ? "" : "Model, color, and license plate are required.",
+					textContent: canProceedStep1(state) ? "" : "Model and color are required.",
 				}),
 				el("button", {
 					type: "button",

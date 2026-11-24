@@ -931,18 +931,32 @@ class TestSelfServeScheduling(ISMTestCase):
 		self.assertEqual(norm["vehicle_info"]["compact_display"], "Pearl White Model 3")
 		self.assertEqual(norm["waiter_preference"], "Waiter")
 
-		# Missing color or license_plate rejected
+		# Missing color still rejected; missing license_plate is optional for customer bookings
 		with self.assertRaises(frappe.ValidationError):
 			normalize_provisional_intake(
 				customer_name="Jamie Fox",
 				phone="6045550188",
 				license_plate="EV 1234",
 			)
+		norm_no_plate = normalize_provisional_intake(
+			customer_name="Jamie Fox",
+			phone="6045550188",
+			vehicle_model="Model 3",
+			vehicle_year=2023,
+			vehicle_color="Pearl White",
+		)
+		self.assertIsNone(norm_no_plate["license_plate"])
+		self.assertIsNone(norm_no_plate["vin_or_plate"])
+		self.assertEqual(norm_no_plate["provisional_vehicle_info"], "2023 Pearl White Model 3")
+		self.assertEqual(norm_no_plate["vehicle_info"]["display"], "2023 Pearl White Model 3")
+
+		# Provided license_plate still validates minimum length
 		with self.assertRaises(frappe.ValidationError):
 			normalize_provisional_intake(
 				customer_name="Jamie Fox",
 				phone="6045550188",
 				vehicle_color="Pearl White",
+				license_plate="A",
 			)
 
 		# Disable waiter preference -> Waiter rejected, None defaults to Drop-Off
