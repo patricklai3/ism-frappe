@@ -11,6 +11,13 @@ from ism.setup_tasks.fields import (
 	setup_item_custom_fields,
 	setup_procurement_custom_fields,
 )
+from ism.setup_tasks.inventory_dimensions import (
+	BIN_DIMENSION_NAME,
+	BIN_REFERENCE_DOCTYPE,
+	DEFAULT_BIN_FIELDNAME,
+	SLE_BIN_INDEX_NAME,
+	setup_inventory_dimensions,
+)
 from ism.setup_tasks.seed import (
 	DEFAULT_EQUIPMENT_TAGS,
 	STANDARD_INSPECTION_ITEMS,
@@ -32,8 +39,12 @@ from ism.setup_tasks.taxes import (
 )
 
 __all__ = [
+	"BIN_DIMENSION_NAME",
+	"BIN_REFERENCE_DOCTYPE",
+	"DEFAULT_BIN_FIELDNAME",
 	"DEFAULT_EQUIPMENT_TAGS",
 	"LEGACY_FIELDS_TO_REMOVE",
+	"SLE_BIN_INDEX_NAME",
 	"STANDARD_INSPECTION_ITEMS",
 	"STANDARD_SCHEDULE_ENTRY_TYPES",
 	"_company_has_default_hst_setup",
@@ -52,6 +63,7 @@ __all__ = [
 	"seed_schedule_entry_types",
 	"setup_default_ism_settings",
 	"setup_default_taxes_and_payments",
+	"setup_inventory_dimensions",
 	"setup_item_custom_fields",
 	"setup_parts_item_group",
 	"setup_procurement_custom_fields",

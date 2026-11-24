@@ -147,6 +147,14 @@ def setup_item_custom_fields(force_update=False):
 			"fieldtype": "Float",
 			"insert_after": "revision",
 		},
+		{
+			"fieldname": "default_bin_location",
+			"label": "Default Bin Location",
+			"fieldtype": "Link",
+			"options": "Storage Bin",
+			"insert_after": "custom_frt",
+			"in_standard_filter": 1,
+		},
 	]
 	_ensure_custom_fields_present({"Item": fields}, force_update=force_update)
 

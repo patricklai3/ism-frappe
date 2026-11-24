@@ -1032,6 +1032,42 @@ function buildLifecycleBannerHtml(ro) {
 	return "";
 }
 
+function formatPartQty(qty) {
+	const num = Number(qty);
+	if (!Number.isFinite(num)) return String(qty ?? "");
+	return Number.isInteger(num) ? String(num) : String(Number(num.toFixed(2)));
+}
+
+function buildPartBinBadgeHtml(part) {
+	const status = String((part && part.bin_status) || "").trim();
+	if (status === "IN_STOCK" && part.primary_bin) {
+		return `<span class="part-bin-badge part-bin-badge--stock">BIN ${escapeHtml(part.primary_bin)}</span>`;
+	}
+	if (status === "MULTI_BIN") {
+		const bins = Array.isArray(part.bin_locations) ? part.bin_locations : [];
+		const primary = part.primary_bin || (bins[0] && bins[0].bin_location) || "";
+		const overflow = bins.slice(1);
+		const primaryHtml = primary
+			? `<span class="part-bin-badge part-bin-badge--stock">BIN ${escapeHtml(primary)}</span>`
+			: "";
+		const overflowHtml = overflow
+			.filter((b) => b && b.bin_location)
+			.map(
+				(b) =>
+					`<span class="part-bin-badge part-bin-badge--overflow">+${escapeHtml(b.bin_location)} (×${escapeHtml(formatPartQty(b.qty))})</span>`
+			)
+			.join("");
+		return `${primaryHtml}${overflowHtml}` || `<span class="part-bin-badge part-bin-badge--missing">NO BIN</span>`;
+	}
+	if (status === "DEFAULT_ONLY" && part.default_bin_location) {
+		return `<span class="part-bin-badge part-bin-badge--home">HOME ${escapeHtml(part.default_bin_location)}</span>`;
+	}
+	if (status === "CUSTOMER_SUPPLIED") {
+		return `<span class="part-bin-badge part-bin-badge--customer">CUST SUPPLIED</span>`;
+	}
+	return `<span class="part-bin-badge part-bin-badge--missing">NO BIN</span>`;
+}
+
 function buildServiceCardHtml(svc, { isCompletedRo }) {
 	const checked = Boolean(svc.is_completed);
 	const isToggling = state.togglingServices.has(svc.name);
@@ -1049,10 +1085,19 @@ function buildServiceCardHtml(svc, { isCompletedRo }) {
 	if (parts.length > 0) {
 		partsHtml = `<div class="service-card__parts">${parts
 			.map((p) => {
-				const code = p.item_code ? `${p.item_code} ` : "";
-				const name = p.item_name || "";
-				const qty = p.qty !== undefined && p.qty !== null ? ` ×${p.qty}` : "";
-				return `<span class="part-chip">${escapeHtml(`${code}${name}${qty}`.trim())}</span>`;
+				const name = p.item_name || p.item_code || "";
+				const code = p.item_code && p.item_code !== name ? p.item_code : "";
+				const qtyLabel = p.qty !== undefined && p.qty !== null ? `×${formatPartQty(p.qty)}` : "";
+				return `
+					<div class="part-row">
+						<div class="part-row__bin">${buildPartBinBadgeHtml(p)}</div>
+						<div class="part-row__info">
+							<span class="part-row__name">${escapeHtml(name)}</span>
+							${code ? `<span class="part-row__code">${escapeHtml(code)}</span>` : ""}
+						</div>
+						${qtyLabel ? `<span class="part-row__qty">${escapeHtml(qtyLabel)}</span>` : ""}
+					</div>
+				`;
 			})
 			.join("")}</div>`;
 	} else {

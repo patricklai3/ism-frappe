@@ -32,11 +32,23 @@ from ism.api.parts_catalog import (
 	quick_create_part,
 )
 from ism.api.parts_procurement import (
+	_normalize_bin_allocations,
+	_resolve_and_apply_receive_bin,
 	create_purchase_invoice as _create_purchase_invoice_impl,
 	create_purchase_payment as _create_purchase_payment_impl,
 	ensure_supplier_and_link_to_item,
 )
-from ism.api.parts_stock import _get_ro_parts_stock_internal
+from ism.api.parts_stock import (
+	_get_ro_parts_stock_internal,
+	_normalize_bin_code,
+	_validate_storage_bin_exists,
+	adjust_bin_stock as _adjust_bin_stock_impl,
+	create_bin_location as _create_bin_location_impl,
+	get_bin_dimension_meta,
+	list_bin_locations as _list_bin_locations_impl,
+	set_item_default_bin as _set_item_default_bin_impl,
+	transfer_bin_stock as _transfer_bin_stock_impl,
+)
 from ism.api.tesla import (
 	_find_existing_service_package_name,
 	import_tesla_procedure as _import_tesla_ro_procedure,
@@ -531,12 +543,19 @@ def check_parts_stock(
 	repair_order: Optional[str] = None,
 	items: Optional[Union[List[Any], str]] = None,
 	company: Optional[str] = None,
+	bin_location: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Check warehouse stock availability and deficits for a Repair Order or item list."""
+	"""Check warehouse stock availability, bin breakdown, and deficits for a Repair Order, item list, or bin."""
 	repair_order = optional_str(repair_order, "Repair Order")
 	company = optional_str(company, "Company")
+	filter_bin = _normalize_bin_code(bin_location, "Bin Location", required=False)
 	frappe.has_permission("Item", "read", throw=True)
+
+	bin_doc = None
+	if filter_bin:
+		frappe.has_permission("Storage Bin", "read", throw=True)
+		bin_doc = _validate_storage_bin_exists(filter_bin, require_active=False)
 
 	ro = _get_ro_doc(repair_order, ptype="read") if repair_order else None
 	parsed_items: Any = items
@@ -546,6 +565,44 @@ def check_parts_stock(
 			parsed_items = parse_json_arg(stripped, [], label="Items")
 		else:
 			parsed_items = [s.strip() for s in stripped.split(",") if s.strip()]
+
+	if filter_bin and not ro and not parsed_items:
+		discovered: list[str] = []
+		dim_meta = get_bin_dimension_meta()
+		if dim_meta.get("enabled"):
+			sle_col = dim_meta["sle_fieldname"]
+			sle_params: list[Any] = [filter_bin]
+			wh_clause = ""
+			if bin_doc and bin_doc.get("warehouse") and not company:
+				wh_clause = " AND warehouse = %s"
+				sle_params.append(bin_doc["warehouse"])
+			sle_items = frappe.db.sql(
+				f"""
+				SELECT item_code
+				FROM `tabStock Ledger Entry`
+				WHERE is_cancelled = 0
+				  AND `{sle_col}` = %s
+				  {wh_clause}
+				GROUP BY item_code
+				HAVING SUM(actual_qty) > 0.000001
+				ORDER BY item_code ASC
+				""",
+				tuple(sle_params),
+				as_dict=True,
+			)
+			for row in sle_items:
+				if row.get("item_code") and row["item_code"] not in discovered:
+					discovered.append(row["item_code"])
+		if frappe.db.has_column("Item", "default_bin_location"):
+			home_items = frappe.get_list(
+				"Item",
+				filters={"default_bin_location": filter_bin, "disabled": 0},
+				pluck="name",
+			)
+			for ic in home_items:
+				if ic and ic not in discovered:
+					discovered.append(ic)
+		parsed_items = discovered
 
 	stock_map = _get_ro_parts_stock_internal(
 		ro_name=ro.name if ro else repair_order,
@@ -568,27 +625,44 @@ def check_parts_stock(
 			deficit = max(0.0, flt(req_qty) - flt(info.get("available_qty", 0.0)))
 		info["required_qty"] = req_qty
 		info["deficit"] = deficit
+		if filter_bin:
+			target_qty = sum(
+				flt(b.get("qty"))
+				for b in (info.get("bin_locations") or [])
+				if str(b.get("bin_location") or "").strip().upper() == filter_bin
+			)
+			info["target_bin"] = filter_bin
+			info["target_bin_qty"] = flt(target_qty, 6)
+			info["in_target_bin"] = bool(
+				target_qty > 1e-6 or info.get("default_bin_location") == filter_bin
+			)
 		if deficit > 0:
 			deficit_items.append(code)
 
 	urls = build_ro_urls(ro.name) if ro else {}
+	if filter_bin and "desk" not in urls:
+		urls["desk"] = f"{get_url()}/app/storage-bin/{quote(str(filter_bin), safe='')}"
 
 	sku_count = len(stock_map)
 	sku_word = _("SKU") if sku_count == 1 else _("SKUs")
 
+	data_payload: Dict[str, Any] = {
+		"repair_order": ro.name if ro else repair_order,
+		"all_available": len(deficit_items) == 0,
+		"deficit_count": len(deficit_items),
+		"items": stock_map,
+	}
+	if filter_bin:
+		data_payload["bin_location"] = filter_bin
+
 	return build_agent_envelope(
 		success=True,
 		urls=urls,
-		data={
-			"repair_order": ro.name if ro else repair_order,
-			"all_available": len(deficit_items) == 0,
-			"deficit_count": len(deficit_items),
-			"items": stock_map,
-		},
+		data=data_payload,
 		message=_("Checked stock for {0} unique part {1}.").format(sku_count, sku_word),
 		include_summary=include_summary,
 		summary_builder=lambda: (
-			f"### Parts Stock Check ({(ro.name if ro else repair_order) or 'Items'})\n"
+			f"### Parts Stock Check ({(ro.name if ro else repair_order) or filter_bin or 'Items'})\n"
 			f"- **Checked SKUs**: `{sku_count}`\n"
 			f"- **Deficits**: `{len(deficit_items)}`"
 		),
@@ -744,20 +818,31 @@ def receive_purchase_order(
 	purchase_order: Optional[str] = None,
 	submit_po: Any = True,
 	purchase_invoice: Optional[str] = None,
+	bin_location: Optional[str] = None,
+	bin_allocations: Optional[Union[Dict[str, str], List[Dict[str, Any]], str]] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Submit PO (if still Draft) and post a Purchase Receipt for a Purchase Order or un-received Purchase Invoice."""
 	purchase_order = optional_str(purchase_order, "Purchase Order")
 	purchase_invoice = optional_str(purchase_invoice, "Purchase Invoice")
+	uniform_bin = _normalize_bin_code(bin_location, "Bin Location", required=False)
+	alloc_map = _normalize_bin_allocations(bin_allocations)
 	if not purchase_order and not purchase_invoice:
 		frappe.throw(
 			_("Either Purchase Order or Purchase Invoice is required to receive goods."),
 			frappe.MandatoryError,
 		)
 
-	# Enforce Purchase Receipt permissions upfront BEFORE potentially submitting a Draft PO.
+	# Enforce Purchase Receipt permissions and validate explicit bin targets upfront BEFORE submitting a Draft PO.
 	frappe.has_permission("Purchase Receipt", "create", throw=True)
 	frappe.has_permission("Purchase Receipt", "submit", throw=True)
+	explicit_bins = set(alloc_map.values())
+	if uniform_bin:
+		explicit_bins.add(uniform_bin)
+	if explicit_bins:
+		frappe.has_permission("Storage Bin", "read", throw=True)
+		for bin_code in sorted(explicit_bins):
+			_validate_storage_bin_exists(bin_code, require_active=True)
 
 	po = None
 	if purchase_order:
@@ -857,6 +942,15 @@ def receive_purchase_order(
 			frappe.ValidationError,
 		)
 
+	dim_meta = get_bin_dimension_meta()
+	dim_field = dim_meta.get("source_fieldname") if dim_meta.get("enabled") else None
+	resolved_bins = _resolve_and_apply_receive_bin(
+		pr_doc.get("items") or [],
+		default_bin=uniform_bin,
+		bin_allocations=alloc_map or None,
+		dim_meta=dim_meta,
+	)
+
 	pr_doc.check_permission("create")
 	pr_doc.insert()
 	pr_doc.check_permission("submit")
@@ -894,8 +988,18 @@ def receive_purchase_order(
 			"repair_order": ro_name,
 			"repair_order_status": ro_status,
 			"items": [
-				{"item_code": i.item_code, "qty": flt(i.qty), "warehouse": i.warehouse}
-				for i in (pr_doc.items or [])
+				{
+					"item_code": i.item_code,
+					"qty": flt(i.qty),
+					"warehouse": i.warehouse,
+					"bin_location": (
+						getattr(i, dim_field, None)
+						if dim_field
+						else (resolved_bins[idx] if idx < len(resolved_bins) else None)
+					)
+					or None,
+				}
+				for idx, i in enumerate(pr_doc.items or [])
 			],
 		},
 		message=_("Received {0} via Purchase Receipt {1}.").format(source_label, pr_doc.name),
@@ -968,9 +1072,10 @@ def create_purchase_invoice(
 	bill_no: Optional[str] = None,
 	bill_date: Optional[str] = None,
 	attach_advances: Any = True,
+	bin_location: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Create and submit a Purchase Invoice (from PO or standalone), with optional update_stock and PO advance attachment."""
+	"""Create and submit a Purchase Invoice (from PO or standalone), with optional update_stock, bin putaway, and PO advance attachment."""
 	parsed_parts = parse_json_arg(parts_data, None, label="parts_data") if parts_data is not None else None
 	res = _create_purchase_invoice_impl(
 		purchase_order=purchase_order,
@@ -981,6 +1086,7 @@ def create_purchase_invoice(
 		bill_no=bill_no,
 		bill_date=bill_date,
 		attach_advances=attach_advances,
+		bin_location=bin_location,
 	)
 	po_name = res.get("purchase_order")
 	ro_name = res.get("repair_order")
@@ -1006,5 +1112,176 @@ def create_purchase_invoice(
 			f"- **Supplier**: `{res['supplier']}` | **PO**: `{po_name or 'Standalone'}`\n"
 			f"- **Update Stock**: `{bool(res['update_stock'])}` | **Grand Total**: `{res['grand_total']:.2f}`\n"
 			f"- **Advances Attached**: `{res['total_advance']:.2f}` | **Outstanding**: `{res['outstanding_amount']:.2f}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def list_bin_locations(
+	warehouse: Optional[str] = None,
+	zone: Optional[str] = None,
+	query: Optional[str] = None,
+	include_stock: Any = False,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""List active Storage Bins with optional warehouse/zone/query filters and live stock quantities."""
+	res = _list_bin_locations_impl(
+		warehouse=warehouse,
+		zone=zone,
+		query=query,
+		include_stock=include_stock,
+	)
+	desk_url = f"{get_url()}/app/storage-bin"
+	return build_agent_envelope(
+		success=True,
+		urls={"desk": desk_url},
+		data=res,
+		message=_("Found {0} storage bin(s).").format(res["count"]),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Storage Bins ({res['count']})\n"
+			f"- **Warehouse**: `{res.get('warehouse') or 'All'}` | **Zone**: `{res.get('zone') or 'All'}`\n"
+			f"- **Bins**: `{', '.join(b['bin_code'] for b in (res.get('bins') or [])[:15]) or 'None'}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def create_bin_location(
+	bin_code: str,
+	warehouse: Optional[str] = None,
+	zone: Optional[str] = None,
+	aisle: Optional[str] = None,
+	rack: Optional[str] = None,
+	shelf: Optional[str] = None,
+	bin_type: str = "Standard",
+	description: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Create a new Storage Bin location master record."""
+	res = _create_bin_location_impl(
+		bin_code=bin_code,
+		warehouse=warehouse,
+		zone=zone,
+		aisle=aisle,
+		rack=rack,
+		shelf=shelf,
+		bin_type=bin_type,
+		description=description,
+	)
+	desk_url = f"{get_url()}/app/storage-bin/{quote(str(res['name']), safe='')}"
+	return build_agent_envelope(
+		success=True,
+		urls={"desk": desk_url, "storage_bin": desk_url},
+		data=res,
+		message=_("Created Storage Bin {0} in {1}.").format(res["bin_code"], res["warehouse"]),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Storage Bin Created: `{res['bin_code']}`\n"
+			f"- **Warehouse**: `{res['warehouse']}` | **Type**: `{res['bin_type']}`\n"
+			f"- **Location**: Zone `{res.get('zone') or '-'}`, Aisle `{res.get('aisle') or '-'}`, "
+			f"Rack `{res.get('rack') or '-'}`, Shelf `{res.get('shelf') or '-'}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def set_item_default_bin(
+	item_code: str,
+	bin_location: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Assign or clear an Item's Home Bin (default_bin_location)."""
+	res = _set_item_default_bin_impl(item_code=item_code, bin_location=bin_location)
+	base_url = get_url()
+	urls: Dict[str, str] = {"desk": f"{base_url}/app/item/{quote(str(res['item_code']), safe='')}"}
+	if res.get("default_bin_location"):
+		urls["storage_bin"] = f"{base_url}/app/storage-bin/{quote(str(res['default_bin_location']), safe='')}"
+	msg = (
+		_("Assigned Home Bin {0} to Item {1}.").format(res["default_bin_location"], res["item_code"])
+		if res.get("default_bin_location")
+		else _("Cleared Home Bin on Item {0}.").format(res["item_code"])
+	)
+	return build_agent_envelope(
+		success=True,
+		urls=urls,
+		data=res,
+		message=msg,
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Item Home Bin Updated: `{res['item_code']}`\n"
+			f"- **Default Bin**: `{res.get('default_bin_location') or 'Cleared'}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def transfer_bin_stock(
+	from_bin: str,
+	to_bin: str,
+	items: Optional[Union[List[Dict[str, Any]], Dict[str, Any], str]] = None,
+	item_code: Optional[str] = None,
+	qty: Optional[Union[float, int, str]] = None,
+	warehouse: Optional[str] = None,
+	notes: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Transfer stock between two Storage Bins in the same warehouse via Material Transfer Stock Entry."""
+	res = _transfer_bin_stock_impl(
+		from_bin=from_bin,
+		to_bin=to_bin,
+		items=items,
+		item_code=item_code,
+		qty=qty,
+		warehouse=warehouse,
+		notes=notes,
+	)
+	se_url = f"{get_url()}/app/stock-entry/{quote(str(res['stock_entry']), safe='')}"
+	return build_agent_envelope(
+		success=True,
+		urls={"desk": se_url, "stock_entry": se_url},
+		data=res,
+		message=_("Transferred {0} line(s) from bin {1} to {2} via Stock Entry {3}.").format(
+			len(res["items"]), res["from_bin"], res["to_bin"], res["stock_entry"]
+		),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Bin Transfer Posted: `{res['stock_entry']}`\n"
+			f"- **Route**: `{res['from_bin']}` -> `{res['to_bin']}` (`{res['warehouse']}`)\n"
+			f"- **Items**: `{len(res['items'])}`"
+		),
+	)
+
+
+@frappe.whitelist()
+def adjust_bin_stock(
+	purpose: str,
+	items: Union[List[Dict[str, Any]], Dict[str, Any], str],
+	bin_location: Optional[str] = None,
+	warehouse: Optional[str] = None,
+	reason: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Post a Material Receipt or Material Issue Stock Entry targeting specific Storage Bin(s)."""
+	res = _adjust_bin_stock_impl(
+		purpose=purpose,
+		items=items,
+		bin_location=bin_location,
+		warehouse=warehouse,
+		reason=reason,
+	)
+	se_url = f"{get_url()}/app/stock-entry/{quote(str(res['stock_entry']), safe='')}"
+	return build_agent_envelope(
+		success=True,
+		urls={"desk": se_url, "stock_entry": se_url},
+		data=res,
+		message=_("Posted {0} Stock Entry {1} for {2} item(s).").format(
+			res["purpose"], res["stock_entry"], len(res["items"])
+		),
+		include_summary=include_summary,
+		summary_builder=lambda: (
+			f"### Stock Adjustment Posted: `{res['stock_entry']}`\n"
+			f"- **Purpose**: `{res['purpose']}` | **Warehouse**: `{res['warehouse']}`\n"
+			f"- **Items**: `{len(res['items'])}`"
 		),
 	)

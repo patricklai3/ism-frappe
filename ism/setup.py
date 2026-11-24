@@ -4,8 +4,12 @@
 """Compatibility facade re-exporting ISM install and migration tasks from ism.setup_tasks."""
 
 from ism.setup_tasks import (
+	BIN_DIMENSION_NAME,
+	BIN_REFERENCE_DOCTYPE,
+	DEFAULT_BIN_FIELDNAME,
 	DEFAULT_EQUIPMENT_TAGS,
 	LEGACY_FIELDS_TO_REMOVE,
+	SLE_BIN_INDEX_NAME,
 	STANDARD_INSPECTION_ITEMS,
 	STANDARD_SCHEDULE_ENTRY_TYPES,
 	_company_has_default_hst_setup,
@@ -24,6 +28,7 @@ from ism.setup_tasks import (
 	seed_schedule_entry_types,
 	setup_default_ism_settings,
 	setup_default_taxes_and_payments,
+	setup_inventory_dimensions,
 	setup_item_custom_fields,
 	setup_parts_item_group,
 	setup_procurement_custom_fields,
@@ -41,6 +46,7 @@ def _run_setup_tasks(full=False):
 	setup_default_taxes_and_payments(only_if_missing=not full)
 	setup_parts_item_group()
 	setup_item_custom_fields(force_update=full)
+	setup_inventory_dimensions(force_update=full)
 	setup_procurement_custom_fields(force_update=full)
 
 
@@ -55,8 +61,12 @@ def after_install():
 
 
 __all__ = [
+	"BIN_DIMENSION_NAME",
+	"BIN_REFERENCE_DOCTYPE",
+	"DEFAULT_BIN_FIELDNAME",
 	"DEFAULT_EQUIPMENT_TAGS",
 	"LEGACY_FIELDS_TO_REMOVE",
+	"SLE_BIN_INDEX_NAME",
 	"STANDARD_INSPECTION_ITEMS",
 	"STANDARD_SCHEDULE_ENTRY_TYPES",
 	"_company_has_default_hst_setup",
@@ -78,6 +88,7 @@ __all__ = [
 	"seed_schedule_entry_types",
 	"setup_default_ism_settings",
 	"setup_default_taxes_and_payments",
+	"setup_inventory_dimensions",
 	"setup_item_custom_fields",
 	"setup_parts_item_group",
 	"setup_procurement_custom_fields",

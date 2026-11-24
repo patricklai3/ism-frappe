@@ -1028,20 +1028,109 @@
 
 .service-card__parts {
 	display: flex;
-	flex-wrap: wrap;
+	flex-direction: column;
 	gap: 6px;
-	margin-top: 2px;
+	margin-top: 4px;
 }
 
-.part-chip {
-	display: inline-flex;
+.part-row {
+	display: flex;
 	align-items: center;
-	padding: 3px 8px;
-	border-radius: 7px;
+	gap: 10px;
+	padding: 6px 10px;
+	border-radius: 8px;
 	background: var(--shop-surface-2);
 	border: 1px solid var(--shop-border);
-	font-size: 0.78rem;
+	min-width: 0;
+}
+
+.part-row__bin {
+	display: inline-flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.part-bin-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 7px;
+	border-radius: 6px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	line-height: 1.35;
+	white-space: nowrap;
+}
+
+.part-bin-badge--stock {
+	background: var(--tech-emerald-soft);
+	color: #34d399;
+	border: 1px solid var(--tech-emerald-border);
+}
+
+.part-bin-badge--overflow {
+	background: var(--tech-cyan-soft);
+	color: var(--tech-cyan);
+	border: 1px solid rgba(34, 211, 238, 0.35);
+}
+
+.part-bin-badge--home {
+	background: transparent;
+	color: var(--shop-sky);
+	border: 1px dashed rgba(56, 189, 248, 0.5);
+}
+
+.part-bin-badge--customer {
+	background: var(--tech-purple-soft);
+	color: #c4b5fd;
+	border: 1px solid var(--tech-purple-border);
+}
+
+.part-bin-badge--missing {
+	background: rgba(245, 158, 11, 0.14);
+	color: var(--shop-amber);
+	border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.part-row__info {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 6px;
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.part-row__name {
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--shop-text);
+	word-break: break-word;
+}
+
+.part-row__code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.74rem;
+	color: var(--shop-text-muted);
+}
+
+.part-row__qty {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.8rem;
+	font-weight: 700;
 	color: #e2e8f0;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+@media (max-width: 560px) {
+	.part-row {
+		flex-wrap: wrap;
+		gap: 6px 8px;
+	}
 }
 
 .service-card__notes {

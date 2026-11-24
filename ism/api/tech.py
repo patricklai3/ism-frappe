@@ -190,11 +190,20 @@ def _compute_capture_lock(ro_status: str | None) -> tuple[bool, str]:
 	return True, ""
 
 
-def _parse_service_parts_no_price(raw_parts: Any) -> list[dict[str, Any]]:
-	"""Extract strictly price-free part descriptors (item_code, item_name, qty) for technicians."""
+def _format_bin_qty(qty: Any) -> str:
+	val = flt(qty, 2)
+	return str(int(val)) if val == int(val) else f"{val:g}"
+
+
+def _parse_service_parts_no_price(
+	raw_parts: Any,
+	bin_stock_map: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+	"""Extract strictly price-free part descriptors with bin location metadata for technicians."""
 	parsed = _parse_json_safe(raw_parts, [])
 	if not isinstance(parsed, list):
 		return []
+	stock_map = bin_stock_map if isinstance(bin_stock_map, dict) else {}
 	result: list[dict[str, Any]] = []
 	for entry in parsed:
 		if not isinstance(entry, dict):
@@ -203,11 +212,75 @@ def _parse_service_parts_no_price(raw_parts: Any) -> list[dict[str, Any]]:
 		item_name = str(entry.get("item_name") or item_code).strip()
 		if not item_code and not item_name:
 			continue
+
+		qty = flt(entry.get("qty") if entry.get("qty") is not None else 1, 2)
+		part_source = str(entry.get("part_source") or "OEM").strip() or "OEM"
+		explicit_bin = str(entry.get("bin_location") or "").strip().upper()
+
+		stock_info = stock_map.get(item_code) or {}
+		default_bin_location = str(stock_info.get("default_bin_location") or "").strip() or None
+		raw_bins = stock_info.get("bins") or []
+		bins: list[dict[str, Any]] = []
+		for b in raw_bins:
+			if not isinstance(b, dict):
+				continue
+			b_code = str(b.get("bin_location") or "").strip()
+			if not b_code:
+				continue
+			bins.append(
+				{
+					"bin_location": b_code,
+					"qty": flt(b.get("qty"), 2),
+					"is_default": bool(b.get("is_default")),
+				}
+			)
+
+		if part_source == "Customer Supplied":
+			bin_status = "CUSTOMER_SUPPLIED"
+			bin_display = "Customer Supplied"
+			primary_bin = None
+			bin_locations: list[dict[str, Any]] = []
+		else:
+			pinned_bin = next((b for b in bins if b["bin_location"] == explicit_bin), None) if explicit_bin else None
+			if pinned_bin is not None:
+				bin_status = "IN_STOCK"
+				primary_bin = pinned_bin["bin_location"]
+				bin_display = primary_bin
+				bin_locations = [pinned_bin]
+			elif len(bins) == 1:
+				bin_status = "IN_STOCK"
+				primary_bin = bins[0]["bin_location"]
+				bin_display = primary_bin
+				bin_locations = bins
+			elif len(bins) > 1:
+				bin_status = "MULTI_BIN"
+				primary_bin = bins[0]["bin_location"]
+				bin_display = " · ".join(
+					f"{b['bin_location']} (×{_format_bin_qty(b['qty'])})" for b in bins
+				)
+				bin_locations = bins
+			elif default_bin_location:
+				bin_status = "DEFAULT_ONLY"
+				primary_bin = None
+				bin_display = f"Home: {default_bin_location}"
+				bin_locations = []
+			else:
+				bin_status = "UNASSIGNED"
+				primary_bin = None
+				bin_display = "No Bin"
+				bin_locations = []
+
 		result.append(
 			{
 				"item_code": item_code,
 				"item_name": item_name,
-				"qty": flt(entry.get("qty") if entry.get("qty") is not None else 1, 2),
+				"qty": qty,
+				"part_source": part_source,
+				"primary_bin": primary_bin,
+				"default_bin_location": default_bin_location,
+				"bin_locations": bin_locations,
+				"bin_status": bin_status,
+				"bin_display": bin_display,
 			}
 		)
 	return result
@@ -839,6 +912,30 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 			)[0][0]
 		)
 
+		unique_part_codes: list[str] = []
+		seen_part_codes: set[str] = set()
+		for row in getattr(ro, "services", []) or []:
+			if (row.status or "").strip() != "Approved":
+				continue
+			for entry in _parse_json_safe(getattr(row, "parts", None), []):
+				if not isinstance(entry, dict):
+					continue
+				code = str(entry.get("item_code") or "").strip()
+				if code and code not in seen_part_codes:
+					seen_part_codes.add(code)
+					unique_part_codes.append(code)
+
+		bin_stock_map: dict[str, dict[str, Any]] = {}
+		if unique_part_codes:
+			try:
+				from ism.api.parts_stock import _resolve_default_warehouse, get_items_bin_stock_batch
+			except ImportError:
+				_resolve_default_warehouse = None
+				get_items_bin_stock_batch = None
+			if get_items_bin_stock_batch is not None:
+				wh = _resolve_default_warehouse(getattr(ro, "company", None)) if _resolve_default_warehouse else None
+				bin_stock_map = get_items_bin_stock_batch(unique_part_codes, warehouse=wh) or {}
+
 	approved_services: list[dict[str, Any]] = []
 	pending_services: list[dict[str, Any]] = []
 	declined_count = 0
@@ -861,7 +958,7 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 					"advisor_notes": getattr(row, "advisor_notes", None) or "",
 					"applicable_generation": getattr(row, "applicable_generation", None) or "",
 					"tesla_manual_url": getattr(row, "tesla_manual_url", None) or "",
-					"parts": _parse_service_parts_no_price(getattr(row, "parts", None)),
+					"parts": _parse_service_parts_no_price(getattr(row, "parts", None), bin_stock_map=bin_stock_map),
 				}
 			)
 		elif row_status == "Declined":

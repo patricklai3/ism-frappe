@@ -34,14 +34,19 @@ from ism.api.agent_procurement import (
 	_attach_package_parts,
 	_build_procurement_urls,
 	_collect_required_part_qtys,
+	adjust_bin_stock as _adjust_bin_stock_impl,
 	check_parts_stock as _check_parts_stock_impl,
+	create_bin_location as _create_bin_location_impl,
 	create_purchase_invoice as _create_purchase_invoice_impl,
 	create_purchase_payment as _create_purchase_payment_impl,
 	get_component_alternates as _get_component_alternates_impl,
 	import_supplier_catalog as _import_supplier_catalog_impl,
 	import_tesla_procedure as _import_tesla_procedure_impl,
+	list_bin_locations as _list_bin_locations_impl,
 	receive_purchase_order as _receive_purchase_order_impl,
+	set_item_default_bin as _set_item_default_bin_impl,
 	submit_procurement_orders as _submit_procurement_orders_domain_impl,
+	transfer_bin_stock as _transfer_bin_stock_impl,
 )
 from ism.api.agent_quotes import (
 	_SERVICE_HOURS_ALIASES,
@@ -131,11 +136,13 @@ __all__ = [
 	"_submit_procurement_orders_impl",
 	"add_deferred_services",
 	"add_supplement",
+	"adjust_bin_stock",
 	"amend_quote",
 	"apply_inspection_template",
 	"book_appointment",
 	"check_parts_stock",
 	"checkout_repair_order",
+	"create_bin_location",
 	"create_purchase_invoice",
 	"create_purchase_payment",
 	"create_quote",
@@ -161,6 +168,7 @@ __all__ = [
 	"import_tesla_procedure",
 	"intake_and_find_slots",
 	"link_vehicle_customer",
+	"list_bin_locations",
 	"list_inspection_templates",
 	"list_shop_action_items",
 	"now_datetime",
@@ -172,9 +180,11 @@ __all__ = [
 	"resolve_shop_action_item",
 	"search_vehicles",
 	"send_quote_for_approval",
+	"set_item_default_bin",
 	"submit_procurement_orders",
 	"sync_action_item_state",
 	"toggle_service_completion",
+	"transfer_bin_stock",
 	"update_appointment_status",
 	"update_job_status",
 ]
@@ -439,13 +449,15 @@ def check_parts_stock(
 	repair_order: Optional[str] = None,
 	items: Optional[Union[List[Any], str]] = None,
 	company: Optional[str] = None,
+	bin_location: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Check warehouse stock availability and deficits for a Repair Order or item list."""
+	"""Check warehouse stock availability, bin breakdown, and deficits for a Repair Order, item list, or bin."""
 	return _check_parts_stock_impl(
 		repair_order=repair_order,
 		items=items,
 		company=company,
+		bin_location=bin_location,
 		include_summary=include_summary,
 	)
 
@@ -515,6 +527,8 @@ def receive_purchase_order(
 	purchase_order: Optional[str] = None,
 	submit_po: Any = True,
 	purchase_invoice: Optional[str] = None,
+	bin_location: Optional[str] = None,
+	bin_allocations: Optional[Union[Dict[str, str], List[Dict[str, Any]], str]] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Submit PO (if still Draft) and post a Purchase Receipt for a Purchase Order or un-received Purchase Invoice."""
@@ -522,6 +536,8 @@ def receive_purchase_order(
 		purchase_order=purchase_order,
 		submit_po=submit_po,
 		purchase_invoice=purchase_invoice,
+		bin_location=bin_location,
+		bin_allocations=bin_allocations,
 		include_summary=include_summary,
 	)
 
@@ -558,9 +574,10 @@ def create_purchase_invoice(
 	bill_no: Optional[str] = None,
 	bill_date: Optional[str] = None,
 	attach_advances: Any = True,
+	bin_location: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Create and submit a Purchase Invoice (from PO or standalone), with optional update_stock and PO advance attachment."""
+	"""Create and submit a Purchase Invoice (from PO or standalone), with optional update_stock, bin putaway, and PO advance attachment."""
 	return _create_purchase_invoice_impl(
 		purchase_order=purchase_order,
 		supplier=supplier,
@@ -570,6 +587,109 @@ def create_purchase_invoice(
 		bill_no=bill_no,
 		bill_date=bill_date,
 		attach_advances=attach_advances,
+		bin_location=bin_location,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def list_bin_locations(
+	warehouse: Optional[str] = None,
+	zone: Optional[str] = None,
+	query: Optional[str] = None,
+	include_stock: Any = False,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""List active Storage Bins with optional warehouse/zone/query filters and live stock quantities."""
+	return _list_bin_locations_impl(
+		warehouse=warehouse,
+		zone=zone,
+		query=query,
+		include_stock=include_stock,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def create_bin_location(
+	bin_code: str,
+	warehouse: Optional[str] = None,
+	zone: Optional[str] = None,
+	aisle: Optional[str] = None,
+	rack: Optional[str] = None,
+	shelf: Optional[str] = None,
+	bin_type: str = "Standard",
+	description: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Create a new Storage Bin location master record."""
+	return _create_bin_location_impl(
+		bin_code=bin_code,
+		warehouse=warehouse,
+		zone=zone,
+		aisle=aisle,
+		rack=rack,
+		shelf=shelf,
+		bin_type=bin_type,
+		description=description,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def set_item_default_bin(
+	item_code: str,
+	bin_location: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Assign or clear an Item's Home Bin (default_bin_location)."""
+	return _set_item_default_bin_impl(
+		item_code=item_code,
+		bin_location=bin_location,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def transfer_bin_stock(
+	from_bin: str,
+	to_bin: str,
+	items: Optional[Union[List[Dict[str, Any]], Dict[str, Any], str]] = None,
+	item_code: Optional[str] = None,
+	qty: Optional[Union[float, int, str]] = None,
+	warehouse: Optional[str] = None,
+	notes: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Transfer stock between two Storage Bins in the same warehouse via Material Transfer Stock Entry."""
+	return _transfer_bin_stock_impl(
+		from_bin=from_bin,
+		to_bin=to_bin,
+		items=items,
+		item_code=item_code,
+		qty=qty,
+		warehouse=warehouse,
+		notes=notes,
+		include_summary=include_summary,
+	)
+
+
+@frappe.whitelist()
+def adjust_bin_stock(
+	purpose: str,
+	items: Union[List[Dict[str, Any]], Dict[str, Any], str],
+	bin_location: Optional[str] = None,
+	warehouse: Optional[str] = None,
+	reason: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
+	"""Post a Material Receipt or Material Issue Stock Entry targeting specific Storage Bin(s)."""
+	return _adjust_bin_stock_impl(
+		purpose=purpose,
+		items=items,
+		bin_location=bin_location,
+		warehouse=warehouse,
+		reason=reason,
 		include_summary=include_summary,
 	)
 

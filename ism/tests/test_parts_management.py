@@ -1791,6 +1791,307 @@ class TestPartsManagement(ISMTestCase):
 			"https://service.tesla.com/docs/ModelX/ServiceManual/Palladium/en-us/",
 		)
 
+	def test_inventory_dimension_setup_and_storage_bin_crud(self):
+		"""Verify setup_inventory_dimensions idempotency, validate_negative_stock=1, SLE index, and Storage Bin CRUD."""
+		from ism.api.parts_stock import (
+			create_bin_location,
+			get_bin_dimension_meta,
+			list_bin_locations,
+			set_item_default_bin,
+		)
+		from ism.setup import SLE_BIN_INDEX_NAME, setup_inventory_dimensions
+
+		dim_name_1 = setup_inventory_dimensions()
+		dim_name_2 = setup_inventory_dimensions()
+		self.assertEqual(dim_name_1, "Bin Location")
+		self.assertEqual(dim_name_2, "Bin Location")
+
+		dim_doc = frappe.get_doc("Inventory Dimension", "Bin Location")
+		self.assertEqual(dim_doc.reference_document, "Storage Bin")
+		self.assertEqual(int(dim_doc.validate_negative_stock), 1)
+		if hasattr(dim_doc, "disabled"):
+			self.assertEqual(int(dim_doc.disabled), 0)
+
+		meta = get_bin_dimension_meta(use_cache=False)
+		self.assertTrue(meta["enabled"])
+		self.assertTrue(meta["validate_negative_stock"])
+		self.assertTrue(frappe.db.has_column("Stock Ledger Entry", meta["sle_fieldname"]))
+
+		idx_rows = frappe.db.sql(
+			"SHOW INDEX FROM `tabStock Ledger Entry` WHERE Key_name = %s",
+			(SLE_BIN_INDEX_NAME,),
+		)
+		self.assertTrue(idx_rows, f"Expected composite index {SLE_BIN_INDEX_NAME} on Stock Ledger Entry")
+
+		wh = get_default_warehouse(self._get_company())
+		suffix = frappe.generate_hash(length=5).upper()
+		raw_code = f"  a2-{suffix.lower()}  "
+		expected_code = f"A2-{suffix}"
+		created_bin = create_bin_location(
+			bin_code=raw_code,
+			warehouse=wh,
+			zone="Zone-A",
+			aisle="A2",
+			rack="R1",
+			shelf="S3",
+			bin_type="Standard",
+			description="Suspension parts bin",
+		)
+		self.track("Storage Bin", created_bin["name"])
+		self.assertEqual(created_bin["name"], expected_code)
+		self.assertEqual(created_bin["bin_code"], expected_code)
+		self.assertEqual(created_bin["warehouse"], wh)
+
+		listed = list_bin_locations(warehouse=wh, zone="Zone-A", query=expected_code, include_stock=True)
+		self.assertEqual(listed["count"], 1)
+		self.assertEqual(listed["bins"][0]["bin_code"], expected_code)
+		self.assertEqual(listed["bins"][0]["sku_count"], 0)
+		self.assertEqual(flt(listed["bins"][0]["total_qty"]), 0.0)
+
+		part_res = quick_create_part(
+			part_number=f"BIN-QC-{suffix}",
+			part_name="Binned Control Arm",
+			default_bin_location=expected_code.lower(),
+		)
+		self.track("Item", part_res["item_code"])
+		self.assertEqual(part_res["default_bin_location"], expected_code)
+		self.assertEqual(
+			frappe.db.get_value("Item", part_res["item_code"], "default_bin_location"),
+			expected_code,
+		)
+
+		bulk_res = bulk_import_parts(
+			items=[
+				{
+					"part_number": f"BIN-BLK-{suffix}",
+					"part_name": "Bulk Binned Nut",
+					"default_bin_location": expected_code,
+				}
+			]
+		)
+		self.assertEqual(bulk_res["total_created"], 1)
+		bulk_code = bulk_res["created"][0]["item_code"]
+		self.track("Item", bulk_code)
+		self.assertEqual(
+			frappe.db.get_value("Item", bulk_code, "default_bin_location"),
+			expected_code,
+		)
+
+		cleared = set_item_default_bin(part_res["item_code"], bin_location=None)
+		self.assertIsNone(cleared["default_bin_location"])
+		self.assertFalse(frappe.db.get_value("Item", part_res["item_code"], "default_bin_location"))
+
+	def test_bin_procurement_receiving_and_require_bin_guard(self):
+		"""Verify PO receive (uniform, per-item, home fallback), require_bin_on_receive guard, and PI update_stock bin."""
+		from ism.api.agent import receive_purchase_order
+		from ism.api.parts_stock import create_bin_location, get_items_bin_stock_batch
+		from ism.setup import setup_inventory_dimensions
+
+		setup_inventory_dimensions()
+		company = self._get_company()
+		wh = get_default_warehouse(company)
+		suffix = frappe.generate_hash(length=5).upper()
+
+		bin_home = create_bin_location(bin_code=f"HM-{suffix}", warehouse=wh, zone="Z1")["bin_code"]
+		bin_recv = create_bin_location(bin_code=f"RC-{suffix}", warehouse=wh, zone="Z1", bin_type="Receiving")["bin_code"]
+		bin_over = create_bin_location(bin_code=f"OF-{suffix}", warehouse=wh, zone="Z2", bin_type="Overflow")["bin_code"]
+		self.track("Storage Bin", bin_home)
+		self.track("Storage Bin", bin_recv)
+		self.track("Storage Bin", bin_over)
+
+		p_home = quick_create_part(
+			part_number=f"PRH-{suffix}",
+			part_name="Home Bin Part",
+			unit_rate=50.0,
+			valuation_rate=30.0,
+			default_bin_location=bin_home,
+		)
+		p_nobin = quick_create_part(
+			part_number=f"PRN-{suffix}",
+			part_name="No Default Bin Part",
+			unit_rate=40.0,
+			valuation_rate=20.0,
+		)
+		self.track("Item", p_home["item_code"])
+		self.track("Item", p_nobin["item_code"])
+
+		supplier = f"{TEST_PREFIX}BinSupplier_{suffix}"
+		ensure_supplier_and_link_to_item(supplier, p_home["item_code"])
+		ensure_supplier_and_link_to_item(supplier, p_nobin["item_code"])
+		self.track("Supplier", supplier)
+
+		# 1. PO receive with per-item bin_allocations + uniform fallback
+		po1 = submit_procurement_orders(
+			parts_data=[
+				{"item_code": p_home["item_code"], "qty": 2, "rate": 30.0, "supplier": supplier},
+				{"item_code": p_nobin["item_code"], "qty": 3, "rate": 20.0, "supplier": supplier},
+			],
+			submit=True,
+			company=company,
+		)
+		po1_name = po1["purchase_orders"][0]
+		self.track("Purchase Order", po1_name)
+
+		rec1 = receive_purchase_order(
+			purchase_order=po1_name,
+			bin_location=bin_recv,
+			bin_allocations={p_nobin["item_code"]: bin_over},
+		)
+		self.track("Purchase Receipt", rec1["data"]["purchase_receipt"])
+		items_by_code = {row["item_code"]: row for row in rec1["data"]["items"]}
+		self.assertEqual(items_by_code[p_home["item_code"]]["bin_location"], bin_recv)
+		self.assertEqual(items_by_code[p_nobin["item_code"]]["bin_location"], bin_over)
+
+		# 2. PO receive with no explicit bin -> Item.default_bin_location fallback + require_bin_on_receive guard
+		po2 = submit_procurement_orders(
+			parts_data=[{"item_code": p_nobin["item_code"], "qty": 1, "rate": 20.0, "supplier": supplier}],
+			submit=True,
+			company=company,
+		)
+		po2_name = po2["purchase_orders"][0]
+		self.track("Purchase Order", po2_name)
+
+		po3 = submit_procurement_orders(
+			parts_data=[{"item_code": p_home["item_code"], "qty": 2, "rate": 30.0, "supplier": supplier}],
+			submit=True,
+			company=company,
+		)
+		po3_name = po3["purchase_orders"][0]
+		self.track("Purchase Order", po3_name)
+
+		orig_req_bin = frappe.db.get_single_value("ISM Settings", "require_bin_on_receive")
+		try:
+			frappe.db.set_single_value("ISM Settings", "require_bin_on_receive", 1)
+			with self.assertRaises(frappe.MandatoryError):
+				receive_purchase_order(purchase_order=po2_name)
+
+			# Home bin fallback satisfies require_bin_on_receive=1 automatically
+			rec3 = receive_purchase_order(purchase_order=po3_name)
+			self.track("Purchase Receipt", rec3["data"]["purchase_receipt"])
+			self.assertEqual(rec3["data"]["items"][0]["bin_location"], bin_home)
+		finally:
+			frappe.db.set_single_value("ISM Settings", "require_bin_on_receive", orig_req_bin or 0)
+
+		# 3. Purchase Invoice with update_stock=True stamps SLE bin_location
+		pi_res = create_purchase_invoice(
+			supplier=supplier,
+			parts_data=[{"item_code": p_home["item_code"], "qty": 1, "rate": 30.0}],
+			update_stock=True,
+			company=company,
+			bin_location=bin_over,
+		)
+		self.track("Purchase Invoice", pi_res["purchase_invoice"])
+		self.assertEqual(pi_res["items"][0]["bin_location"], bin_over)
+
+		bin_stock = get_items_bin_stock_batch([p_home["item_code"], p_nobin["item_code"]], warehouse=wh)
+		home_bins = {b["bin_location"]: b["qty"] for b in bin_stock[p_home["item_code"]]["bins"]}
+		self.assertEqual(home_bins[bin_home], 2.0)
+		self.assertEqual(home_bins[bin_recv], 2.0)
+		self.assertEqual(home_bins[bin_over], 1.0)
+		# Home bin is sorted first as primary_bin
+		self.assertEqual(bin_stock[p_home["item_code"]]["primary_bin"], bin_home)
+		self.assertTrue(bin_stock[p_home["item_code"]]["bins"][0]["is_default"])
+
+	def test_bin_transfer_adjust_and_alternates_enrichment(self):
+		"""Verify adjust_bin_stock, transfer_bin_stock, negative-bin guard, and bin enrichment on stock/alternates."""
+		from ism.api.parts_stock import (
+			adjust_bin_stock,
+			create_bin_location,
+			get_items_bin_stock_batch,
+			list_bin_locations,
+			transfer_bin_stock,
+		)
+		from ism.setup import setup_inventory_dimensions
+
+		setup_inventory_dimensions()
+		company = self._get_company()
+		wh = get_default_warehouse(company)
+		suffix = frappe.generate_hash(length=5).upper()
+
+		bin_a = create_bin_location(bin_code=f"TA-{suffix}", warehouse=wh, zone="T-ZONE")["bin_code"]
+		bin_b = create_bin_location(bin_code=f"TB-{suffix}", warehouse=wh, zone="T-ZONE", bin_type="Overflow")["bin_code"]
+		self.track("Storage Bin", bin_a)
+		self.track("Storage Bin", bin_b)
+
+		oem_no = f"1044-BIN-{suffix}"
+		part = quick_create_part(
+			part_number=oem_no,
+			part_name="Binned Link",
+			oem_part_number=oem_no,
+			unit_rate=90.0,
+			valuation_rate=45.0,
+			default_bin_location=bin_a,
+		)
+		code = part["item_code"]
+		self.track("Item", code)
+
+		# Receipt into bin_a using 'receipt' alias
+		se_rec = adjust_bin_stock(
+			purpose="receipt",
+			items=[{"item_code": code, "qty": 4, "rate": 45.0}],
+			bin_location=bin_a,
+			warehouse=wh,
+			reason="Initial bin putaway",
+		)
+		self.track("Stock Entry", se_rec["stock_entry"])
+		self.assertEqual(se_rec["purpose"], "Material Receipt")
+
+		# Transfer 1 from bin_a to bin_b (same warehouse)
+		se_trf = transfer_bin_stock(
+			from_bin=bin_a,
+			to_bin=bin_b,
+			item_code=code,
+			qty=1,
+			warehouse=wh,
+			notes="Move overflow",
+		)
+		self.track("Stock Entry", se_trf["stock_entry"])
+		self.assertEqual(se_trf["from_bin"], bin_a)
+		self.assertEqual(se_trf["to_bin"], bin_b)
+
+		# Over-transfer from bin_b (only 1 available) must fail
+		with self.assertRaises(frappe.ValidationError):
+			transfer_bin_stock(from_bin=bin_b, to_bin=bin_a, item_code=code, qty=2, warehouse=wh)
+
+		# Same-bin transfer must fail
+		with self.assertRaises(frappe.ValidationError):
+			transfer_bin_stock(from_bin=bin_a, to_bin=bin_a, item_code=code, qty=1, warehouse=wh)
+
+		# Issue 1 from bin_a using 'issue' alias
+		se_iss = adjust_bin_stock(
+			purpose="issue",
+			items=[{"item_code": code, "qty": 1}],
+			bin_location=bin_a,
+			warehouse=wh,
+			reason="Cycle count shrinkage",
+		)
+		self.track("Stock Entry", se_iss["stock_entry"])
+		self.assertEqual(se_iss["purpose"], "Material Issue")
+
+		# Verify balances: bin_a = 4 - 1 - 1 = 2, bin_b = 1
+		snap = get_items_bin_stock_batch([code], warehouse=wh)[code]
+		self.assertEqual(snap["primary_bin"], bin_a)
+		self.assertEqual(snap["total_binned_qty"], 3.0)
+		self.assertEqual({b["bin_location"]: b["qty"] for b in snap["bins"]}, {bin_a: 2.0, bin_b: 1.0})
+
+		# Verify list_bin_locations(include_stock=True)
+		listed = list_bin_locations(warehouse=wh, zone="T-ZONE", include_stock=True)
+		by_bin = {b["bin_code"]: b for b in listed["bins"]}
+		self.assertEqual(by_bin[bin_a]["total_qty"], 2.0)
+		self.assertEqual(by_bin[bin_b]["total_qty"], 1.0)
+
+		# Verify get_items_available_stock_batch & get_component_alternates bin enrichment
+		avail = get_items_available_stock_batch([code], warehouse=wh)[code]
+		self.assertEqual(avail["primary_bin"], bin_a)
+		self.assertEqual(avail["default_bin_location"], bin_a)
+		self.assertEqual(len(avail["bin_locations"]), 2)
+
+		alts = get_component_alternates(oem_part_number=oem_no)
+		match = next(a for a in alts if a["item_code"] == code)
+		self.assertEqual(match["primary_bin"], bin_a)
+		self.assertEqual(match["default_bin_location"], bin_a)
+		self.assertEqual(len(match["bin_locations"]), 2)
+
 
 
 
