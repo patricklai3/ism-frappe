@@ -10,7 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt
 
-from ism.scheduling.capacity import parse_required_tags
+from ism.scheduling.capacity import load_package_tags_map
 from ism.scheduling.estimation_light import estimate_total_duration
 from ism.utils.tesla_manual import (
 	is_in_generation_range,
@@ -56,7 +56,6 @@ _CATALOG_QUERY_FIELDS: List[str] = [
 	"applicable_generation",
 	"applicable_year_from",
 	"applicable_year_to",
-	"is_mobile_capable",
 	"allow_self_serve_booking",
 	"self_serve_sort_order",
 	"customer_title",
@@ -68,7 +67,6 @@ _CATALOG_QUERY_FIELDS: List[str] = [
 	"hourly_rate",
 	"service_rate",
 	"self_serve_duration_minutes",
-	"self_serve_required_tags",
 ]
 
 
@@ -407,7 +405,6 @@ def _build_public_catalog_card(
 		"summary": summary,
 		"applicable_model": pkg.get("applicable_model") or "All Models",
 		"applicable_generation": (pkg.get("applicable_generation") or "").strip(),
-		"is_mobile_capable": cint(pkg.get("is_mobile_capable") or 0),
 		"sort_order": cint(sort_order) if sort_order is not None else 100,
 		"price_display_mode": price_info["price_display_mode"],
 		"currency": price_info["currency"],
@@ -428,7 +425,7 @@ def list_bookable_packages(
 	Each item contains ONLY:
 	{
 	  'package_id', 'title', 'summary', 'applicable_model', 'applicable_generation',
-	  'is_mobile_capable', 'sort_order',
+	  'sort_order',
 	  'price_display_mode', 'currency', 'price_min', 'price_max', 'price_display_label',
 	}
 	Strictly omits correction_code, rh_correction_code, hourly_rate, tesla_manual_url,
@@ -522,7 +519,7 @@ def compute_packages_booking_requirements(
 	Computes:
 	- duration_minutes (int >= 15): deterministic sum of self_serve_duration_minutes overrides PLUS
 	  Fenton-Wilkinson estimate_total_duration() over FRT-derived packages + buffer_padding_minutes.
-	- required_tags (List[str]): deduplicated sorted union of self_serve_required_tags across packages.
+	- required_tags (List[str]): deduplicated sorted union of Service Package equipment tags across packages.
 	- items_summary (str): clean bullet list for Schedule Entry.items_summary.
 	- booked_packages_snapshot (List[Dict[str, Any]]): JSON-serializable customer snapshot for
 	  Schedule Entry.booked_packages_json.
@@ -548,6 +545,7 @@ def compute_packages_booking_requirements(
 	settings = _get_catalog_settings()
 	subtotals = _get_default_items_subtotals(ids)
 	compat_map = _get_generation_compatibility_map(ids)
+	tags_map = load_package_tags_map(ids)
 
 	override_minutes = 0
 	frt_minutes_list: List[float] = []
@@ -592,8 +590,7 @@ def compute_packages_booking_requirements(
 			}
 		)
 
-		for tag in parse_required_tags(pkg.get("self_serve_required_tags")):
-			tags_set.add(tag)
+		tags_set.update(tags_map.get(pkg_id, []))
 
 		override = cint(pkg.get("self_serve_duration_minutes") or 0)
 		if override > 0:

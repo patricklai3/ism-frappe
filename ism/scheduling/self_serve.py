@@ -26,6 +26,8 @@ from ism.scheduling.bookable_catalog import (
 from ism.scheduling.capacity import (
 	NON_BLOCKING_ENTRY_STATUSES,
 	ShopCapacityWindow,
+	get_required_tags_for_packages,
+	get_required_tags_for_repair_order,
 	load_bay_tags_map,
 	parse_required_tags,
 )
@@ -177,36 +179,27 @@ def _get_entry_field(entry: Any, fieldname: str, default: Any = None) -> Any:
 
 
 def get_required_tags_for_entry(schedule_entry: Any) -> List[str]:
-	"""Derive required equipment tags from Schedule Entry booked_packages_json snapshot."""
+	"""Derive required equipment tags from booked packages or linked Repair Order."""
 	raw_json = _get_entry_field(schedule_entry, "booked_packages_json")
-	if not raw_json:
-		return []
-	try:
-		parsed = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
-	except (TypeError, ValueError):
-		return []
-	if not isinstance(parsed, list):
-		return []
+	pkg_ids: List[str] = []
+	if raw_json:
+		try:
+			parsed = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+		except (TypeError, ValueError):
+			parsed = []
+		if isinstance(parsed, list):
+			pkg_ids = [
+				str(item.get("package_id")).strip()
+				for item in parsed
+				if isinstance(item, dict) and item.get("package_id")
+			]
+	if pkg_ids:
+		return get_required_tags_for_packages(list(dict.fromkeys(pkg_ids)))
 
-	pkg_ids = [
-		str(item.get("package_id")).strip()
-		for item in parsed
-		if isinstance(item, dict) and item.get("package_id")
-	]
-	if not pkg_ids:
-		return []
-
-	rows = frappe.get_all(
-		"Service Package",
-		filters={"name": ["in", list(dict.fromkeys(pkg_ids))]},
-		fields=["self_serve_required_tags"],
-		ignore_permissions=True,
-	)
-	tags = set()
-	for row in rows:
-		for tag in parse_required_tags(row.get("self_serve_required_tags")):
-			tags.add(tag)
-	return sorted(tags)
+	repair_order = _get_entry_field(schedule_entry, "repair_order")
+	if repair_order:
+		return get_required_tags_for_repair_order(repair_order)
+	return []
 
 
 def get_self_serve_policy() -> Dict[str, Any]:

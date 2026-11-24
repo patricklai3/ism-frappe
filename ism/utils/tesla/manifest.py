@@ -240,6 +240,7 @@ def _parse_topic_capability(target):
 	return {
 		"is_mobile_capable": is_mobile,
 		"mobile_service_level": mobile_level,
+		"suggested_equipment_tags": [] if is_mobile else ["Lift"],
 		"rh_correction_code": rh_cc,
 		"is_symmetrical": 1 if rh_cc else 0,
 	}

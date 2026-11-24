@@ -627,6 +627,8 @@ def _cleanup_equipment_tags(log, errors):
 			continue
 		if frappe.db.exists("DocType", "Service Bay Equipment"):
 			frappe.db.delete("Service Bay Equipment", {"equipment_tag": tag})
+		if frappe.db.exists("DocType", "Service Package Equipment"):
+			frappe.db.delete("Service Package Equipment", {"equipment_tag": tag})
 		_delete_doc_safe("Equipment Tag", tag, log, errors)
 
 

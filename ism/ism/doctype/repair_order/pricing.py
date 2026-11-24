@@ -9,6 +9,7 @@ from frappe import _
 from frappe.utils import cint, flt
 
 from ism.api.parts import _resolve_default_warehouse as get_default_warehouse
+from ism.scheduling.capacity import format_required_tags, load_package_tags_map, parse_required_tags
 
 
 def _get_default_labor_rate() -> float:
@@ -26,6 +27,20 @@ def get_or_create_default_tax_template(company=None):
 	from ism.setup import get_or_create_default_sales_tax_template
 
 	return get_or_create_default_sales_tax_template(company)
+
+
+def _extract_package_tags(pkg: Any) -> List[str]:
+	"""Extract sorted deduplicated Equipment Tag names from a Service Package document or dict."""
+	raw_rows = getattr(pkg, "equipment_tags", None)
+	if raw_rows is None and isinstance(pkg, dict):
+		raw_rows = pkg.get("equipment_tags")
+	if raw_rows is None and getattr(pkg, "name", None):
+		return load_package_tags_map([pkg.name]).get(pkg.name, [])
+	tags = {
+		((row.get("equipment_tag") if isinstance(row, dict) else getattr(row, "equipment_tag", None)) or "").strip()
+		for row in (raw_rows or [])
+	}
+	return sorted(t for t in tags if t)
 
 
 def _is_unset_scalar(val: Any) -> bool:
@@ -151,7 +166,7 @@ def build_service_package_row_fields(
 		"parts_total": parts_total,
 		"total_amount": flt(labor_amount + parts_total, 2),
 		"is_supplement": cint(is_supplement),
-		"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
+		"required_equipment_tags": format_required_tags(_extract_package_tags(pkg)),
 		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
 		"advisor_notes": advisor_notes or "",
 	}
@@ -217,8 +232,8 @@ def _auto_expand_service_row(
 		s.labor_rate = row_fields["labor_rate"]
 	if cint(getattr(s, "is_flat_rate", 0)) and _is_unset_scalar(getattr(s, "labor_amount", None)):
 		s.labor_amount = row_fields["labor_amount"]
-	if not cint(getattr(s, "is_mobile_capable", 0)) and cint(row_fields.get("is_mobile_capable", 0)):
-		s.is_mobile_capable = 1
+	if _is_unset_scalar(getattr(s, "required_equipment_tags", None)) and row_fields.get("required_equipment_tags"):
+		s.required_equipment_tags = row_fields["required_equipment_tags"]
 	if _is_unset_scalar(getattr(s, "tesla_manual_url", None)) and row_fields.get("tesla_manual_url"):
 		s.tesla_manual_url = row_fields["tesla_manual_url"]
 
@@ -572,7 +587,7 @@ def duplicate_service_row_opposite_side(ro, service_row_id=None, **kwargs) -> Di
 		"parts_total": parts_total,
 		"total_amount": flt(flt(target.labor_amount) + parts_total, 2),
 		"is_supplement": is_supp,
-		"is_mobile_capable": target.is_mobile_capable,
+		"required_equipment_tags": getattr(target, "required_equipment_tags", None) or "",
 		"tesla_manual_url": target.tesla_manual_url,
 		"advisor_notes": "",
 	})
@@ -906,6 +921,14 @@ def save_service_row_as_package(ro, service_row_id=None, package_name=None, **kw
 				)
 			)
 
+	raw_tags = list(dict.fromkeys(parse_required_tags(getattr(target, "required_equipment_tags", None))))
+	valid_tags = (
+		set(frappe.get_all("Equipment Tag", filters={"name": ["in", raw_tags]}, pluck="name"))
+		if raw_tags and frappe.db.exists("DocType", "Equipment Tag")
+		else set()
+	)
+	pkg_equipment_tags = [{"equipment_tag": t} for t in raw_tags if t in valid_tags]
+
 	pkg = frappe.get_doc({
 		"doctype": "Service Package",
 		"package_name": pkg_title,
@@ -913,7 +936,7 @@ def save_service_row_as_package(ro, service_row_id=None, package_name=None, **kw
 		"applicable_generation": app_gen,
 		"correction_code": getattr(target, "correction_code", None),
 		"is_flat_rate": cint(getattr(target, "is_flat_rate", 0)),
-		"is_mobile_capable": cint(getattr(target, "is_mobile_capable", 0)),
+		"equipment_tags": pkg_equipment_tags,
 		"standard_labor_hours": flt(target.labor_hours),
 		"hourly_rate": flt(target.labor_rate),
 		"service_rate": flt(target.labor_amount),
@@ -1101,6 +1124,7 @@ def fetch_service_package_details(service_package: str, side: Optional[str] = No
 		for r in (getattr(pkg, "generation_compatibility", None) or [])
 	]
 
+	pkg_tags = _extract_package_tags(pkg)
 	return {
 		"package_name": title,
 		"applicable_model": app_model or "",
@@ -1115,7 +1139,8 @@ def fetch_service_package_details(service_package: str, side: Optional[str] = No
 		"category": pkg_cat or "Maintenance",
 		"description": "",
 		"is_flat_rate": is_flat,
-		"is_mobile_capable": cint(getattr(pkg, "is_mobile_capable", 0)),
+		"equipment_tags": pkg_tags,
+		"required_equipment_tags": format_required_tags(pkg_tags),
 		"standard_labor_hours": labor_hours,
 		"labor_hours": labor_hours,
 		"hourly_rate": hourly_rate,

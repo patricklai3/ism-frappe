@@ -144,6 +144,7 @@ def _merge_manifest_and_symmetry(
 	return {
 		"is_mobile_capable": is_mobile,
 		"mobile_service_level": mobile_level,
+		"suggested_equipment_tags": [] if is_mobile else ["Lift"],
 		"rh_correction_code": rh_code,
 		"is_symmetrical": is_symmetrical,
 	}
@@ -354,6 +355,17 @@ def normalize_tesla_procedure(raw_data=None, url="", html_content="", fetch_mani
 	)
 	is_mobile = merged["is_mobile_capable"]
 	mobile_level = merged["mobile_service_level"]
+	suggested_tags = list(merged.get("suggested_equipment_tags") or [])
+	raw_explicit_tags = payload.get("equipment_tags") or payload.get("suggested_equipment_tags")
+	if isinstance(raw_explicit_tags, str):
+		extra_tags = [t.strip() for t in raw_explicit_tags.split(",") if t.strip()]
+	elif isinstance(raw_explicit_tags, (list, tuple, set)):
+		extra_tags = [str(t).strip() for t in raw_explicit_tags if str(t).strip()]
+	else:
+		extra_tags = []
+	for tag in extra_tags:
+		if tag not in suggested_tags:
+			suggested_tags.append(tag)
 	rh_code = merged["rh_correction_code"]
 	is_symmetrical = merged["is_symmetrical"]
 
@@ -402,6 +414,7 @@ def normalize_tesla_procedure(raw_data=None, url="", html_content="", fetch_mani
 		"description": str(payload.get("description") or html_parsed.get("description") or "")[:500],
 		"is_mobile_capable": is_mobile,
 		"mobile_service_level": mobile_level,
+		"suggested_equipment_tags": suggested_tags,
 		"parts": parts,
 	}
 
@@ -468,6 +481,7 @@ def parse_tesla_procedure_html(html_content, url=""):
 		"description": "",
 		"is_mobile_capable": 0,
 		"mobile_service_level": "No",
+		"suggested_equipment_tags": ["Lift"],
 		"parts": [],
 	}
 

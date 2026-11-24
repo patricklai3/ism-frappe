@@ -159,3 +159,38 @@ class TestServiceBay(ISMTestCase):
 
 		frappe.delete_doc("Service Bay", self.bay_beta, force=True, ignore_permissions=True)
 		self.assertFalse(frappe.db.exists("Service Bay", self.bay_beta))
+
+	def test_equipment_tag_deletion_blocked_by_service_package_and_patch_idempotent(self):
+		"""Verify Equipment Tag cannot be deleted while linked to a Service Package and migration patch is idempotent."""
+		from ism.patches.v1_0.consolidate_service_package_equipment_tags import execute as run_migration_patch
+
+		tag_name = "Sim Package Tag Protect"
+		if not frappe.db.exists("Equipment Tag", tag_name):
+			tag_doc = frappe.get_doc({
+				"doctype": "Equipment Tag",
+				"tag_name": tag_name,
+				"description": "Tag assigned to package for deletion check",
+			}).insert(ignore_permissions=True)
+			self.track(tag_doc)
+
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": "Sim Tagged Package Protection",
+			"standard_labor_hours": 1.0,
+			"equipment_tags": [{"equipment_tag": tag_name}],
+		}).insert(ignore_permissions=True)
+		self.track(pkg)
+
+		with self.assertRaises(frappe.ValidationError):
+			frappe.delete_doc("Equipment Tag", tag_name, ignore_permissions=True)
+
+		# Migration patch executes cleanly and idempotently without duplicating rows
+		run_migration_patch()
+		run_migration_patch()
+		pkg.reload()
+		self.assertEqual(pkg.get_equipment_tags(), [tag_name])
+		self.assertEqual(len(pkg.equipment_tags), 1)
+
+		frappe.delete_doc("Service Package", pkg.name, force=True, ignore_permissions=True)
+		frappe.delete_doc("Equipment Tag", tag_name, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("Equipment Tag", tag_name))

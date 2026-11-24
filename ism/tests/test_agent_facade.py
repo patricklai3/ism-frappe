@@ -2469,3 +2469,54 @@ class TestAgentFacade(ISMTestCase):
 		self.assertEqual(ro_doc.services[0].service_package, imp_new["data"]["name"])
 		self.assertEqual(ro_doc.services[0].applicable_generation, "Model 3 Jan 2024")
 
+	def test_find_available_slots_derives_equipment_tags_from_repair_order(self):
+		"""Verify find_available_slots auto-derives required equipment tags from RO packages and honors overrides."""
+		align_pkg_name = self.manifest.resolve("packages.four_wheel_alignment")
+		align_bay = self.manifest.resolve("bays.alignment")
+		main_lift_bay = self.manifest.resolve("bays.main_lift")
+
+		quote_res = create_quote(
+			customer_name=self.customer,
+			vehicle_identifier=self.vehicle_vin,
+			odometer_in=25000,
+			services=[align_pkg_name],
+		)
+		ro_name = self._track_quote_ro(quote_res)
+		self.assertEqual(quote_res["data"]["required_equipment_tags"], ["Alignment Rack", "Lift"])
+
+		target_day = add_days(today(), 5)
+		derived_slots = find_available_slots(
+			repair_order=ro_name,
+			start_date=target_day,
+			days_ahead=1,
+			duration_minutes=60,
+			max_slots=5,
+		)
+		self.assertTrue(derived_slots["data"]["slots"])
+		for slot in derived_slots["data"]["slots"]:
+			self.assertEqual(slot["available_bay_ids"], [align_bay])
+
+		# Explicit equipment_tags override ignores derived RO tags
+		override_slots = find_available_slots(
+			repair_order=ro_name,
+			start_date=target_day,
+			days_ahead=1,
+			duration_minutes=60,
+			equipment_tags=["Lift"],
+			max_slots=5,
+		)
+		self.assertTrue(override_slots["data"]["slots"])
+		self.assertIn(main_lift_bay, override_slots["data"]["slots"][0]["available_bay_ids"])
+
+		# Explicit empty list disables tag filtering
+		unfiltered_slots = find_available_slots(
+			repair_order=ro_name,
+			start_date=target_day,
+			days_ahead=1,
+			duration_minutes=60,
+			equipment_tags=[],
+			max_slots=5,
+		)
+		self.assertTrue(unfiltered_slots["data"]["slots"])
+		self.assertIn(main_lift_bay, unfiltered_slots["data"]["slots"][0]["available_bay_ids"])
+

@@ -66,7 +66,7 @@
   "total_bay_hours",
   "total_billed_hours",
   "vehicle_released",
-  "is_mobile_capable",
+  "required_equipment_tags",
   "has_shop_floor_override",
   "manual_parts_hold",
   "override_notes",
@@ -527,10 +527,9 @@
   },
   {
    "allow_on_submit": 1,
-   "default": "0",
-   "fieldname": "is_mobile_capable",
-   "fieldtype": "Check",
-   "label": "Mobile Capable Order",
+   "fieldname": "required_equipment_tags",
+   "fieldtype": "Data",
+   "label": "Required Equipment Tags",
    "read_only": 1
   },
   {
@@ -799,7 +798,7 @@
  ],
  "is_submittable": 0,
  "links": [],
- "modified": "2026-11-24 02:15:00.000000",
+ "modified": "2026-11-24 04:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Repair Order",

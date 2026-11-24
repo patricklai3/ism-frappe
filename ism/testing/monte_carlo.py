@@ -15,6 +15,7 @@ from frappe.utils import flt
 from ism.api.scheduling import get_available_bays
 from ism.api.technician_availability import get_technician_pool_availability
 from ism.ism.doctype.shop_action_item.shop_action_item import create_shop_action_item
+from ism.scheduling.capacity import get_required_tags_for_packages
 from ism.testing.builder import SimContext, _normalize_anchor_date
 from ism.testing.catalog import PACKAGE_EQUIPMENT_TAGS
 from ism.testing.manifest import SimManifest
@@ -65,8 +66,14 @@ _SLOT_TIMES: tuple[str, ...] = (
 )
 
 
-def _required_tags_for_packages(packages: list[str]) -> list[str]:
-	tags: list[str] = ["Lift"]
+def _required_tags_for_packages(packages: list[str], manifest: Optional[SimManifest] = None) -> list[str]:
+	if manifest is not None:
+		pkg_names = [manifest.packages[p] for p in packages if p in manifest.packages]
+		if pkg_names:
+			derived = get_required_tags_for_packages(pkg_names)
+			if derived:
+				return derived
+	tags: list[str] = []
 	for pkg in packages:
 		for tag in PACKAGE_EQUIPMENT_TAGS.get(pkg, ()):
 			if tag not in tags:
@@ -128,7 +135,7 @@ def _find_slot_and_conflict(
 	occupied_tech_slots: set[tuple[str, str]],
 ) -> tuple[Optional[str], Optional[str], Optional[str], bool]:
 	"""Choose a valid bay/time slot on target_date and detect bay/tech conflicts."""
-	req_tags = _required_tags_for_packages(packages)
+	req_tags = _required_tags_for_packages(packages, manifest=ctx.manifest)
 	candidate_slots = list(_SLOT_TIMES)
 	rng.shuffle(candidate_slots)
 

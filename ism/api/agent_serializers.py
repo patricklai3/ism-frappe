@@ -8,6 +8,7 @@ from urllib.parse import quote
 from frappe.utils import cint, flt
 
 from ism.api._validation import coerce_bool, normalize_condition, parse_json_arg
+from ism.scheduling.capacity import parse_required_tags
 
 __all__ = [
 	"build_agent_envelope",
@@ -135,6 +136,7 @@ def serialize_repair_order_compact(
 		"progress_percent": flt(getattr(ro, "progress_percent", 0.0), 1),
 		"odometer_in": getattr(ro, "odometer_in", None),
 		"odometer_out": getattr(ro, "odometer_out", None),
+		"required_equipment_tags": parse_required_tags(getattr(ro, "required_equipment_tags", None)),
 		"services": services,
 	}
 
@@ -177,6 +179,13 @@ def serialize_service_package_compact(pkg: Any) -> Dict[str, Any]:
 		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
 		"generation_compatibility": compat,
 		"standard_labor_hours": flt(getattr(pkg, "standard_labor_hours", 0.0)),
+		"equipment_tags": sorted(
+			{
+				(getattr(r, "equipment_tag", None) or "").strip()
+				for r in (getattr(pkg, "equipment_tags", None) or [])
+				if (getattr(r, "equipment_tag", None) or "").strip()
+			}
+		),
 		"items_count": len(items),
 		"items": items,
 	}

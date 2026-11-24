@@ -9,6 +9,7 @@ from frappe.utils import cint, flt
 
 from ism.api._validation import escape_like
 from ism.ism.doctype.repair_vehicle.vin_decoder import decode_tesla_vin, normalize_vin_string
+from ism.scheduling.capacity import parse_required_tags
 from ism.utils.tesla_manual import get_tesla_manual_details_for_vehicle, get_tesla_manual_url_for_vehicle
 from ism.utils.vehicle_display import build_vehicle_display_dict
 
@@ -291,7 +292,7 @@ def _collect_vehicle_service_history(vehicle_name: str, limit: int) -> list[dict
 		fields=[
 			"name", "customer", "status", "approval_status", "posting_date",
 			"odometer_in", "odometer_out", "grand_total",
-			"is_mobile_capable", "modified",
+			"required_equipment_tags", "modified",
 		],
 		order_by="posting_date desc, modified desc",
 		limit_page_length=limit,
@@ -339,7 +340,7 @@ def _collect_vehicle_service_history(vehicle_name: str, limit: int) -> list[dict
 			"labor_total": flt(labor_totals_by_ro.get(ro.name, 0.0), 2),
 			"parts_total": flt(parts_totals_by_ro.get(ro.name, 0.0), 2),
 			"grand_total": flt(ro.grand_total, 2),
-			"is_mobile_capable": cint(ro.is_mobile_capable),
+			"required_equipment_tags": parse_required_tags(getattr(ro, "required_equipment_tags", None)),
 			"services": services_by_ro.get(ro.name, []),
 		})
 	return history

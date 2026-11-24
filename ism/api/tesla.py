@@ -22,6 +22,7 @@ from ism.ism.doctype.repair_vehicle.repair_vehicle import (
 	decode_tesla_vin,
 	resolve_vehicle_identifier,
 )
+from ism.scheduling.capacity import parse_required_tags
 from ism.utils.tesla_manual import (
 	detect_service_side,
 	get_generation_catalog,
@@ -194,7 +195,7 @@ def import_tesla_procedure(
 			"correction_code": correction_code,
 			"frt": proc_data["frt"],
 			"labor_amount": flt(getattr(first_skipped, "labor_amount", 0), 2),
-			"is_mobile_capable": cint(getattr(first_skipped, "is_mobile_capable", 0)),
+			"required_equipment_tags": parse_required_tags(getattr(first_skipped, "required_equipment_tags", None)),
 			"service_row": first_skipped.as_dict() if hasattr(first_skipped, "as_dict") else None,
 			"count_added": 0,
 			"count_updated": 0,
@@ -231,8 +232,6 @@ def import_tesla_procedure(
 	if outcome["mutated"]:
 		if is_supp and any(s.status == "Approved" for s in ro.services):
 			ro.approval_status = "Partially Approved"
-		if ro.services:
-			ro.is_mobile_capable = 1 if all(cint(s.is_mobile_capable) for s in ro.services) else 0
 		ro.flags.ignore_validate_update_after_submit = True
 		ro.save()
 
@@ -241,6 +240,11 @@ def import_tesla_procedure(
 	action_taken = outcome["action"]
 	title = proc_data["title"]
 	correction_code = proc_data["correction_code"]
+	last_row_tags = (
+		parse_required_tags(getattr(last_row, "required_equipment_tags", None))
+		if last_row
+		else []
+	)
 
 	if outcome["mutated"]:
 		frappe.publish_realtime(
@@ -251,7 +255,7 @@ def import_tesla_procedure(
 				"correction_code": correction_code,
 				"frt": proc_data["frt"],
 				"action": action_taken,
-				"is_mobile_capable": last_row.is_mobile_capable if last_row else 0,
+				"required_equipment_tags": last_row_tags,
 			},
 			doctype="Repair Order",
 			docname=ro.name,
@@ -271,7 +275,7 @@ def import_tesla_procedure(
 		"correction_code": correction_code,
 		"frt": proc_data["frt"],
 		"labor_amount": labor_amount,
-		"is_mobile_capable": last_row.is_mobile_capable if last_row else 0,
+		"required_equipment_tags": last_row_tags,
 		"service_row": last_row.as_dict() if hasattr(last_row, "as_dict") else None,
 		"count_added": outcome["count_added"],
 		"count_updated": outcome["count_updated"],
@@ -825,7 +829,7 @@ def _apply_operations_to_ro(
 		)
 		model_val = getattr(pkg, "applicable_model", None) or proc_data.get("applicable_model", "")
 		gen_val = getattr(pkg, "applicable_generation", None) or proc_data.get("applicable_generation", "")
-		mobile_val = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
+		tags_str = row_fields.get("required_equipment_tags") or ""
 		parts_total = flt(row_fields.get("parts_total", 0.0), 2)
 		row_fields.update({
 			"applicable_model": model_val,
@@ -835,7 +839,7 @@ def _apply_operations_to_ro(
 			"labor_amount": labor_amount,
 			"total_amount": flt(labor_amount + parts_total, 2),
 			"tesla_manual_url": proc_url or row_fields.get("tesla_manual_url") or "",
-			"is_mobile_capable": mobile_val,
+			"required_equipment_tags": tags_str,
 		})
 
 		if existing_service and conflict_policy == "overwrite":
@@ -854,7 +858,7 @@ def _apply_operations_to_ro(
 			existing_service.tesla_manual_url = row_fields["tesla_manual_url"]
 			existing_service.applicable_model = model_val
 			existing_service.applicable_generation = gen_val
-			existing_service.is_mobile_capable = mobile_val
+			existing_service.required_equipment_tags = tags_str
 			if advisor_notes:
 				existing_service.advisor_notes = advisor_notes
 			affected_rows.append(existing_service)
@@ -945,7 +949,6 @@ def _upsert_service_package(proc_data, proc_url=""):
 			pkg.applicable_generation = generation
 		if normalized["doc_guid"]:
 			pkg.doc_guid = normalized["doc_guid"]
-		pkg.is_mobile_capable = cint(normalized["is_mobile_capable"])
 		pkg.is_symmetrical = cint(normalized["is_symmetrical"])
 		if normalized["rh_correction_code"]:
 			pkg.rh_correction_code = normalized["rh_correction_code"]
@@ -958,6 +961,25 @@ def _upsert_service_package(proc_data, proc_url=""):
 		return pkg
 
 	frappe.has_permission("Service Package", "create", throw=True)
+	suggested_candidates = [
+		str(t).strip()
+		for t in (normalized.get("suggested_equipment_tags") or [])
+		if str(t).strip()
+	]
+	valid_tags = (
+		set(
+			frappe.get_all(
+				"Equipment Tag",
+				filters={"name": ["in", suggested_candidates]},
+				pluck="name",
+			)
+		)
+		if suggested_candidates and frappe.db.exists("DocType", "Equipment Tag")
+		else set()
+	)
+	pkg_equipment_tags = [
+		{"equipment_tag": t} for t in dict.fromkeys(suggested_candidates) if t in valid_tags
+	]
 	doc_fields = {
 		"doctype": "Service Package",
 		"package_name": title,
@@ -966,7 +988,7 @@ def _upsert_service_package(proc_data, proc_url=""):
 		"correction_code": correction_code,
 		"standard_labor_hours": frt or 1.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": cint(normalized["is_mobile_capable"]),
+		"equipment_tags": pkg_equipment_tags,
 		"is_symmetrical": cint(normalized["is_symmetrical"]),
 		"rh_correction_code": normalized["rh_correction_code"],
 		"tesla_manual_url": normalized["tesla_manual_url"],

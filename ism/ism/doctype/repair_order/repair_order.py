@@ -6,6 +6,8 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, flt, now_datetime, time_diff_in_hours
 
+from ism.scheduling.capacity import format_required_tags, parse_required_tags
+
 from ism.ism.doctype.repair_order.authorization import (
 	_match_service_decision,
 	authorize_repair_order_jobs,
@@ -94,14 +96,19 @@ class RepairOrder(Document):
 		self._calculate_taxes_and_totals()
 		self._update_progress_and_job_timing()
 		self._validate_authorization_guards()
-		self._update_scheduling_capability_flags()
+		self._update_required_equipment_tags()
 
-	def _update_scheduling_capability_flags(self):
-		"""Compute is_mobile_capable across all active services for scheduling."""
+	def _update_required_equipment_tags(self):
+		"""Normalize per-service equipment tags and roll up union across all services."""
 		if not self.services:
-			self.is_mobile_capable = 0
+			self.required_equipment_tags = ""
 			return
-		self.is_mobile_capable = 1 if all(cint(getattr(s, "is_mobile_capable", 0)) for s in self.services) else 0
+		union_tags = set()
+		for s in self.services:
+			parsed = sorted(set(parse_required_tags(getattr(s, "required_equipment_tags", None))))
+			s.required_equipment_tags = format_required_tags(parsed)
+			union_tags.update(parsed)
+		self.required_equipment_tags = format_required_tags(union_tags)
 
 	def on_update(self):
 		self.link_vehicle_to_customer()

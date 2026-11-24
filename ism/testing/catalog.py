@@ -24,14 +24,6 @@ CANONICAL_COUNTRY = "Canada"
 CANONICAL_TIMEZONE = "America/Toronto"
 CANONICAL_MAIN_WAREHOUSE = f"Main Shop Stores - {CANONICAL_ABBR}"
 
-# Equipment tag gating hints for Stage 2 simulation profiles (Service Package schema has no tags table).
-PACKAGE_EQUIPMENT_TAGS: dict[str, list[str]] = {
-	"four_wheel_alignment": ["Lift", "Alignment Rack"],
-	"hv_pyro_fuse_replace": ["Lift", "EV High Voltage", "HV Battery Station"],
-	"hv_isolation_diagnostic": ["EV High Voltage"],
-	"tire_rotation_balance": ["Lift", "Tire Mount & Road Force Balancer"],
-}
-
 _VIN_ARCHETYPES: dict[str, tuple[str, str, str, str, str]] = {
 	"3": ("5YJ", "E", "1", "E", "B"),
 	"Y": ("7SA", "G", "1", "E", "E"),
@@ -584,7 +576,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 1.2,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift",),
 		"is_symmetrical": 1,
 		"items": (
 			{"slot_number": 1, "item_handle": "fore_link_lh_oem", "qty": 1.0, "side": "LH", "is_default": 1},
@@ -603,7 +595,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 2.0,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift",),
 		"is_symmetrical": 0,
 		"items": (
 			{"slot_number": 1, "item_handle": "front_pad_set_oem", "qty": 1.0, "side": "Both", "is_default": 1},
@@ -622,7 +614,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"hourly_rate": 0.0,
 		"service_rate": 169.00,
 		"is_flat_rate": 1,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift", "Alignment Rack"),
 		"is_symmetrical": 0,
 		"items": (),
 	},
@@ -634,7 +626,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 0.5,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 1,
+		"equipment_tags": (),
 		"is_symmetrical": 0,
 		"items": (
 			{"slot_number": 1, "item_handle": "cabin_hepa_filter_oem", "qty": 1.0, "side": "Both", "is_default": 1},
@@ -650,7 +642,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"hourly_rate": 0.0,
 		"service_rate": 65.00,
 		"is_flat_rate": 1,
-		"is_mobile_capable": 1,
+		"equipment_tags": (),
 		"is_symmetrical": 0,
 		"items": (
 			{"slot_number": 1, "item_handle": "wiper_blade_set_oem", "qty": 1.0, "side": "Both", "is_default": 1},
@@ -665,7 +657,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"hourly_rate": 0.0,
 		"service_rate": 89.00,
 		"is_flat_rate": 1,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift", "Tire Mount & Road Force Balancer"),
 		"is_symmetrical": 0,
 		"items": (),
 	},
@@ -677,7 +669,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 1.0,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift",),
 		"is_symmetrical": 0,
 		"items": (
 			{"slot_number": 1, "item_handle": "dot4_brake_fluid", "qty": 2.0, "side": "Both", "is_default": 1},
@@ -691,7 +683,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 1.0,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("EV High Voltage",),
 		"is_symmetrical": 0,
 		"items": (),
 	},
@@ -703,7 +695,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 2.5,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift", "EV High Voltage", "HV Battery Station"),
 		"is_symmetrical": 0,
 		"items": (
 			{"slot_number": 1, "item_handle": "hv_pyro_fuse_oem", "qty": 1.0, "side": "Both", "is_default": 1},
@@ -719,7 +711,7 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		"standard_labor_hours": 1.8,
 		"hourly_rate": 140.0,
 		"is_flat_rate": 0,
-		"is_mobile_capable": 0,
+		"equipment_tags": ("Lift",),
 		"is_symmetrical": 1,
 		"items": (
 			{"slot_number": 1, "item_handle": "rear_subframe_arm_lh", "qty": 1.0, "side": "LH", "is_default": 1},
@@ -727,6 +719,12 @@ _PACKAGE_SPECS: tuple[dict[str, Any], ...] = (
 		),
 	},
 )
+
+PACKAGE_EQUIPMENT_TAGS: dict[str, list[str]] = {
+	spec["handle"]: list(spec["equipment_tags"])
+	for spec in _PACKAGE_SPECS
+	if spec.get("equipment_tags")
+}
 
 _UNDERCARRIAGE_INSPECTION_ITEMS: tuple[str, ...] = (
 	"Front Brake Pad Thickness (mm) & Rotor Runout",
@@ -1758,6 +1756,20 @@ def seed_inventory_and_parts(manifest: SimManifest, rng: random.Random) -> SimMa
 	return manifest
 
 
+def _ensure_canonical_package_tags(pkg_name: str, tags: tuple[str, ...]) -> None:
+	"""Backfill missing Equipment Tags on canonical Service Packages (e.g. warm DB upgrades)."""
+	if not tags or not frappe.db.exists("DocType", "Service Package Equipment"):
+		return
+	if frappe.db.exists("Service Package Equipment", {"parent": pkg_name, "parenttype": "Service Package"}):
+		return
+	pkg = frappe.get_doc("Service Package", pkg_name)
+	for tag in tags:
+		if frappe.db.exists("Equipment Tag", tag):
+			pkg.append("equipment_tags", {"equipment_tag": tag})
+	if pkg.equipment_tags:
+		pkg.save(ignore_permissions=True)
+
+
 def seed_service_packages_and_inspections(manifest: SimManifest) -> SimManifest:
 	"""Phase 1.5: Seed nested Service Packages and Inspection Templates."""
 	item_rates = {
@@ -1771,7 +1783,9 @@ def seed_service_packages_and_inspections(manifest: SimManifest) -> SimManifest:
 
 	for spec in _PACKAGE_SPECS:
 		pkg_name = spec["package_name"]
+		spec_tags = tuple(spec.get("equipment_tags") or ())
 		if frappe.db.exists("Service Package", pkg_name):
+			_ensure_canonical_package_tags(pkg_name, spec_tags)
 			pkg = frappe.get_doc("Service Package", pkg_name)
 		else:
 			child_items = []
@@ -1796,7 +1810,7 @@ def seed_service_packages_and_inspections(manifest: SimManifest) -> SimManifest:
 				"hourly_rate": spec["hourly_rate"],
 				"service_rate": spec.get("service_rate", 0.0),
 				"is_flat_rate": spec["is_flat_rate"],
-				"is_mobile_capable": spec["is_mobile_capable"],
+				"equipment_tags": [{"equipment_tag": tag} for tag in spec_tags],
 				"is_symmetrical": spec["is_symmetrical"],
 				"items": child_items,
 			})
@@ -2049,6 +2063,7 @@ def get_master_manifest(
 
 	for spec in _PACKAGE_SPECS:
 		if frappe.db.exists("Service Package", spec["package_name"]):
+			_ensure_canonical_package_tags(spec["package_name"], tuple(spec.get("equipment_tags") or ()))
 			manifest.packages[spec["handle"]] = spec["package_name"]
 
 	if frappe.db.exists("Inspection Template", "Standard Vehicle Walkaround"):

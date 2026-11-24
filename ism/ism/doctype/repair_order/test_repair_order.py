@@ -525,8 +525,8 @@ class TestRepairOrder(ISMTestCase):
 		self.assertEqual(ro.vehicle_location, "Released to Customer")
 		self.assertIsNotNone(ro.sales_invoice)
 
-	def test_delete_service_on_submitted_repair_order_with_mobile_capable_toggle(self):
-		"""Verify deleting a service row on a submitted Repair Order recalculates is_mobile_capable without UpdateAfterSubmitError."""
+	def test_delete_service_on_repair_order_recalculates_required_equipment_tags(self):
+		"""Verify adding/deleting service rows on Repair Order recalculates required_equipment_tags."""
 		ro = frappe.get_doc({
 			"doctype": "Repair Order",
 			"customer": self.customer.name,
@@ -536,42 +536,52 @@ class TestRepairOrder(ISMTestCase):
 			"approval_status": "Approved",
 			"services": [
 				{
-					"service_title": "Mobile Service",
+					"service_title": "Mobile / Untagged Service",
 					"status": "Approved",
 					"labor_hours": 1.0,
 					"labor_rate": 100.0,
-					"is_mobile_capable": 1,
+					"required_equipment_tags": "",
 				},
 				{
-					"service_title": "Shop Only Service",
+					"service_title": "Alignment Service",
 					"status": "Approved",
 					"labor_hours": 1.5,
 					"labor_rate": 100.0,
-					"is_mobile_capable": 0,
+					"required_equipment_tags": "Lift, Alignment Rack, Lift",
 				},
 			],
 		})
 		ro.insert()
 		self.track(ro)
-		# Initially both services present -> is_mobile_capable is 0
-		self.assertEqual(ro.is_mobile_capable, 0)
+		# Child row tags normalized & union rolled up to RO
+		self.assertEqual(ro.services[1].required_equipment_tags, "Alignment Rack, Lift")
+		self.assertEqual(ro.required_equipment_tags, "Alignment Rack, Lift")
 
-		# Non-submittable Repair Order
-		self.assertEqual(ro.docstatus, 0)
-
-		# Delete the non-mobile service so remaining service makes ro.is_mobile_capable flip 0 -> 1
+		# Delete the tagged service -> RO required_equipment_tags becomes empty
 		ro.services.pop(1)
 		ro.save()
 		ro.reload()
 		self.assertEqual(len(ro.services), 1)
-		self.assertEqual(ro.is_mobile_capable, 1)
+		self.assertEqual(ro.required_equipment_tags or "", "")
 
-		# Now delete the mobile service so services is empty and ro.is_mobile_capable flips 1 -> 0
+		# Add a service requiring Lift -> RO required_equipment_tags becomes Lift
+		ro.append("services", {
+			"service_title": "Brake Service",
+			"status": "Approved",
+			"labor_hours": 1.0,
+			"labor_rate": 100.0,
+			"required_equipment_tags": "Lift",
+		})
+		ro.save()
+		ro.reload()
+		self.assertEqual(ro.required_equipment_tags, "Lift")
+
+		# Clear services -> RO required_equipment_tags becomes empty
 		ro.services = []
 		ro.save()
 		ro.reload()
 		self.assertEqual(len(ro.services), 0)
-		self.assertEqual(ro.is_mobile_capable, 0)
+		self.assertEqual(ro.required_equipment_tags or "", "")
 
 	def test_unapproved_pickup_and_status_progression_blocked(self):
 		"""Verify that starting work, pulling car into bay, or advancing status without authorization is strictly blocked."""

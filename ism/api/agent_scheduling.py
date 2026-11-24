@@ -42,7 +42,12 @@ from ism.api.technician_availability import (
 	get_active_technicians,
 	get_daily_technician_overview,
 )
-from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES, ShopCapacityWindow, load_bay_tags_map
+from ism.scheduling.capacity import (
+	NON_BLOCKING_ENTRY_STATUSES,
+	ShopCapacityWindow,
+	get_required_tags_for_repair_order,
+	load_bay_tags_map,
+)
 from ism.scheduling.time_utils import effective_end_time, get_shop_settings, normalize_date, normalize_time
 
 _VALID_SCHEDULE_ENTRY_STATUSES = (
@@ -256,14 +261,17 @@ def find_available_slots(
 
 	dur = 60
 	estimate_meta: Optional[Dict[str, Any]] = None
+	ro_doc = _get_ro_doc(repair_order, ptype="read") if repair_order else None
 	if explicit_dur is not None:
 		dur = max(15, explicit_dur)
-		if repair_order:
-			_get_ro_doc(repair_order, ptype="read")
 	elif repair_order:
-		_get_ro_doc(repair_order, ptype="read")
 		estimate_meta = estimate_repair_order(repair_order)
 		dur = estimate_meta.get("total_duration_minutes", 60)
+
+	if equipment_tags is None and ro_doc is not None:
+		derived_tags = get_required_tags_for_repair_order(ro_doc)
+		if derived_tags:
+			parsed_tags = derived_tags
 
 	norm_start = normalize_date(raw_start) if raw_start else None
 	norm_target = normalize_date(raw_target) if raw_target else None

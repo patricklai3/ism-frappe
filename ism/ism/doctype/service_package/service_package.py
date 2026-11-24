@@ -9,7 +9,6 @@ from frappe.model.document import Document
 from frappe.utils import cint, flt
 
 from ism.ism.doctype.service_package_item.service_package_item import normalize_package_item_slot_and_side
-from ism.scheduling.capacity import parse_required_tags
 from ism.utils.tesla_manual import (
 	get_mobile_capability_from_manifest,
 	parse_tesla_manual_url,
@@ -70,11 +69,18 @@ class ServicePackage(Document):
 		self.format_package_name()
 		self.sync_generation_compatibility()
 		self._validate_scoped_uniqueness()
+		self.validate_duplicate_tags()
 
 		if not self.is_flat_rate and flt(self.standard_labor_hours) and flt(self.hourly_rate):
 			self.service_rate = flt(self.standard_labor_hours) * flt(self.hourly_rate)
 
-		if not getattr(self, "is_mobile_capable", 0) and getattr(self, "tesla_manual_url", None):
+		url_changed = hasattr(self, "has_value_changed") and self.has_value_changed("tesla_manual_url")
+		needs_tags_from_manifest = (self.is_new() or url_changed) and not (self.equipment_tags or [])
+		needs_symmetry_from_manifest = (
+			not getattr(self, "rh_correction_code", None)
+			or not getattr(self, "is_symmetrical", 0)
+		)
+		if getattr(self, "tesla_manual_url", None) and (needs_tags_from_manifest or needs_symmetry_from_manifest):
 			try:
 				dep_info = get_mobile_capability_from_manifest(
 					self.tesla_manual_url,
@@ -83,8 +89,15 @@ class ServicePackage(Document):
 					allow_network=False,
 				)
 				if dep_info:
-					if dep_info.get("is_mobile_capable"):
-						self.is_mobile_capable = dep_info["is_mobile_capable"]
+					if needs_tags_from_manifest:
+						existing_tags = {
+							(getattr(r, "equipment_tag", None) or "").strip()
+							for r in (self.equipment_tags or [])
+						}
+						for tag in dep_info.get("suggested_equipment_tags") or []:
+							if tag and tag not in existing_tags and frappe.db.exists("Equipment Tag", tag):
+								self.append("equipment_tags", {"equipment_tag": tag})
+								existing_tags.add(tag)
 					if not getattr(self, "rh_correction_code", None) and dep_info.get("rh_correction_code"):
 						self.rh_correction_code = dep_info["rh_correction_code"]
 					if not getattr(self, "is_symmetrical", 0) and dep_info.get("is_symmetrical"):
@@ -109,9 +122,40 @@ class ServicePackage(Document):
 
 		self._validate_self_serve_catalog()
 
+	def validate_duplicate_tags(self):
+		"""Reject duplicate Equipment Tag rows and strip blank rows."""
+		if not self.equipment_tags:
+			return
+		seen_tags = set()
+		cleaned_rows = []
+		for row in self.equipment_tags:
+			tag = (getattr(row, "equipment_tag", None) or "").strip()
+			if not tag:
+				continue
+			row.equipment_tag = tag
+			if tag in seen_tags:
+				frappe.throw(
+					_("Duplicate equipment tag '{0}' at row #{1}.").format(tag, row.idx),
+					title=_("Duplicate Tag"),
+				)
+			seen_tags.add(tag)
+			cleaned_rows.append(row)
+		if len(cleaned_rows) != len(self.equipment_tags):
+			self.set("equipment_tags", cleaned_rows)
+
+	def get_equipment_tags(self) -> list[str]:
+		"""Return sorted deduplicated Equipment Tag names linked to this Service Package."""
+		return sorted(
+			{
+				(getattr(row, "equipment_tag", None) or "").strip()
+				for row in (getattr(self, "equipment_tags", None) or [])
+				if (getattr(row, "equipment_tag", None) or "").strip()
+			}
+		)
+
 	def _validate_self_serve_catalog(self):
 		"""Normalize and validate self-serve booking catalog fields."""
-		for fieldname in ("customer_title", "customer_summary", "self_serve_required_tags"):
+		for fieldname in ("customer_title", "customer_summary"):
 			val = getattr(self, fieldname, None)
 			if isinstance(val, str):
 				setattr(self, fieldname, val.strip())
@@ -140,20 +184,6 @@ class ServicePackage(Document):
 			frappe.throw(_("Applicable Year To must be between 2008 and 2100 (or 0 for no upper bound)."))
 		if year_from != 0 and year_to != 0 and year_from > year_to:
 			frappe.throw(_("Applicable Year From cannot be greater than Applicable Year To."))
-
-		raw_tags = getattr(self, "self_serve_required_tags", None)
-		if raw_tags and frappe.db.exists("DocType", "Equipment Tag"):
-			tags = list(dict.fromkeys(parse_required_tags(raw_tags)))
-			if tags:
-				existing = set(
-					frappe.get_all("Equipment Tag", filters={"name": ["in", tags]}, pluck="name")
-				)
-				missing = [tag for tag in tags if tag not in existing]
-				if missing:
-					frappe.throw(_("Unknown Equipment Tag(s): {0}").format(", ".join(missing)))
-				self.self_serve_required_tags = ", ".join(tags)
-			else:
-				self.self_serve_required_tags = ""
 
 	def sync_generation_compatibility(self):
 		"""Keep applicable_model, applicable_generation, and generation_compatibility synchronized."""

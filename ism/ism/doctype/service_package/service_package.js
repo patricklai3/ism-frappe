@@ -208,8 +208,22 @@ frappe.ui.form.on("Service Package", {
 						if (Array.isArray(d.generation_entries) && d.generation_entries.length) {
 							apply_generation_entries_to_form(frm, d.generation_entries);
 						}
-						if (d.is_mobile_capable !== undefined) {
-							frm.set_value("is_mobile_capable", d.is_mobile_capable ? 1 : 0);
+						if (Array.isArray(d.suggested_equipment_tags) && d.suggested_equipment_tags.length) {
+							const existingTags = new Set(
+								(frm.doc.equipment_tags || []).map((r) => r.equipment_tag).filter(Boolean)
+							);
+							let added = false;
+							d.suggested_equipment_tags.forEach((tag) => {
+								if (tag && !existingTags.has(tag)) {
+									const row = frm.add_child("equipment_tags");
+									row.equipment_tag = tag;
+									existingTags.add(tag);
+									added = true;
+								}
+							});
+							if (added) {
+								frm.refresh_field("equipment_tags");
+							}
 						}
 						frm.set_value("tesla_manual_url", url);
 
@@ -276,7 +290,6 @@ frappe.ui.form.on("Service Package", {
 			frm.set_df_property("customer_estimate_min", "description", "");
 			frm.set_df_property("customer_estimate_max", "description", "");
 			frm.set_df_property("self_serve_duration_minutes", "description", "");
-			frm.set_df_property("self_serve_required_tags", "description", "");
 			return;
 		}
 
@@ -289,11 +302,6 @@ frappe.ui.form.on("Service Package", {
 			"self_serve_duration_minutes",
 			"description",
 			__("Leave 0 to compute shop duration automatically from FRT.")
-		);
-		frm.set_df_property(
-			"self_serve_required_tags",
-			"description",
-			__("Comma-separated Equipment Tag names (e.g., Lift, Alignment Rack) used for bay gating.")
 		);
 
 		const mode = frm.doc.customer_price_display_mode || "Exact Price";

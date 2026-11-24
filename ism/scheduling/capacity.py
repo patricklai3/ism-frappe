@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import frappe
 from frappe.query_builder.functions import Coalesce
@@ -40,22 +40,90 @@ def parse_required_tags(required_tags: Optional[Union[str, List[str]]]) -> List[
 	return list(required_tags) if required_tags else []
 
 
+def format_required_tags(tags: Optional[Union[str, Iterable[str]]]) -> str:
+	"""Format required equipment tags as a sorted, deduplicated comma-separated string."""
+	return ", ".join(sorted(set(parse_required_tags(tags))))
+
+
 def load_bay_tags_map(bay_names: List[str]) -> Dict[str, List[str]]:
 	"""Fetch Service Bay Equipment tags grouped by Service Bay in a single query."""
 	if not bay_names:
 		return {}
 	rows = frappe.get_all(
 		"Service Bay Equipment",
-		filters={"parent": ["in", bay_names]},
+		filters={"parent": ["in", bay_names], "parenttype": "Service Bay"},
 		fields=["parent", "equipment_tag"],
 	)
 	tags_by_bay: Dict[str, List[str]] = {name: [] for name in bay_names}
+	seen_by_bay: Dict[str, Set[str]] = {name: set() for name in bay_names}
 	for row in rows:
 		parent = row.get("parent")
-		tag = row.get("equipment_tag")
-		if parent and tag:
+		tag = (row.get("equipment_tag") or "").strip()
+		if parent and tag and tag not in seen_by_bay.setdefault(parent, set()):
+			seen_by_bay[parent].add(tag)
 			tags_by_bay.setdefault(parent, []).append(tag)
 	return tags_by_bay
+
+
+def load_package_tags_map(package_names: Sequence[str]) -> Dict[str, List[str]]:
+	"""Fetch Service Package Equipment tags grouped by Service Package in a single query."""
+	clean_names = [n for n in dict.fromkeys(package_names or ()) if n]
+	if not clean_names or not frappe.db.exists("DocType", "Service Package Equipment"):
+		return {name: [] for name in clean_names}
+	rows = frappe.get_all(
+		"Service Package Equipment",
+		filters={"parent": ["in", clean_names], "parenttype": "Service Package"},
+		fields=["parent", "equipment_tag"],
+		ignore_permissions=True,
+	)
+	tags_by_pkg: Dict[str, Set[str]] = {name: set() for name in clean_names}
+	for row in rows:
+		parent = row.get("parent")
+		tag = (row.get("equipment_tag") or "").strip()
+		if parent and tag:
+			tags_by_pkg.setdefault(parent, set()).add(tag)
+	return {name: sorted(tags_by_pkg.get(name, set())) for name in clean_names}
+
+
+def get_required_tags_for_packages(package_names: Sequence[str]) -> List[str]:
+	"""Return sorted deduplicated union of equipment tags across Service Packages."""
+	tags_map = load_package_tags_map(package_names)
+	union_tags: Set[str] = set()
+	for tags in tags_map.values():
+		union_tags.update(tags)
+	return sorted(union_tags)
+
+
+def get_required_tags_for_repair_order(repair_order: Any) -> List[str]:
+	"""Derive sorted deduplicated required equipment tags for a Repair Order or RO name."""
+	if not repair_order:
+		return []
+
+	if isinstance(repair_order, str):
+		if not frappe.db.exists("Repair Order", repair_order):
+			return []
+		ro = frappe.get_doc("Repair Order", repair_order)
+	else:
+		ro = repair_order
+
+	get_field = (lambda obj, key: obj.get(key)) if isinstance(ro, dict) else (lambda obj, key: getattr(obj, key, None))
+	tags: Set[str] = set(parse_required_tags(get_field(ro, "required_equipment_tags")))
+	fallback_packages: List[str] = []
+
+	for row in get_field(ro, "services") or ():
+		row_get = (lambda r, k: r.get(k)) if isinstance(row, dict) else (lambda r, k: getattr(r, k, None))
+		row_tags = parse_required_tags(row_get(row, "required_equipment_tags"))
+		if row_tags:
+			tags.update(row_tags)
+		else:
+			pkg_name = row_get(row, "service_package")
+			if pkg_name:
+				fallback_packages.append(str(pkg_name).strip())
+
+	if fallback_packages:
+		tags.update(get_required_tags_for_packages(fallback_packages))
+
+	return sorted(tags)
 
 
 def resolve_candidate_bays(

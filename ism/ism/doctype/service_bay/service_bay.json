@@ -41,13 +41,13 @@
   },
   {
    "fieldname": "equipment",
-   "fieldtype": "Table",
+   "fieldtype": "Table MultiSelect",
    "label": "Equipment Tags",
    "options": "Service Bay Equipment"
   }
  ],
  "links": [],
- "modified": "2026-10-26 00:00:00.000000",
+ "modified": "2026-11-24 04:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Bay",

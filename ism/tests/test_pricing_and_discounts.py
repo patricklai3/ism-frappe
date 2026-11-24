@@ -35,13 +35,16 @@ class TestPricingAndDiscounts(ISMTestCase):
 			is_stock_item=0,
 			standard_rate=95.0,
 		)
+		if not frappe.db.exists("Equipment Tag", "Lift"):
+			lift_tag = frappe.get_doc({"doctype": "Equipment Tag", "tag_name": "Lift"}).insert(ignore_permissions=True)
+			self.track(lift_tag)
 		pkg = frappe.get_doc({
 			"doctype": "Service Package",
 			"package_name": f"{TEST_PREFIX}Auto Expand Brake Pkg",
 			"correction_code": "33-01-02-00",
 			"standard_labor_hours": 2.5,
 			"hourly_rate": 150.0,
-			"is_mobile_capable": 1,
+			"equipment_tags": [{"equipment_tag": "Lift"}],
 			"items": [{"item_code": part.name, "qty": 2, "rate": 95.0}],
 		}).insert(ignore_permissions=True)
 		self.track(pkg)
@@ -57,7 +60,8 @@ class TestPricingAndDiscounts(ISMTestCase):
 		self.assertEqual(flt(srv.labor_hours), 2.5)
 		self.assertEqual(flt(srv.labor_rate), 150.0)
 		self.assertEqual(flt(srv.labor_amount), 375.0)
-		self.assertEqual(srv.is_mobile_capable, 1)
+		self.assertEqual(srv.required_equipment_tags, "Lift")
+		self.assertEqual(ro.required_equipment_tags, "Lift")
 
 		parts_data = json.loads(srv.parts)
 		self.assertEqual(len(parts_data), 1)

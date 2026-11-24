@@ -217,7 +217,10 @@ class TestSimulationFoundation(ISMTestCase):
 		self.assertEqual(len(ro_both.services), 3)
 		self.assertEqual(int(ro_both.services[1].is_flat_rate), 1)
 		self.assertAlmostEqual(flt(ro_both.services[1].labor_amount), 169.0, places=2)
-		self.assertEqual(int(ro_both.services[2].is_mobile_capable), 1)
+		self.assertEqual(ro_both.services[0].required_equipment_tags, "Lift")
+		self.assertEqual(ro_both.services[1].required_equipment_tags, "Alignment Rack, Lift")
+		self.assertEqual(ro_both.services[2].required_equipment_tags or "", "")
+		self.assertEqual(ro_both.required_equipment_tags, "Alignment Rack, Lift")
 
 		alts = get_component_alternates(
 			service_package=manifest.resolve("packages.front_brake_overhaul"),

@@ -821,7 +821,7 @@ class TestSelfServeScheduling(ISMTestCase):
 				"customer_price_display_mode": "Exact Price",
 				"customer_estimate_min": 150.0,
 				"self_serve_duration_minutes": 60,
-				"self_serve_required_tags": unique_tag_name,
+				"equipment_tags": [{"equipment_tag": unique_tag_name}],
 			}).insert(ignore_permissions=True)
 			frappe.db.commit()
 

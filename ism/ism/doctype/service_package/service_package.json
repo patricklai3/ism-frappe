@@ -16,8 +16,8 @@
   "hourly_rate",
   "service_rate",
   "is_flat_rate",
-  "is_mobile_capable",
   "is_symmetrical",
+  "equipment_tags",
   "sec_manual_ref",
   "tesla_manual_url",
   "doc_guid",
@@ -33,7 +33,6 @@
   "customer_estimate_min",
   "customer_estimate_max",
   "self_serve_duration_minutes",
-  "self_serve_required_tags",
   "sb_items",
   "items"
  ],
@@ -107,11 +106,11 @@
    "label": "Flat Rate / Fixed Price"
   },
   {
-   "default": "0",
-   "fieldname": "is_mobile_capable",
-   "fieldtype": "Check",
-   "in_list_view": 1,
-   "label": "Mobile Service Capable"
+   "description": "Shop equipment required to perform this service (e.g., Lift, Alignment Rack, EV High Voltage).",
+   "fieldname": "equipment_tags",
+   "fieldtype": "Table MultiSelect",
+   "label": "Equipment Tags",
+   "options": "Service Package Equipment"
   },
   {
    "fieldname": "sec_manual_ref",
@@ -209,12 +208,6 @@
    "label": "Self-Serve Duration (Minutes)"
   },
   {
-   "depends_on": "eval:doc.allow_self_serve_booking",
-   "fieldname": "self_serve_required_tags",
-   "fieldtype": "Data",
-   "label": "Required Equipment Tags"
-  },
-  {
    "fieldname": "sb_items",
    "fieldtype": "Section Break",
    "label": "Required Parts & Materials"
@@ -241,7 +234,7 @@
   }
  ],
  "links": [],
- "modified": "2026-11-21 08:00:00.000000",
+ "modified": "2026-11-24 04:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Package",

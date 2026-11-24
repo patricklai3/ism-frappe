@@ -1836,7 +1836,7 @@ frappe.ui.form.on("Repair Order Service", {
 				frappe.model.set_value(cdt, cdn, "applicable_model", pkg.applicable_model || "");
 				frappe.model.set_value(cdt, cdn, "applicable_generation", pkg.applicable_generation || "");
 				frappe.model.set_value(cdt, cdn, "is_flat_rate", pkg.is_flat_rate ? 1 : 0);
-				frappe.model.set_value(cdt, cdn, "is_mobile_capable", pkg.is_mobile_capable ? 1 : 0);
+				frappe.model.set_value(cdt, cdn, "required_equipment_tags", pkg.required_equipment_tags || "");
 				frappe.model.set_value(cdt, cdn, "tesla_manual_url", pkg.tesla_manual_url || "");
 				if (pkg.service_position) {
 					frappe.model.set_value(cdt, cdn, "service_position", pkg.service_position);

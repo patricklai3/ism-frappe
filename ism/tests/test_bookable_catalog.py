@@ -24,7 +24,6 @@ PUBLIC_CARD_KEYS = {
 	"summary",
 	"applicable_model",
 	"applicable_generation",
-	"is_mobile_capable",
 	"sort_order",
 	"price_display_mode",
 	"currency",
@@ -41,6 +40,8 @@ FORBIDDEN_INTERNAL_KEYS = {
 	"tesla_manual_url",
 	"doc_guid",
 	"items",
+	"equipment_tags",
+	"is_mobile_capable",
 	"standard_labor_hours",
 	"self_serve_duration_minutes",
 	"self_serve_required_tags",
@@ -256,30 +257,46 @@ class TestBookableCatalog(ISMTestCase):
 		tag_lift = self._create_equipment_tag(f"{TEST_PREFIX}Tag_Lift")
 		tag_align = self._create_equipment_tag(f"{TEST_PREFIX}Tag_Align")
 
-		# Unknown equipment tag must fail validation
+		# Unknown equipment tag must fail link validation
 		with self.assertRaises(frappe.ValidationError):
 			self._create_package(
 				"Unknown_Tag",
-				self_serve_required_tags=f"{tag_lift.name}, {TEST_PREFIX}Does_Not_Exist",
+				equipment_tags=[
+					{"equipment_tag": tag_lift.name},
+					{"equipment_tag": f"{TEST_PREFIX}Does_Not_Exist"},
+				],
 			)
 
-		# Valid tags normalize to canonical CSV and spaces are trimmed
+		# Duplicate equipment tags on a Service Package must fail validation
+		with self.assertRaises(frappe.ValidationError):
+			self._create_package(
+				"Duplicate_Tag",
+				equipment_tags=[
+					{"equipment_tag": tag_align.name},
+					{"equipment_tag": tag_align.name},
+				],
+			)
+
+		# Valid tags are saved and spaces on text fields are trimmed
 		p_override = self._create_package(
 			"Override_Dur",
 			customer_title="  Four Wheel Alignment  ",
 			customer_summary="  Full laser alignment  ",
 			self_serve_duration_minutes=90,
-			self_serve_required_tags=f" {tag_align.name} , {tag_lift.name} , {tag_align.name} ",
+			equipment_tags=[
+				{"equipment_tag": tag_align.name},
+				{"equipment_tag": tag_lift.name},
+			],
 		)
 		self.assertEqual(p_override.customer_title, "Four Wheel Alignment")
 		self.assertEqual(p_override.customer_summary, "Full laser alignment")
-		self.assertEqual(p_override.self_serve_required_tags, f"{tag_align.name}, {tag_lift.name}")
+		self.assertEqual(p_override.get_equipment_tags(), sorted([tag_align.name, tag_lift.name]))
 
 		p_frt_1 = self._create_package(
 			"FRT_1",
 			standard_labor_hours=1.0,
 			self_serve_duration_minutes=0,
-			self_serve_required_tags=tag_lift.name,
+			equipment_tags=[{"equipment_tag": tag_lift.name}],
 		)
 		p_frt_2 = self._create_package(
 			"FRT_2",
