@@ -209,3 +209,181 @@ class TestRepairVehicle(ISMTestCase):
 			self.assertEqual(decoded["drivetrain"], expected_dt)
 			self.assertEqual(decoded["trim"], expected_trim)
 			self.assertEqual(decoded["autopilot_hardware"], "HW4")
+
+	def test_vehicle_display_helpers(self):
+		"""Verify format_vehicle_display, build_vehicle_display_dict, and get_vehicle_display_map."""
+		from ism.utils.vehicle_display import (
+			build_vehicle_display_dict,
+			format_vehicle_display,
+			get_vehicle_display_map,
+			normalize_license_plate,
+			normalize_vehicle_color,
+		)
+
+		# Non-scalar values rejected cleanly (no type-confusion string coercion)
+		self.assertIsNone(normalize_vehicle_color(["!=", ""]))
+		self.assertIsNone(normalize_vehicle_color({"$ne": ""}))
+		self.assertIsNone(normalize_vehicle_color(True))
+		self.assertIsNone(normalize_license_plate(["!=", ""]))
+		self.assertIsNone(normalize_license_plate(False))
+
+		sample = {
+			"name": "7SAYGDEE0PF123456",
+			"vin": "7SAYGDEE0PF123456",
+			"model_year": "2023",
+			"manufacturer": "Tesla",
+			"model": "Model Y",
+			"color": "  Pearl   White  ",
+			"license_plate": " abcd   123 ",
+		}
+		info = build_vehicle_display_dict(sample)
+		self.assertEqual(info["color"], "Pearl White")
+		self.assertEqual(info["license_plate"], "ABCD 123")
+		self.assertEqual(info["display"], "2023 Pearl White Model Y (ABCD 123)")
+		self.assertEqual(info["compact_display"], "Pearl White Model Y")
+		self.assertEqual(info["label"], "2023 Pearl White Model Y (ABCD 123)")
+
+		self.assertEqual(format_vehicle_display(sample), "2023 Pearl White Model Y (ABCD 123)")
+		self.assertEqual(format_vehicle_display(sample, compact=True), "Pearl White Model Y")
+		self.assertEqual(
+			format_vehicle_display(sample, include_vin=True),
+			"2023 Pearl White Model Y (ABCD 123) · VIN: 7SAYGDEE0PF123456",
+		)
+
+		# Partial fields
+		self.assertEqual(
+			format_vehicle_display({"model": "Model 3", "color": "Deep Blue"}),
+			"Deep Blue Model 3",
+		)
+		self.assertEqual(
+			format_vehicle_display({"license_plate": "ev 900"}),
+			"EV 900",
+		)
+
+		# Fallback to VIN only when all human fields are empty
+		vin_only = {"vin": "5YJ3E1EA1PF000001"}
+		self.assertEqual(format_vehicle_display(vin_only), "5YJ3E1EA1PF000001")
+		self.assertEqual(format_vehicle_display(vin_only, include_vin=True), "5YJ3E1EA1PF000001")
+		self.assertEqual(format_vehicle_display(None, fallback="Custom Fallback"), "Custom Fallback")
+
+		# Batch lookup via get_vehicle_display_map
+		cust = self.create_test_customer()
+		veh = self.create_test_vehicle(
+			customer=cust.name,
+			color="Midnight Silver",
+			license_plate="map 42",
+		)
+		display_map = get_vehicle_display_map([veh.name, veh.name, None, ""])
+		self.assertIn(veh.name, display_map)
+		self.assertEqual(display_map[veh.name]["color"], "Midnight Silver")
+		self.assertEqual(display_map[veh.name]["license_plate"], "MAP 42")
+		self.assertIn("Midnight Silver", display_map[veh.name]["display"])
+		self.assertIn("(MAP 42)", display_map[veh.name]["display"])
+
+	def test_color_and_license_plate_mandatory_on_repair_vehicle(self):
+		"""Creating or saving Repair Vehicle without color or license_plate raises MandatoryError."""
+		cust = self.create_test_customer()
+		template = "7SAYGDEE0PF445566"
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+
+		# Missing both
+		with self.assertRaises(frappe.MandatoryError):
+			frappe.get_doc({
+				"doctype": "Repair Vehicle",
+				"vin": vin,
+				"customer": cust.name,
+			}).insert(ignore_permissions=True)
+
+		# Missing color
+		with self.assertRaises(frappe.MandatoryError):
+			frappe.get_doc({
+				"doctype": "Repair Vehicle",
+				"vin": vin,
+				"customer": cust.name,
+				"license_plate": "ABCD 123",
+			}).insert(ignore_permissions=True)
+
+		# Missing license plate
+		with self.assertRaises(frappe.MandatoryError):
+			frappe.get_doc({
+				"doctype": "Repair Vehicle",
+				"vin": vin,
+				"customer": cust.name,
+				"color": "Pearl White",
+			}).insert(ignore_permissions=True)
+
+		# Saving an existing vehicle with cleared color or plate also raises MandatoryError
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="Pearl White",
+			license_plate="ABCD 123",
+		)
+		veh.color = "   "
+		with self.assertRaises(frappe.MandatoryError):
+			veh.save(ignore_permissions=True)
+		veh.reload()
+		veh.license_plate = ""
+		with self.assertRaises(frappe.MandatoryError):
+			veh.save(ignore_permissions=True)
+
+		# Legacy vehicle missing color/plate in DB still allows non-intake side-effect add_customer
+		co_owner = self.create_test_customer()
+		frappe.db.set_value(
+			"Repair Vehicle",
+			veh.name,
+			{"color": "", "license_plate": ""},
+			update_modified=False,
+		)
+		veh.reload()
+		veh.add_customer(co_owner.name, is_primary=False, relationship="Spouse")
+		veh.reload()
+		self.assertIn(co_owner.name, {row.customer for row in veh.customers})
+
+	def test_license_plate_normalization_display_title_and_propagation(self):
+		"""Verify plate normalization, display_title computation, and propagation to RO, SE, and Shop Board Thread."""
+		from ism.board.projections import ensure_thread_for_ro
+
+		cust = self.create_test_customer()
+		template = "7SAYGDEE0PF778899"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="  Pearl  White  ",
+			license_plate="  abcd   123  ",
+		)
+		self.assertEqual(veh.color, "Pearl White")
+		self.assertEqual(veh.license_plate, "ABCD 123")
+		self.assertEqual(veh.display_title, "2023 Pearl White Model Y (ABCD 123)")
+
+		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name, odometer_in=15000)
+		self.assertEqual(ro.vehicle_display, "2023 Pearl White Model Y (ABCD 123)")
+
+		se = self.create_test_schedule_entry(
+			repair_order=ro.name,
+			customer=cust.name,
+			repair_vehicle=veh.name,
+			scheduled_date=frappe.utils.add_days(frappe.utils.today(), 3),
+			scheduled_time="10:00:00",
+			estimated_duration=60,
+		)
+		thread_key = ensure_thread_for_ro(ro.name)
+		self.track("Shop Board Thread", thread_key)
+
+		# Update color and license plate on vehicle -> should propagate to RO, SE, and Shop Board Thread
+		veh.color = "Ultra Red"
+		veh.license_plate = "red 999"
+		veh.save(ignore_permissions=True)
+		expected_updated = "2023 Ultra Red Model Y (RED 999)"
+		self.assertEqual(veh.display_title, expected_updated)
+
+		self.assertEqual(frappe.db.get_value("Repair Order", ro.name, "vehicle_display"), expected_updated)
+		se_title = frappe.db.get_value("Schedule Entry", se.name, "title")
+		self.assertIn(expected_updated, se_title)
+		thread_vals = frappe.db.get_value(
+			"Shop Board Thread", thread_key, ["vehicle_display", "title"], as_dict=True
+		)
+		self.assertEqual(thread_vals.vehicle_display, expected_updated)
+		self.assertIn(expected_updated, thread_vals.title)

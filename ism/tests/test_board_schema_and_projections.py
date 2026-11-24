@@ -733,3 +733,54 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			idempotency_key=f"ext-non-ro:{frappe.generate_hash(length=8)}",
 		)
 		self.assertIsNone(non_ro_ev)
+
+	def test_board_thread_list_detail_and_event_vehicle_display(self):
+		"""Board thread title, list_threads, get_thread, and event metadata include year, color, model, plate & vehicle_info."""
+		import json
+
+		from ism.api.board import get_board_thread, list_board_threads
+		from ism.ism.doctype.repair_vehicle.vin_decoder import compute_vin_check_digit
+
+		cust = self.create_test_customer()
+		template = "7SAYGDEE0PF667788"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="Pearl White",
+			license_plate="brd 404",
+		)
+		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name, odometer_in=19000)
+		thread_key = ensure_thread_for_ro(ro.name)
+		self.track("Shop Board Thread", thread_key)
+
+		expected_display = "2023 Pearl White Model Y (BRD 404)"
+		listed = list_board_threads(query=ro.name)
+		threads = listed.get("threads") or []
+		row = next((t for t in threads if t.get("thread_key") == thread_key), None)
+		self.assertIsNotNone(row)
+		self.assertIn(expected_display, row.get("title", ""))
+		self.assertEqual(row.get("vehicle_display"), expected_display)
+		self.assertEqual(row["vehicle_info"]["color"], "Pearl White")
+		self.assertEqual(row["vehicle_info"]["license_plate"], "BRD 404")
+
+		detail = get_board_thread(thread_key=thread_key)
+		thread_obj = detail["thread"]
+		self.assertIn(expected_display, thread_obj.get("title", ""))
+		self.assertEqual(thread_obj.get("vehicle_display"), expected_display)
+		self.assertEqual(thread_obj["vehicle_info"]["display"], expected_display)
+		self.assertEqual(thread_obj["vehicle_info"]["compact_display"], "Pearl White Model Y")
+
+		ev_name = project_external_domain_event(
+			"portal_pin_submitted",
+			{"repair_order": ro.name, "summary": "PIN submitted"},
+			idempotency_key=f"ext-veh:{frappe.generate_hash(length=8)}",
+		)
+		self.assertIsNotNone(ev_name)
+		self.track("Shop Board Event", ev_name)
+		raw_meta = frappe.db.get_value("Shop Board Event", ev_name, "metadata_json")
+		meta = json.loads(raw_meta)
+		self.assertEqual(meta.get("vehicle_display"), expected_display)
+		self.assertEqual(meta.get("vehicle_color"), "Pearl White")
+		self.assertEqual(meta.get("license_plate"), "BRD 404")
+		self.assertEqual(meta["vehicle_info"]["display"], expected_display)

@@ -22,13 +22,15 @@
 			<p class="portal-ssr-ref">
 				{{ _("Estimate Reference") }}: <strong>{{ approval_data.repair_order.name }}</strong>
 			</p>
-			{% if approval_data.vehicle and (approval_data.vehicle.display or approval_data.vehicle.model or approval_data.vehicle.vin) %}
-			<p class="portal-ssr-vehicle ism-vd">
-				{% if approval_data.vehicle.model_year %}<span class="ism-vd-year">{{ approval_data.vehicle.model_year }}</span>{% endif %}
-				{% if approval_data.vehicle.color %}<span class="ism-vd-color">{{ approval_data.vehicle.color }}</span>{% endif %}
-				{% if approval_data.vehicle.model %}<span class="ism-vd-model">{{ approval_data.vehicle.model }}</span>{% endif %}
-				{% if approval_data.vehicle.license_plate %}<span class="ism-vd-plate">({{ approval_data.vehicle.license_plate }})</span>{% endif %}
-				{% if approval_data.vehicle.vin %}<span class="ism-vd-vin">{{ approval_data.vehicle.vin }}</span>{% endif %}
+			{% set veh = approval_data.vehicle %}
+			{% if veh and (veh.model_year or veh.color or veh.model or veh.license_plate or veh.vin or (veh.display and veh.display != "Vehicle")) %}
+			<p class="portal-ssr-vehicle ism-veh ism-veh--hide-vin-md ism-veh--responsive-tight">
+				{% if veh.model_year %}<span class="ism-veh__year">{{ veh.model_year }}</span>{% endif %}
+				{% if veh.color %}<span class="ism-veh__color">{{ veh.color }}</span>{% endif %}
+				{% if veh.model %}<span class="ism-veh__model">{{ veh.model }}</span>{% endif %}
+				{% if veh.license_plate %}<span class="ism-veh__plate">({{ veh.license_plate }})</span>{% endif %}
+				{% if veh.vin %}<span class="ism-veh__vin">VIN: {{ veh.vin }}</span>{% endif %}
+				{% if not (veh.model_year or veh.color or veh.model or veh.license_plate or veh.vin) %}<span>{{ veh.display }}</span>{% endif %}
 			</p>
 			{% endif %}
 			{% if approval_data.already_submitted %}
@@ -58,5 +60,6 @@
 {% endblock %}
 
 {% block script %}
+<script src="/assets/ism/shared/vehicle_display.js?v={{ asset_version or '1' }}"></script>
 <script type="module" src="/assets/ism/portal/app.js?v={{ asset_version or '1' }}"></script>
 {% endblock %}

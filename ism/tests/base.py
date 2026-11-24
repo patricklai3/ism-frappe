@@ -161,11 +161,14 @@ class ISMTestCase(unittest.TestCase):
 				vin_val = generate_synthetic_vin(random.Random())
 			if frappe.db.exists("Repair Vehicle", vin_val):
 				frappe.delete_doc("Repair Vehicle", vin_val, force=True, ignore_permissions=True)
+			params = kwargs.copy()
+			params.setdefault("color", "Pearl White")
+			params.setdefault("license_plate", f"TST {vin_val[-4:]}")
 			doc = frappe.get_doc({
 				"doctype": "Repair Vehicle",
 				"vin": vin_val,
 				"customer": customer,
-				**kwargs,
+				**params,
 			}).insert(ignore_permissions=True)
 			return self.track(doc)
 

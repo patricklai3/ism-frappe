@@ -1058,8 +1058,11 @@ class TestRepairOrder(ISMTestCase):
 		finally:
 			frappe.set_user(orig_user)
 
-		# Administrator should be able to delete successfully
+		# Administrator should be able to delete successfully (clean up auto-projected board thread first)
 		frappe.set_user("Administrator")
+		if frappe.db.table_exists("Shop Board Thread"):
+			for tname in frappe.get_all("Shop Board Thread", filters={"repair_order": ro.name}, pluck="name"):
+				frappe.delete_doc("Shop Board Thread", tname, force=True, ignore_permissions=True)
 		frappe.delete_doc("Repair Order", ro.name)
 		self.assertFalse(frappe.db.exists("Repair Order", ro.name))
 
@@ -1359,6 +1362,7 @@ class TestRepairOrder(ISMTestCase):
 			"doctype": "Repair Vehicle",
 			"customer": self.customer.name,
 			"vin": "5YJSA1E28CF000099",
+			"color": "Deep Blue",
 			"license_plate": "RO-QUICK-1",
 		})
 		new_veh.insert()
@@ -1902,4 +1906,90 @@ class TestRepairOrder(ISMTestCase):
 			frappe.set_user(orig_user)
 			if frappe.db.exists("User Permission", user_perm.name):
 				frappe.delete_doc("User Permission", user_perm.name, force=True, ignore_permissions=True)
+
+	def test_ro_intake_and_checkin_reject_legacy_vehicle_missing_color_or_plate(self):
+		"""New RO intake and Checked In status reject a legacy Repair Vehicle missing color or license_plate."""
+		veh = self.create_test_vehicle(
+			customer=self.customer.name,
+			color="Pearl White",
+			license_plate="LEG 101",
+		)
+
+		# Simulate legacy vehicle missing color
+		frappe.db.set_value("Repair Vehicle", veh.name, "color", "", update_modified=False)
+		with self.assertRaises(frappe.MandatoryError):
+			frappe.get_doc({
+				"doctype": "Repair Order",
+				"customer": self.customer.name,
+				"vehicle": veh.name,
+				"odometer_in": 12000,
+			}).insert(ignore_permissions=True)
+
+		# Restore color, clear license_plate
+		frappe.db.set_value(
+			"Repair Vehicle",
+			veh.name,
+			{"color": "Pearl White", "license_plate": ""},
+			update_modified=False,
+		)
+		with self.assertRaises(frappe.MandatoryError):
+			frappe.get_doc({
+				"doctype": "Repair Order",
+				"customer": self.customer.name,
+				"vehicle": veh.name,
+				"odometer_in": 12000,
+			}).insert(ignore_permissions=True)
+
+		# Restore both -> RO creation succeeds
+		frappe.db.set_value("Repair Vehicle", veh.name, "license_plate", "LEG 101", update_modified=False)
+		ro = self.create_test_repair_order(customer=self.customer.name, vehicle=veh.name, odometer_in=12000)
+		self.assertIn("Pearl White", ro.vehicle_display)
+		self.assertIn("(LEG 101)", ro.vehicle_display)
+
+		# Clear color on vehicle and try to save RO in Checked In status -> rejected
+		frappe.db.set_value("Repair Vehicle", veh.name, "color", "", update_modified=False)
+		ro.status = "Checked In"
+		with self.assertRaises(frappe.MandatoryError):
+			ro.save(ignore_permissions=True)
+
+	def test_ro_vehicle_display_and_ready_for_pickup_sms(self):
+		"""Verify RO vehicle_display and Ready For Pickup SMS use year, color, model, and plate."""
+		from types import SimpleNamespace
+		from unittest.mock import patch
+
+		from ism.ism.doctype.repair_order.fulfillment import _maybe_send_ready_for_pickup_sms
+		from ism.ism.doctype.repair_vehicle.vin_decoder import compute_vin_check_digit
+
+		cust = self.create_test_customer(mobile_no="+14165550199")
+		template = "7SAYGDEE0PF556677"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="Midnight Silver",
+			license_plate="pku 777",
+		)
+		ro = self.create_test_repair_order(customer=cust.name, vehicle=veh.name, odometer_in=25000)
+		expected_display = "2023 Midnight Silver Model Y (PKU 777)"
+		self.assertEqual(ro.vehicle_display, expected_display)
+
+		orig_get_single = frappe.get_single
+
+		def _fake_get_single(doctype):
+			if doctype == "ISM Settings":
+				return SimpleNamespace(enable_ready_for_pickup_sms=1)
+			return orig_get_single(doctype)
+
+		with (
+			patch("ism.ism.doctype.repair_order.fulfillment.frappe.get_single", side_effect=_fake_get_single),
+			patch("ism.ism.doctype.repair_order.fulfillment.dispatch_sms", return_value={"success": True}) as mock_sms,
+		):
+			_maybe_send_ready_for_pickup_sms(ro)
+			mock_sms.assert_called_once()
+			_phone_arg, sms_body = mock_sms.call_args.args
+			self.assertIn("2023", sms_body)
+			self.assertIn("Midnight Silver", sms_body)
+			self.assertIn("Model Y", sms_body)
+			self.assertIn("PKU 777", sms_body)
+
 

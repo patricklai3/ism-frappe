@@ -851,7 +851,10 @@ function renderSwimlane(view) {
               r.board_url || r.desk_url || ""
             );
             const cls = r.is_dead_lift ? "cockpit-pill--red" : "cockpit-pill--amber";
-            const label = `${r.name || "RO"} (${r.status || ""})`;
+            const vehText = r.vehicle_compact_display || r.vehicle_display || "";
+            const label = vehText
+              ? `${r.name || "RO"} · ${vehText} (${r.status || ""})`
+              : `${r.name || "RO"} (${r.status || ""})`;
             return href
               ? `<a class="cockpit-pill ${cls}" href="${esc(href)}">${esc(label)} &rarr;</a>`
               : `<span class="cockpit-pill ${cls}">${esc(label)}</span>`;
@@ -882,12 +885,18 @@ function renderSwimlane(view) {
     const pills = [
       ...fromQueue.map((it) => {
         const roId = it.reference_name || it.id;
+        const vehText = it.vehicle_compact_display || it.vehicle_display || "";
+        const pillText = vehText ? `${roId} · ${vehText}` : roId;
         const href = buildBoardThreadHref(it.thread_key || (roId ? `RO:${roId}` : null), it.board_url);
-        return `<a class="cockpit-pill cockpit-pill--sky" href="${esc(href)}">${esc(roId)} &rarr;</a>`;
+        return `<a class="cockpit-pill cockpit-pill--sky" href="${esc(href)}">${esc(pillText)} &rarr;</a>`;
       }),
       ...extraRos.map((r) => {
+        const vehText = r.vehicle_compact_display || r.vehicle_display || "";
+        const pillText = vehText
+          ? `${r.name} · ${vehText} (${Number(r.unscheduled_approved_services)} svc)`
+          : `${r.name} (${Number(r.unscheduled_approved_services)} svc)`;
         const href = buildBoardThreadHref(r.thread_key || `RO:${r.name}`, r.board_url);
-        return `<a class="cockpit-pill cockpit-pill--sky" href="${esc(href)}">${esc(r.name)} (${Number(r.unscheduled_approved_services)} svc) &rarr;</a>`;
+        return `<a class="cockpit-pill cockpit-pill--sky" href="${esc(href)}">${esc(pillText)} &rarr;</a>`;
       }),
     ];
 

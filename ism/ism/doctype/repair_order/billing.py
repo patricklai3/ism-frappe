@@ -1043,10 +1043,15 @@ def process_ro_payment_and_release(
 	ro.checkout_date = now_datetime()
 
 	if ro.vehicle:
-		veh_doc = frappe.get_doc("Repair Vehicle", ro.vehicle)
-		veh_doc.last_odometer = ro.odometer_out or ro.odometer_in
-		veh_doc.last_service_date = today()
-		veh_doc.save()
+		frappe.db.set_value(
+			"Repair Vehicle",
+			ro.vehicle,
+			{
+				"last_odometer": ro.odometer_out or ro.odometer_in,
+				"last_service_date": today(),
+			},
+			update_modified=False,
+		)
 
 	complete_linked_schedule_entries(ro.name)
 	ro.save()

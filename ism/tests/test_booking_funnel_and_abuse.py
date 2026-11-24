@@ -535,6 +535,7 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			email=customer_email,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
 			vin_or_plate="EVTEST1",
 			notes="Please inspect cabin intake.",
 			waiter_preference="Drop-Off",
@@ -573,6 +574,7 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 				email=customer_email,
 				vehicle_model="Model 3",
 				vehicle_year=2023,
+				vehicle_color="Pearl White",
 				vin_or_plate="EVTEST1",
 				notes="Please inspect cabin intake.",
 				waiter_preference="Drop-Off",
@@ -706,6 +708,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			email="pat@example.com",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertTrue(otp_res["success"])
@@ -726,6 +730,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 				email="pat@example.com",
 				vehicle_model="Model 3",
 				vehicle_year=2023,
+				vehicle_color="Pearl White",
+				license_plate="EVTEST1",
 				form_nonce=nonce,
 			)
 
@@ -754,6 +760,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_a,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertTrue(otp_res["success"])
@@ -772,6 +780,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_b,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(mismatch_res["success"])
@@ -791,6 +801,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_a,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(bad1["success"])
@@ -808,6 +820,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_a,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(bad2["success"])
@@ -824,6 +838,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_a,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(bad3["success"])
@@ -841,6 +857,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_b,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertTrue(otp_b["success"])
@@ -856,6 +874,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_b,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertTrue(ok_b["success"])
@@ -871,6 +891,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_b,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(replay_with_code["success"])
@@ -887,6 +909,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_b,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(replay_without_code["success"])
@@ -911,6 +935,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_e164,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertTrue(otp_res["success"])
@@ -933,6 +959,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_e164,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self.assertFalse(conflict_res["success"])
@@ -962,6 +990,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_e164,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=nonce,
 		)
 		self._track_artifacts_for_phone(phone_e164)
@@ -1004,6 +1034,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone="+14165550191",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			website_url="http://spam.invalid",
 			form_nonce=valid_nonce,
 		)
@@ -1022,6 +1054,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone="+14165550191",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=fast_nonce,
 		)
 		self.assertFalse(fast_res["success"])
@@ -1039,6 +1073,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone="+14165550191",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=tampered_nonce,
 		)
 		self.assertFalse(tampered_res["success"])
@@ -1055,6 +1091,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone="+14165550191",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=expired_nonce,
 		)
 		self.assertFalse(expired_res["success"])
@@ -1081,6 +1119,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone="+14165550191",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=valid_nonce,
 		)
 		self.assertFalse(cap_otp["success"])
@@ -1099,6 +1139,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			email=None,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=valid_nonce,
 		)
 		self.assertFalse(email_req_res["success"])
@@ -1117,6 +1159,7 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_dup,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
 			vin_or_plate="SECRETPLT",
 			form_nonce=valid_nonce,
 		)
@@ -1133,6 +1176,7 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_dup,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
 			vin_or_plate="SECRETPLT",
 			form_nonce=valid_nonce,
 			idempotency_key="idem-double-tap-42",
@@ -1151,6 +1195,7 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_dup,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
 			vin_or_plate="SECRETPLT",
 			form_nonce=valid_nonce,
 			idempotency_key="idem-double-tap-42",
@@ -1168,6 +1213,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_dup,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=valid_nonce,
 		)
 		self.assertFalse(dup_res["success"])
@@ -1196,6 +1243,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_daily,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=valid_nonce,
 		)
 		self.assertFalse(redis_daily_res["success"])
@@ -1229,6 +1278,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone=phone_daily,
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=valid_nonce,
 		)
 		self.assertFalse(db_daily_res["success"])
@@ -1251,6 +1302,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 				phone=phone_ip,
 				vehicle_model="Model 3",
 				vehicle_year=2023,
+				vehicle_color="Pearl White",
+				license_plate="EVTEST1",
 				form_nonce=valid_nonce,
 			)
 			self.assertTrue(res_ok["success"])
@@ -1264,6 +1317,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 			phone="+14165550179",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EVTEST1",
 			form_nonce=valid_nonce,
 		)
 		self.assertFalse(res_blocked["success"])
@@ -1299,6 +1354,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 				email="portal.driver@example.com",
 				vehicle_model="Model 3",
 				vehicle_year=2023,
+				vehicle_color="Pearl White",
+				license_plate="EVTEST1",
 				form_nonce=nonce,
 			)
 			self.assertTrue(otp_res["success"])
@@ -1316,6 +1373,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 					email="portal.driver@example.com",
 					vehicle_model="Model 3",
 					vehicle_year=2023,
+					vehicle_color="Pearl White",
+					license_plate="EVTEST1",
 					form_nonce=nonce,
 				)
 			self._track_artifacts_for_phone(phone_p4)
@@ -1361,6 +1420,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 				email="fallback.driver@example.com",
 				vehicle_model="Model 3",
 				vehicle_year=2023,
+				vehicle_color="Pearl White",
+				license_plate="EVTEST1",
 				form_nonce=nonce2,
 			)
 			self.assertTrue(otp_res2["success"])
@@ -1378,6 +1439,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 					email="fallback.driver@example.com",
 					vehicle_model="Model 3",
 					vehicle_year=2023,
+					vehicle_color="Pearl White",
+					license_plate="EVTEST1",
 					form_nonce=nonce2,
 				)
 			self._track_artifacts_for_phone(phone_no_p4)

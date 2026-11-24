@@ -76,11 +76,19 @@ class RepairVehicle(Document):
 		self.decode_vin()
 		self.color = normalize_vehicle_color(self.color)
 		self.license_plate = normalize_license_plate(self.license_plate)
-		self.color, self.license_plate = require_vehicle_intake_fields(
-			color=self.color,
-			license_plate=self.license_plate,
-			context="Repair Vehicle intake",
+		before = self.get_doc_before_save() if not self.is_new() else None
+		allow_legacy = bool(
+			before
+			and self.flags.get("allow_legacy_missing_intake_fields")
+			and normalize_vehicle_color(before.color) == self.color
+			and normalize_license_plate(before.license_plate) == self.license_plate
 		)
+		if not allow_legacy:
+			self.color, self.license_plate = require_vehicle_intake_fields(
+				color=self.color,
+				license_plate=self.license_plate,
+				context="Repair Vehicle intake",
+			)
 		self.display_title = format_vehicle_display(self)[:140]
 		self.sync_customers()
 
@@ -259,6 +267,9 @@ class RepairVehicle(Document):
 
 		if changed:
 			self.check_permission("write")
+			if not self.is_new() and (not self.color or not self.license_plate):
+				self.flags.allow_legacy_missing_intake_fields = True
+				self.flags.ignore_mandatory = True
 			self.save()
 
 	def clear_vin_fields(self):

@@ -300,6 +300,8 @@ class TestSelfServeScheduling(ISMTestCase):
 			email="ALEX@Example.COM",
 			vehicle_model="tesla model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="EV 101",
 			vin_or_plate="5yj3e1ea1pf000001",
 			now_dt=self.now_anchor,
 			emit_notification=False,
@@ -331,6 +333,8 @@ class TestSelfServeScheduling(ISMTestCase):
 				customer_name="Sam Lee",
 				phone="6045550122",
 				vehicle_model="Model 3",
+				vehicle_color="Pearl White",
+				license_plate="BRK 101",
 				now_dt=self.now_anchor,
 				emit_notification=False,
 			)
@@ -344,6 +348,8 @@ class TestSelfServeScheduling(ISMTestCase):
 			customer_name="Sam Lee",
 			phone="6045550122",
 			vehicle_model="Model 3",
+			vehicle_color="Pearl White",
+			license_plate="BRK 102",
 			now_dt=self.now_anchor,
 			emit_notification=False,
 		)
@@ -382,6 +388,8 @@ class TestSelfServeScheduling(ISMTestCase):
 				customer_name="Sam Lee",
 				phone="6045550122",
 				vehicle_model="Model 3",
+				vehicle_color="Pearl White",
+				license_plate="HOL 101",
 				now_dt=self.now_anchor,
 				emit_notification=False,
 			)
@@ -429,6 +437,8 @@ class TestSelfServeScheduling(ISMTestCase):
 				customer_name="Casey Park",
 				phone="6045550155",
 				vehicle_model="Model 3",
+				vehicle_color="Deep Blue",
+				license_plate="LED 101",
 				now_dt=now_morning,
 				emit_notification=False,
 			)
@@ -453,6 +463,8 @@ class TestSelfServeScheduling(ISMTestCase):
 				customer_name="Casey Park",
 				phone="6045550155",
 				vehicle_model="Model 3",
+				vehicle_color="Deep Blue",
+				license_plate="LED 102",
 				now_dt=now_morning,
 				emit_notification=False,
 			)
@@ -829,6 +841,8 @@ class TestSelfServeScheduling(ISMTestCase):
 						customer_arrival_time="07:45",
 						customer_name=f"Racer {idx}",
 						phone=f"604555019{idx}",
+						vehicle_color="Pearl White",
+						license_plate=f"RCE 00{idx}",
 						now_dt=self.now_anchor,
 						emit_notification=False,
 					)
@@ -898,6 +912,8 @@ class TestSelfServeScheduling(ISMTestCase):
 			email="  JAMIE@Example.COM ",
 			vehicle_model="tesla model 3",
 			vehicle_year=2023,
+			vehicle_color="  Pearl   White ",
+			license_plate="  ev  1234 ",
 			vin_or_plate=" 5yj3e1ea1pf000001 ",
 			notes="  Squeak on front right  ",
 			waiter_preference="Waiter",
@@ -907,9 +923,27 @@ class TestSelfServeScheduling(ISMTestCase):
 		self.assertEqual(norm["email"], "jamie@example.com")
 		self.assertEqual(norm["vehicle_model"], "Model 3")
 		self.assertEqual(norm["vehicle_year"], 2023)
+		self.assertEqual(norm["vehicle_color"], "Pearl White")
+		self.assertEqual(norm["license_plate"], "EV 1234")
 		self.assertEqual(norm["vin_or_plate"], "5YJ3E1EA1PF000001")
-		self.assertEqual(norm["provisional_vehicle_info"], "2023 Model 3 (5YJ3E1EA1PF000001)")
+		self.assertEqual(norm["provisional_vehicle_info"], "2023 Pearl White Model 3 (EV 1234)")
+		self.assertEqual(norm["vehicle_info"]["display"], "2023 Pearl White Model 3 (EV 1234)")
+		self.assertEqual(norm["vehicle_info"]["compact_display"], "Pearl White Model 3")
 		self.assertEqual(norm["waiter_preference"], "Waiter")
+
+		# Missing color or license_plate rejected
+		with self.assertRaises(frappe.ValidationError):
+			normalize_provisional_intake(
+				customer_name="Jamie Fox",
+				phone="6045550188",
+				license_plate="EV 1234",
+			)
+		with self.assertRaises(frappe.ValidationError):
+			normalize_provisional_intake(
+				customer_name="Jamie Fox",
+				phone="6045550188",
+				vehicle_color="Pearl White",
+			)
 
 		# Disable waiter preference -> Waiter rejected, None defaults to Drop-Off
 		self._set_ism_settings(enable_waiter_preference=0)
@@ -917,19 +951,34 @@ class TestSelfServeScheduling(ISMTestCase):
 			normalize_provisional_intake(
 				customer_name="Jamie Fox",
 				phone="6045550188",
+				vehicle_color="Pearl White",
+				license_plate="EV 1234",
 				waiter_preference="Waiter",
 			)
 		norm_dropoff = normalize_provisional_intake(
 			customer_name="Jamie Fox",
 			phone="6045550188",
+			vehicle_color="Pearl White",
+			license_plate="EV 1234",
 		)
 		self.assertEqual(norm_dropoff["waiter_preference"], "Drop-Off")
 
 		# Invalid phone & email rejected
 		with self.assertRaises(frappe.ValidationError):
-			normalize_provisional_intake(customer_name="Jamie Fox", phone="123")
+			normalize_provisional_intake(
+				customer_name="Jamie Fox",
+				phone="123",
+				vehicle_color="Pearl White",
+				license_plate="EV 1234",
+			)
 		with self.assertRaises(frappe.ValidationError):
-			normalize_provisional_intake(customer_name="Jamie Fox", phone="6045550188", email="not-an-email")
+			normalize_provisional_intake(
+				customer_name="Jamie Fox",
+				phone="6045550188",
+				email="not-an-email",
+				vehicle_color="Pearl White",
+				license_plate="EV 1234",
+			)
 
 	def test_provisional_booking_seam5_action_item_and_ro_conversion(self):
 		# Use manifest customer & vehicle attributes so create_repair_order_from_schedule_entry resolves cleanly
@@ -937,7 +986,7 @@ class TestSelfServeScheduling(ISMTestCase):
 		veh = frappe.db.get_value(
 			"Repair Vehicle",
 			self.vehicle,
-			["model_year", "model", "vin", "license_plate"],
+			["model_year", "model", "color", "vin", "license_plate"],
 			as_dict=True,
 		)
 		target_date = str(self.base_date)
@@ -967,6 +1016,8 @@ class TestSelfServeScheduling(ISMTestCase):
 				email="customer@example.com",
 				vehicle_model=veh.model,
 				vehicle_year=veh.model_year,
+				vehicle_color=veh.color or "Pearl White",
+				license_plate=veh.license_plate or "TST 999",
 				vin_or_plate=veh.vin or veh.license_plate,
 				notes="Check cabin filter odor",
 				waiter_preference="Drop-Off",
@@ -975,8 +1026,14 @@ class TestSelfServeScheduling(ISMTestCase):
 			)
 
 		self._assert_customer_safe(booking)
+		self.assertIn(veh.color or "Pearl White", booking["vehicle_display"])
+		self.assertIn(veh.license_plate or "TST 999", booking["vehicle_display"])
+		self.assertEqual(booking["vehicle_info"]["color"], veh.color or "Pearl White")
+		self.assertEqual(booking["vehicle_info"]["license_plate"], (veh.license_plate or "TST 999").upper())
 		se = frappe.get_doc("Schedule Entry", booking["booking_reference"])
 		self.track(se)
+		self.assertEqual(se.provisional_vehicle_color, veh.color or "Pearl White")
+		self.assertEqual(se.provisional_license_plate, (veh.license_plate or "TST 999").upper())
 
 		self.assertEqual(se.booking_source, "Website Self-Serve")
 		self.assertEqual(se.waiter_preference, "Drop-Off")
@@ -1139,6 +1196,8 @@ class TestSelfServeScheduling(ISMTestCase):
 			phone="6045550133",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Solid Black",
+			license_plate="RLY 133",
 		)
 		self._assert_customer_safe(book_res)
 		self.track("Schedule Entry", book_res["booking_reference"])

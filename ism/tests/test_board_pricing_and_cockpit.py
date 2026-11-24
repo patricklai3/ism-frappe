@@ -272,3 +272,37 @@ class TestBoardPricingAndCockpit(ISMTestCase):
 		self.assertEqual(len(view["gauges"]), 7)
 		self.assertIn("swimlane", view)
 		self.assertIn("action_queue", view)
+
+	def test_cockpit_action_items_and_swimlane_blocks_vehicle_display(self):
+		"""Cockpit derived action items & swimlane blocks include vehicle_info and human-friendly display (not raw VIN)."""
+		from ism.ism.doctype.repair_vehicle.vin_decoder import compute_vin_check_digit
+
+		cust = self.create_test_customer()
+		template = "7SAYGDEE0PF334455"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="Ultra Red",
+			license_plate="ckt 555",
+		)
+		snap = self._sample_snapshot()
+		snap["data"]["active_repair_orders"][0]["vehicle"] = veh.name
+		snap["data"]["schedule_entries"][0]["vehicle"] = veh.name
+
+		view = build_cockpit_view(snap)
+		expected = "2023 Ultra Red Model Y (CKT 555)"
+
+		dead_lift = next(it for it in view["action_queue"] if it["id"] == "dead_lift:RO-DEADLIFT")
+		self.assertEqual(dead_lift["vehicle_display"], expected)
+		self.assertEqual(dead_lift["vehicle_info"]["color"], "Ultra Red")
+		self.assertEqual(dead_lift["vehicle_info"]["license_plate"], "CKT 555")
+		self.assertIn(expected, dead_lift["subtitle"])
+		self.assertNotIn(vin, dead_lift["subtitle"])
+
+		se1 = next(b for b in view["swimlane"]["bay_lanes"][0]["blocks"] if b["name"] == "SE-001")
+		self.assertEqual(se1["vehicle_display"], expected)
+		self.assertIn(expected, se1["sublabel"])
+		self.assertNotIn(vin, se1["sublabel"])
+		self.assertEqual(se1["vehicle_info"]["display"], expected)
+		self.assertEqual(se1["vehicle_info"]["compact_display"], "Ultra Red Model Y")

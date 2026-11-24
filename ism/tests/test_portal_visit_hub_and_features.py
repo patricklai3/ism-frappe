@@ -1227,3 +1227,46 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 			self._track_session_artifacts(phone_e164="+14165550206", ro_name=ro_a.name)
 			self._track_session_artifacts(ro_name=ro_a_sibling.name)
 			self._track_session_artifacts(phone_e164="+14165550207", ro_name=ro_b.name)
+
+	def test_portal_vehicle_card_and_visit_hub_pills_vehicle_display(self):
+		"""Portal vehicle card & visit hub pills include color, label, compact_label, and vehicle_info."""
+		from ism.ism.doctype.repair_vehicle.vin_decoder import compute_vin_check_digit
+
+		cust = self.create_test_customer(mobile_no="+14165550299")
+		template = "7SAYGDEE0PF889900"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="Quicksilver",
+			license_plate="prt 900",
+		)
+		ro = self._create_ro(customer=cust.name, vehicle=veh.name)
+
+		sess = issue_portal_session(
+			auth_method="sms_otp",
+			scope_type="customer",
+			customer=cust.name,
+			phone_e164="+14165550299",
+			set_response_cookie=False,
+		)
+		self._track_session_artifacts(phone_e164="+14165550299", ro_name=ro.name)
+		hub = build_portal_hub_payload(sess)
+		expected_label = "2023 Quicksilver Model Y (PRT 900)"
+		expected_compact = "Quicksilver Model Y"
+
+		vehicle_card = hub["active_visit"]["vehicle"]
+		self.assertEqual(vehicle_card["color"], "Quicksilver")
+		self.assertEqual(vehicle_card["license_plate"], "PRT 900")
+		self.assertEqual(vehicle_card["label"], expected_label)
+		self.assertEqual(vehicle_card["compact_label"], expected_compact)
+		self.assertEqual(vehicle_card["display"], expected_label)
+		self.assertEqual(vehicle_card["compact_display"], expected_compact)
+
+		visits = hub.get("visits") or []
+		self.assertTrue(visits)
+		pill = next((v for v in visits if v.get("repair_order") == ro.name), visits[0])
+		self.assertEqual(pill["vehicle_label"], expected_label)
+		self.assertEqual(pill["vehicle_compact_label"], expected_compact)
+		self.assertEqual(pill["vehicle_info"]["color"], "Quicksilver")
+		self.assertEqual(pill["vehicle_info"]["license_plate"], "PRT 900")

@@ -60,6 +60,9 @@ def sync_declined_to_deferred_services(ro) -> None:
 			"repair_order": ro.name,
 			"decline_reason": reason,
 		})
+	if not veh_doc.color or not veh_doc.license_plate:
+		veh_doc.flags.allow_legacy_missing_intake_fields = True
+		veh_doc.flags.ignore_mandatory = True
 	veh_doc.save(ignore_permissions=True)
 
 

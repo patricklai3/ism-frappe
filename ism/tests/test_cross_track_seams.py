@@ -513,6 +513,8 @@ class TestCrossTrackSeams(ISMTestCase):
 			email="seam5@example.test",
 			vehicle_model="Model 3",
 			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="SM5 101",
 			form_nonce=nonce,
 			website_url="",
 		)
@@ -531,6 +533,8 @@ class TestCrossTrackSeams(ISMTestCase):
 				email="seam5@example.test",
 				vehicle_model="Model 3",
 				vehicle_year=2023,
+				vehicle_color="Pearl White",
+				license_plate="SM5 101",
 				form_nonce=nonce,
 				website_url="",
 				idempotency_key=f"seam5-book-{frappe.generate_hash(length=6)}",

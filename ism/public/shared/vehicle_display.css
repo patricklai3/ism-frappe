@@ -98,7 +98,9 @@
 .thread-item,
 .andon-header,
 .event-card,
-.portal-card {
+.portal-card,
+.portal-ssr-card,
+.ism-ro-vehicle-intro {
 	container-type: inline-size;
 }
 

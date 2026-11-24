@@ -91,6 +91,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Agent Cust 1",
 			vehicle_identifier="5YJ3E1EBXNF999001",
+			vehicle_color="Pearl White",
+			license_plate="AGY 001",
 			odometer_in=41200,
 			services=[
 				{"service_title": "Front Brake Pad Replacement", "labor_hours": 1.5, "labor_rate": 140.0},
@@ -100,6 +102,8 @@ class TestAgentFacade(ISMTestCase):
 		)
 
 		self.assertTrue(res["success"])
+		self.assertIn("Pearl White", res["data"].get("vehicle_display", ""))
+		self.assertIn("(AGY 001)", res["data"].get("vehicle_display", ""))
 		ro_name = self._track_quote_ro(res)
 
 		# Verify DB state
@@ -129,6 +133,8 @@ class TestAgentFacade(ISMTestCase):
 		res_summary = create_quote(
 			customer_name=f"{TEST_PREFIX}Agent Cust 1b",
 			vehicle_identifier="5YJ3E1EBXNF999009",
+			vehicle_color="Midnight Silver",
+			license_plate="AGY 009",
 			odometer_in=41300,
 			services=[{"service_title": "Brake Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
 			include_summary=True,
@@ -142,6 +148,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Agent Cust 2",
 			vehicle_identifier="5YJ3E1EBXNF999002",
+			vehicle_color="Deep Blue",
+			license_plate="AGY 002",
 			odometer_in=41400,
 			services=[],
 			notes="General check-in inspection",
@@ -158,6 +166,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Agent Cust 3",
 			vehicle_identifier="5YJ3E1EBXNF999003",
+			vehicle_color="Solid Black",
+			license_plate="AGY 003",
 			odometer_in=41500,
 			services=[
 				{"service_title": "Initial Service A", "labor_hours": 1.0, "labor_rate": 100.0},
@@ -187,6 +197,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Agent Cust 4",
 			vehicle_identifier="5YJ3E1EBXNF999004",
+			vehicle_color="Red Multi-Coat",
+			license_plate="AGY 004",
 			odometer_in=41600,
 			services=[{"service_title": "Service A", "labor_hours": 1.0}],
 		)
@@ -349,6 +361,7 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Plate Cust",
 			vehicle_identifier="ABCD-789",
+			vehicle_color="Pearl White",
 			customer_phone="416-555-0199",
 			customer_email="platecust@example.com",
 			odometer_in=41900,
@@ -420,6 +433,7 @@ class TestAgentFacade(ISMTestCase):
 		quote_res = create_quote(
 			customer_name=f"{TEST_PREFIX}Workflow Cust",
 			vehicle_identifier="WORK-123",
+			vehicle_color="Midnight Silver",
 			customer_phone="416-555-0142",
 			customer_email="workflow@example.com",
 			odometer_in=42100,
@@ -502,6 +516,7 @@ class TestAgentFacade(ISMTestCase):
 		q = create_quote(
 			customer_name=f"{TEST_PREFIX}Fast Flow Cust",
 			vehicle_identifier="FAST-888",
+			vehicle_color="Deep Blue",
 			services=[{
 				"service_title": "Caliper Replace",
 				"labor_hours": 1.0,
@@ -1464,6 +1479,8 @@ class TestAgentFacade(ISMTestCase):
 		res = intake_and_find_slots(
 			customer_name=f"{TEST_PREFIX}Composite Cust",
 			vehicle_identifier="5YJ3E1EBXNF999099",
+			vehicle_color="Pearl White",
+			license_plate="CMP 099",
 			odometer_in=43000,
 			services=[{"service_title": "Cabin Air Filter Replacement", "labor_hours": 1.0}],
 			notes="Musty AC smell",
@@ -1485,6 +1502,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Alias Cust",
 			vehicle_identifier="5YJ3E1EBXNF999077",
+			vehicle_color="Solid Black",
+			license_plate="ALS 077",
 			odometer_in=43100,
 			services=[
 				{"service_name": "Cabin Air Filter Replacement", "hours": 0.5},
@@ -1528,6 +1547,8 @@ class TestAgentFacade(ISMTestCase):
 		res = intake_and_find_slots(
 			customer_name=f"{TEST_PREFIX}Composite Filter Cust",
 			vehicle_identifier="5YJ3E1EBXNF999078",
+			vehicle_color="Stealth Grey",
+			license_plate="FLT 078",
 			odometer_in=43200,
 			services=[{"service_name": "Brake Fluid Flush", "hours": 1.0}],
 			start_date=add_days(today(), 1),
@@ -1947,6 +1968,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Amend InPlace Cust",
 			vehicle_identifier="5YJ3E1EBXNF999111",
+			vehicle_color="Pearl White",
+			license_plate="AMD 111",
 			odometer_in=42000,
 			services=[
 				{"service_title": "Brake Fluid Flush", "labor_hours": 1.0, "labor_rate": 140.0},
@@ -2023,6 +2046,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Deposit Cust",
 			vehicle_identifier="5YJ3E1EBXNF999112",
+			vehicle_color="Deep Blue",
+			license_plate="DEP 112",
 			odometer_in=43000,
 			services=[{"service_title": "Battery Inspection", "labor_hours": 1.0, "labor_rate": 140.0}],
 		)
@@ -2060,6 +2085,8 @@ class TestAgentFacade(ISMTestCase):
 		res = create_quote(
 			customer_name=f"{TEST_PREFIX}Split Checkout Cust",
 			vehicle_identifier="5YJ3E1EBXNF999113",
+			vehicle_color="Midnight Silver",
+			license_plate="SPL 113",
 			odometer_in=44000,
 			services=[{"service_title": "Tire Rotation", "labor_hours": 0.5, "labor_rate": 140.0}],
 		)

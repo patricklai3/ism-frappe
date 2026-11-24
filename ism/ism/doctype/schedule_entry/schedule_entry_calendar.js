@@ -75,9 +75,13 @@ frappe.views.calendar["Schedule Entry"] = {
 				}
 			}
 
+			const vehicle_row = props.vehicle_display
+				? `<div><b>Vehicle:</b> ${frappe.utils.escape_html(props.vehicle_display)}</div>`
+				: "";
 			const tooltip_content = `
 				<div class="schedule-entry-popover" style="text-align: left; padding: 4px; font-size: 12px;">
 					<div style="font-weight: bold; margin-bottom: 4px;">${frappe.utils.escape_html(event.title || "")}</div>
+					${vehicle_row}
 					<div><b>Entry Type:</b> ${frappe.utils.escape_html(props.entry_type || "Appointment")}</div>
 					<div><b>Status:</b> ${frappe.utils.escape_html(props.status || "")}</div>
 					<div><b>Service Bay:</b> ${frappe.utils.escape_html(props.service_bay || "Unassigned")}</div>
@@ -95,7 +99,8 @@ frappe.views.calendar["Schedule Entry"] = {
 					container: "body",
 				});
 			} else {
-				$el.attr("title", `${event.title} | ${props.status} | Bay: ${props.service_bay || "Unassigned"}`);
+				const veh_part = props.vehicle_display ? ` | ${props.vehicle_display}` : "";
+				$el.attr("title", `${event.title}${veh_part} | ${props.status} | Bay: ${props.service_bay || "Unassigned"}`);
 			}
 		},
 	},

@@ -902,3 +902,83 @@ class TestApprovalAndInspection(ISMTestCase):
 			self.assertEqual(phone_arg, "+14165550199")
 			self.assertIn(ro.name, msg_arg)
 			self.assertIn("ready for pickup", msg_arg.lower())
+
+	def test_record_check_in_inspection_enforces_and_updates_color_and_plate(self):
+		"""record_check_in_inspection enforces color & license_plate and updates them when provided."""
+		_, veh, ro = self._make_ro_with_services()
+
+		# Clear color & plate to simulate incomplete legacy vehicle
+		frappe.db.set_value(
+			"Repair Vehicle",
+			veh.name,
+			{"color": "", "license_plate": ""},
+			update_modified=False,
+		)
+		with self.assertRaises(frappe.MandatoryError):
+			record_check_in_inspection(repair_order=ro.name, odometer_in=42100)
+
+		# Providing only color still fails because license_plate is missing
+		with self.assertRaises(frappe.MandatoryError):
+			record_check_in_inspection(
+				repair_order=ro.name,
+				odometer_in=42100,
+				vehicle_color="Stealth Grey",
+			)
+
+		# Providing both color and license_plate succeeds and updates the Repair Vehicle
+		res = record_check_in_inspection(
+			repair_order=ro.name,
+			odometer_in=42150,
+			vehicle_color="Stealth Grey",
+			license_plate="ins 321",
+		)
+		veh.reload()
+		self.assertEqual(veh.color, "Stealth Grey")
+		self.assertEqual(veh.license_plate, "INS 321")
+		self.assertIn("Stealth Grey", res["vehicle_display"])
+		self.assertIn("(INS 321)", res["vehicle_display"])
+		self.assertEqual(res["vehicle_info"]["color"], "Stealth Grey")
+		self.assertEqual(res["vehicle_info"]["license_plate"], "INS 321")
+
+	def test_approval_notification_and_payload_include_human_vehicle_display(self):
+		"""Approval notification display and portal payload include year, color, model, and plate."""
+		from ism.api.approval import _format_vehicle_display, get_public_quote_approval
+		from ism.ism.doctype.repair_vehicle.vin_decoder import compute_vin_check_digit
+
+		cust = self.create_test_customer(mobile_no="+14165550199", email_id="driver@example.com")
+		template = "7SAYGDEE0PF990011"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=cust.name,
+			color="Pearl White",
+			license_plate="apr 505",
+		)
+		ro = self.create_test_repair_order(
+			customer=cust.name,
+			vehicle=veh.name,
+			odometer_in=42000,
+			services=[
+				{
+					"service_title": "Brake Service",
+					"status": "Pending Approval",
+					"labor_hours": 1.0,
+					"labor_rate": 150.0,
+					"labor_amount": 150.0,
+					"parts_total": 0.0,
+					"total_amount": 150.0,
+				}
+			],
+		)
+		expected = "2023 Pearl White Model Y (APR 505)"
+		self.assertEqual(_format_vehicle_display(veh.name), expected)
+
+		token, _ = get_or_create_approval_token(ro.name)
+		payload = get_public_quote_approval(token=token)
+		v_payload = payload["vehicle"]
+		self.assertEqual(v_payload["model_year"], "2023")
+		self.assertEqual(v_payload["color"], "Pearl White")
+		self.assertEqual(v_payload["model"], "Model Y")
+		self.assertEqual(v_payload["license_plate"], "APR 505")
+		self.assertEqual(v_payload["display"], expected)
+		self.assertEqual(v_payload["compact_display"], "Pearl White Model Y")

@@ -1090,8 +1090,8 @@ const RO_VEHICLE_FIELDS = [
 ];
 
 function format_ro_vehicle_fallback(v = {}) {
-	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.format === "function") {
-		return window.ISMVehicleDisplay.format(v, { includeVin: false });
+	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.formatText === "function") {
+		return window.ISMVehicleDisplay.formatText(v, { includeVin: false });
 	}
 	const clean = (val) => String(val || "").trim().replace(/\s+/g, " ");
 	const year = clean(v.model_year);
@@ -1107,7 +1107,10 @@ function format_ro_vehicle_fallback(v = {}) {
 
 function render_ro_vehicle_strip_html(v = {}) {
 	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.renderHtml === "function") {
-		return window.ISMVehicleDisplay.renderHtml(v, { showVin: true });
+		return window.ISMVehicleDisplay.renderHtml(v, {
+			showVin: true,
+			extraClass: "ism-veh--hide-vin-md ism-veh--responsive-tight",
+		});
 	}
 	const esc = frappe.utils.escape_html;
 	const parts = [];
@@ -1123,7 +1126,7 @@ function render_ro_vehicle_strip_html(v = {}) {
 		parts.push(`<span class="ism-veh__vin text-muted">· VIN: ${esc(String(v.vin))}</span>`);
 	}
 	const inner = parts.length ? parts.join(" ") : esc(format_ro_vehicle_fallback(v) || __("Vehicle"));
-	return `<span class="ism-veh">${inner}</span>`;
+	return `<span class="ism-veh ism-veh--hide-vin-md ism-veh--responsive-tight">${inner}</span>`;
 }
 
 function open_update_vehicle_intake_dialog(frm, vehicle_info = {}) {

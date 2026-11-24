@@ -1182,6 +1182,10 @@ def create_repair_order_from_schedule_entry(
 
 	frappe.has_permission("Schedule Entry", "write", throw=True)
 	frappe.has_permission("Repair Order", "create", throw=True)
+	if vehicle_color is not None and not isinstance(vehicle_color, str):
+		frappe.throw(_("Vehicle color must be a string."), frappe.ValidationError)
+	if license_plate is not None and not isinstance(license_plate, str):
+		frappe.throw(_("License plate must be a string."), frappe.ValidationError)
 	if not schedule_entry or not isinstance(schedule_entry, str) or not frappe.db.exists("Schedule Entry", schedule_entry):
 		frappe.throw(_("Schedule Entry {0} does not exist.").format(schedule_entry), frappe.DoesNotExistError)
 

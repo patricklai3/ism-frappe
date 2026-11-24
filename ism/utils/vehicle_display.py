@@ -23,7 +23,7 @@ VEHICLE_DISPLAY_FIELDS = (
 
 
 def _clean_text(value: Any) -> str | None:
-	if value is None:
+	if value is None or isinstance(value, (bool, list, dict, tuple, set)):
 		return None
 	text = " ".join(str(value).split())
 	if not text or text.lower() == "none":
@@ -271,4 +271,5 @@ def validate_repair_vehicle_ready_for_check_in(vehicle_name: str) -> dict[str, A
 	result = dict(row)
 	result["color"] = norm_color
 	result["license_plate"] = norm_plate
+	result.update(build_vehicle_display_dict(result, fallback=clean_name))
 	return result

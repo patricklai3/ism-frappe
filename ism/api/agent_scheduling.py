@@ -767,6 +767,7 @@ def create_ro_from_appointment(
 		summary_builder=lambda: (
 			f"### Repair Order Created: `{ro_name}`\n"
 			f"- **Schedule Entry**: `{schedule_entry}`\n"
+			f"- **Vehicle**: {res.get('vehicle_display') or 'N/A'}\n"
 			f"- **Customer Concern**: {res.get('customer_concern') or 'None'}\n\n"
 			f"[Open in Desk]({urls['desk']})"
 		),
@@ -850,8 +851,17 @@ def get_shop_floor_status(date: Optional[str] = None, include_summary: Any = Fal
 	active_ros = frappe.get_list(
 		"Repair Order",
 		filters={"status": ["in", ["Authorized - In Progress", "Waiting on Parts", "Pending Authorization"]]},
-		fields=["name", "customer", "vehicle", "status", "approval_status", "vehicle_location"],
+		fields=["name", "customer", "vehicle", "vehicle_display", "status", "approval_status", "vehicle_location"],
 	)
+	if active_ros:
+		from ism.utils.vehicle_display import get_vehicle_display_map
+
+		veh_map = get_vehicle_display_map([r.get("vehicle") for r in active_ros if r.get("vehicle")])
+		for r in active_ros:
+			v_info = veh_map.get(r.get("vehicle"))
+			if v_info:
+				r["vehicle_display"] = v_info.get("display") or r.get("vehicle_display") or r.get("vehicle") or ""
+				r["vehicle_info"] = v_info
 
 	schedule_entries = [
 		{

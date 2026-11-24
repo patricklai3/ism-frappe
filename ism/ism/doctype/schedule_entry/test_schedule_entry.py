@@ -229,3 +229,103 @@ class TestScheduleEntry(ISMTestCase):
 		se.status = "No Show"
 		se.save(ignore_permissions=True)
 		self.assertTrue(check_bay_availability(bay_name, frappe.utils.today(), "09:00:00", 60))
+
+	def test_get_display_vehicle_linked_and_provisional(self):
+		"""get_display_vehicle() includes year, color, model, and license plate for linked and provisional entries."""
+		from ism.ism.doctype.repair_vehicle.vin_decoder import compute_vin_check_digit
+
+		template = "7SAYGDEE0PF223344"  # 2023 Model Y
+		vin = f"{template[:8]}{compute_vin_check_digit(template)}{template[9:]}"
+		veh = self.create_test_vehicle(
+			vin=vin,
+			customer=self.customer.name,
+			color="Pearl White",
+			license_plate="se 123",
+		)
+		se_linked = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"customer": self.customer.name,
+			"repair_vehicle": veh.name,
+			"scheduled_date": frappe.utils.today(),
+			"scheduled_time": "10:00:00",
+			"estimated_duration": 60,
+		})
+		self.assertEqual(se_linked.get_display_vehicle(), "2023 Pearl White Model Y (SE 123)")
+
+		se_prov = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"provisional_customer_name": "Provisional Driver",
+			"provisional_vehicle_year": 2024,
+			"provisional_vehicle_color": "  Stealth Grey ",
+			"provisional_vehicle_model": "Model 3",
+			"provisional_license_plate": "  prv 888 ",
+			"scheduled_date": frappe.utils.today(),
+			"scheduled_time": "11:00:00",
+			"estimated_duration": 60,
+		})
+		self.assertEqual(se_prov.provisional_vehicle_color, "Stealth Grey")
+		self.assertEqual(se_prov.provisional_license_plate, "PRV 888")
+		self.assertEqual(se_prov.get_display_vehicle(), "2024 Stealth Grey Model 3 (PRV 888)")
+
+	def test_create_ro_from_schedule_entry_color_plate_enforcement_and_persistence(self):
+		"""create_repair_order_from_schedule_entry enforces color & plate and persists them onto Repair Vehicle."""
+		from ism.api.scheduling import create_repair_order_from_schedule_entry
+
+		veh = self.create_test_vehicle(
+			customer=self.customer.name,
+			color="Deep Blue",
+			license_plate="CHK 100",
+		)
+		se = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"customer": self.customer.name,
+			"repair_vehicle": veh.name,
+			"scheduled_date": frappe.utils.today(),
+			"scheduled_time": "12:00:00",
+			"estimated_duration": 60,
+		})
+
+		# Non-string color or plate rejected at API boundary
+		with self.assertRaises((frappe.ValidationError, frappe.FrappeTypeError, TypeError)):
+			create_repair_order_from_schedule_entry(
+				se.name, odometer_in=20000, vehicle_color=["!=", ""], license_plate="CHK 202"
+			)
+		with self.assertRaises((frappe.ValidationError, frappe.FrappeTypeError, TypeError)):
+			create_repair_order_from_schedule_entry(
+				se.name, odometer_in=20000, vehicle_color="Quicksilver", license_plate=True
+			)
+
+		# Clear color & plate on vehicle to simulate legacy incomplete record
+		frappe.db.set_value(
+			"Repair Vehicle",
+			veh.name,
+			{"color": "", "license_plate": ""},
+			update_modified=False,
+		)
+		with self.assertRaises(frappe.MandatoryError):
+			create_repair_order_from_schedule_entry(se.name, odometer_in=20000)
+
+		# Missing plate still blocked
+		with self.assertRaises(frappe.MandatoryError):
+			create_repair_order_from_schedule_entry(
+				se.name, odometer_in=20000, vehicle_color="Quicksilver"
+			)
+
+		# Providing both color and plate persists them onto Repair Vehicle and creates RO
+		res = create_repair_order_from_schedule_entry(
+			se.name,
+			odometer_in=20000,
+			vehicle_color="Quicksilver",
+			license_plate="chk 202",
+		)
+		self.track("Repair Order", res["repair_order"])
+		veh.reload()
+		self.assertEqual(veh.color, "Quicksilver")
+		self.assertEqual(veh.license_plate, "CHK 202")
+		self.assertIn("Quicksilver", res["vehicle_display"])
+		self.assertIn("(CHK 202)", res["vehicle_display"])
+		self.assertEqual(res["vehicle_info"]["color"], "Quicksilver")
+		self.assertEqual(res["vehicle_info"]["license_plate"], "CHK 202")

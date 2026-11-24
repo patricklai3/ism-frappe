@@ -239,10 +239,11 @@ def build_floor_summary(summary: Dict[str, Any], active_ros: List[Dict[str, Any]
 		f"- **Active Bay Allocations:** {summary.get('active_allocations', 0)}",
 	]
 	if active_ros:
-		lines.extend(["", "| RO | Status | Approval | Location |", "|---|---|---|---|"])
+		lines.extend(["", "| RO | Vehicle | Status | Approval | Location |", "|---|---|---|---|---|"])
 		for ro in active_ros[:10]:
+			veh_label = ro.get("vehicle_display") or ro.get("vehicle") or "-"
 			lines.append(
-				f"| {ro.get('name')} | {ro.get('status')} | {ro.get('approval_status')} | {ro.get('vehicle_location') or '-'} |"
+				f"| {ro.get('name')} | {veh_label} | {ro.get('status')} | {ro.get('approval_status')} | {ro.get('vehicle_location') or '-'} |"
 			)
 	return "\n".join(lines)
 

@@ -25,8 +25,8 @@ function clear_decoded_vin_fields(frm) {
 }
 
 function compute_vehicle_display_preview(doc) {
-	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.format === "function") {
-		return window.ISMVehicleDisplay.format(doc, { includeVin: false });
+	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.formatText === "function") {
+		return window.ISMVehicleDisplay.formatText(doc, { includeVin: false });
 	}
 	const clean = (v) => String(v || "").trim().replace(/\s+/g, " ");
 	const year = clean(doc.model_year);
