@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
 
@@ -16,10 +15,16 @@ from frappe.utils import cint, now_datetime
 from ism.board.contracts import (
 	BLOCKED_BOARD_STATUSES,
 	CLOSED_RO_STATUSES,
-	SELF_ECHO_DEDUP_PREFIX,
 	BoardContractError,
 	parse_ro_from_thread_key,
 	ro_thread_key,
+)
+from ism.permissions import (
+	_get_assigned_employees_for_ro,
+	_get_enabled_users_for_employees,
+	_is_ro_tech_ready,
+	get_realtime_recipients_for_ro,
+	is_ro_visible_to_user,
 )
 from ism.utils.vehicle_display import (
 	VEHICLE_DISPLAY_FIELDS,
@@ -121,6 +126,9 @@ def _build_ro_thread_metadata(ro_name: str) -> dict[str, Any]:
 		"title": title,
 		"vehicle": vehicle_name,
 		"vin": vin,
+		"color": vehicle_info.get("color") if vehicle_info else None,
+		"vehicle_color": vehicle_info.get("color") if vehicle_info else None,
+		"license_plate": vehicle_info.get("license_plate") if vehicle_info else None,
 		"vehicle_display": vehicle_display,
 		"vehicle_info": vehicle_info,
 		"customer": ro.get("customer") or None,
@@ -249,7 +257,10 @@ def recompute_thread_projection(thread_key: str, *, publish: bool = True) -> dic
 
 	latest_events = frappe.get_all(
 		"Shop Board Event",
-		filters={"thread": canonical_key},
+		filters={
+			"thread": canonical_key,
+			"payload_type": ["!=", "STATE_MUTATION"],
+		},
 		fields=["event_timestamp", "body_text", "transcript", "payload_type"],
 		order_by="event_timestamp desc, creation desc",
 		limit=1,
@@ -320,6 +331,7 @@ def recompute_thread_projection(thread_key: str, *, publish: bool = True) -> dic
 		"vehicle_compact_display": vehicle_info.get("compact_display") or "",
 		"vehicle_year": vehicle_info.get("model_year"),
 		"vehicle_model": vehicle_info.get("model"),
+		"color": vehicle_info.get("color"),
 		"vehicle_color": vehicle_info.get("color"),
 		"license_plate": vehicle_info.get("license_plate"),
 		"vehicle_info": vehicle_info,
@@ -344,13 +356,78 @@ def recompute_thread_projection(thread_key: str, *, publish: bool = True) -> dic
 			docname=canonical_key,
 			after_commit=True,
 		)
+		for recipient in get_realtime_recipients_for_ro(ro_name):
+			frappe.publish_realtime(
+				"ism_board_thread_summary",
+				payload,
+				user=recipient,
+				after_commit=True,
+			)
+
+	return payload
+
+
+def _publish_tech_queue_update_for_ro(doc) -> None:
+	"""Notify affected technicians' user rooms when an RO enters, leaves, or updates within tech eligibility."""
+	before = doc.get_doc_before_save() if hasattr(doc, "get_doc_before_save") else None
+	prev_ready = _is_ro_tech_ready(before) if before else False
+	curr_ready = _is_ro_tech_ready(doc)
+
+	# Never emit realtime pings to technicians while an RO remains unapproved or on parts hold.
+	if not (curr_ready or prev_ready):
+		return
+
+	affected_emps: set[str] = set(_get_assigned_employees_for_ro(doc.name))
+	for row in getattr(doc, "services", None) or []:
+		emp = (getattr(row, "assigned_technician", None) or "").strip()
+		if emp:
+			affected_emps.add(emp)
+	if before is not None:
+		for row in getattr(before, "services", None) or []:
+			emp = (getattr(row, "assigned_technician", None) or "").strip()
+			if emp:
+				affected_emps.add(emp)
+
+	if not affected_emps:
+		return
+
+	for user_id in sorted(_get_enabled_users_for_employees(affected_emps)):
 		frappe.publish_realtime(
-			"ism_board_thread_summary",
-			payload,
+			"ism_tech_queue_updated",
+			{
+				"kind": "REPAIR_ORDER",
+				"repair_order": doc.name,
+				"eligible": is_ro_visible_to_user(doc.name, user=user_id),
+				"reason": "repair_order_updated",
+			},
+			user=user_id,
 			after_commit=True,
 		)
 
-	return payload
+
+def _publish_tech_queue_update_for_schedule_entry(doc, before=None) -> None:
+	"""Notify previous and current assigned technicians when a Schedule Entry changes or is superseded by an RO."""
+	curr_tech = (doc.get("assigned_technician") or "").strip()
+	prev_tech = (before.get("assigned_technician") or "").strip() if before else ""
+	affected_emps = {emp for emp in (curr_tech, prev_tech) if emp}
+	if not affected_emps:
+		return
+
+	current_ro = (doc.get("repair_order") or "").strip() or None
+	for user_id in sorted(_get_enabled_users_for_employees(affected_emps)):
+		ro_eligible = bool(current_ro and is_ro_visible_to_user(current_ro, user=user_id))
+		frappe.publish_realtime(
+			"ism_tech_queue_updated",
+			{
+				"kind": "SCHEDULE_ENTRY",
+				"schedule_entry": doc.name,
+				"superseded_by_ro": current_ro,
+				"ro_eligible": ro_eligible,
+				"reason": "schedule_entry_updated",
+			},
+			user=user_id,
+			after_commit=True,
+		)
 
 
 def on_repair_order_after_insert(doc, method=None):
@@ -362,31 +439,32 @@ def on_repair_order_after_insert(doc, method=None):
 
 
 def on_repair_order_update(doc, method=None):
-	"""Recompute Repair Order board projection whenever the RO changes."""
-	if not _board_tables_ready():
-		return
-	thread_key = ensure_thread_for_ro(doc.name)
-	recompute_thread_projection(thread_key, publish=True)
+	"""Recompute Repair Order board projection and notify affected technicians when RO changes."""
+	if _board_tables_ready():
+		thread_key = ensure_thread_for_ro(doc.name)
+		recompute_thread_projection(thread_key, publish=True)
+	_publish_tech_queue_update_for_ro(doc)
 
 
 def on_schedule_entry_update(doc, method=None):
-	"""Sync bay and technician assignment onto linked Repair Order thread(s)."""
-	if not _board_tables_ready():
-		return
-
-	affected_ros: list[str] = []
-	current_ro = doc.get("repair_order")
-	if current_ro and frappe.db.exists("Repair Order", current_ro):
-		affected_ros.append(current_ro)
-
+	"""Sync bay/technician assignment onto linked Repair Order thread(s) and notify affected tech queues."""
 	before = doc.get_doc_before_save() if hasattr(doc, "get_doc_before_save") else None
-	prev_ro = before.get("repair_order") if before else None
-	if prev_ro and prev_ro != current_ro and frappe.db.exists("Repair Order", prev_ro):
-		affected_ros.append(prev_ro)
 
-	for ro_name in affected_ros:
-		thread_key = ensure_thread_for_ro(ro_name)
-		recompute_thread_projection(thread_key, publish=True)
+	if _board_tables_ready():
+		affected_ros: list[str] = []
+		current_ro = doc.get("repair_order")
+		if current_ro and frappe.db.exists("Repair Order", current_ro):
+			affected_ros.append(current_ro)
+
+		prev_ro = before.get("repair_order") if before else None
+		if prev_ro and prev_ro != current_ro and frappe.db.exists("Repair Order", prev_ro):
+			affected_ros.append(prev_ro)
+
+		for ro_name in affected_ros:
+			thread_key = ensure_thread_for_ro(ro_name)
+			recompute_thread_projection(thread_key, publish=True)
+
+	_publish_tech_queue_update_for_schedule_entry(doc, before=before)
 
 
 def project_external_domain_event(
@@ -483,32 +561,6 @@ def project_external_domain_event(
 
 	recompute_thread_projection(target_thread_key, publish=True)
 	return ev.name
-
-
-def _build_action_item_projection_payload(doc) -> dict[str, Any]:
-	dedup_key = (doc.get("dedup_key") or "").strip()
-	source = (doc.get("source") or "").strip()
-	ref_dt = (doc.get("reference_doctype") or "").strip()
-	ref_name = (doc.get("reference_name") or "").strip()
-
-	payload: dict[str, Any] = {
-		"action_item": doc.name,
-		"category": doc.get("category"),
-		"priority": doc.get("priority"),
-		"source": source or None,
-		"reference_doctype": ref_dt or None,
-		"reference_name": ref_name or None,
-		"dedup_key": dedup_key or None,
-		"title": f"[{doc.get('priority') or 'Info'}] {doc.get('title') or doc.name}",
-		"details": doc.get("details") or None,
-	}
-
-	if ref_dt == "Repair Order" and ref_name and frappe.db.exists("Repair Order", ref_name):
-		payload["repair_order"] = ref_name
-	elif ref_dt == "Schedule Entry" and ref_name:
-		payload["schedule_entry"] = ref_name
-
-	return payload
 
 
 def _sync_linked_action_cards_in_place(doc) -> list[str]:
@@ -659,71 +711,19 @@ def _sync_linked_action_cards_in_place(doc) -> list[str]:
 
 
 def on_shop_action_item_after_insert(doc, method=None):
-	"""Seam 5 soft listener: project external RO-linked Shop Action Items onto RO:<name> threads."""
-	if not _board_tables_ready():
-		return None
-
-	dedup_key = (doc.get("dedup_key") or "").strip()
-	source = (doc.get("source") or "").strip()
-	if dedup_key.startswith(SELF_ECHO_DEDUP_PREFIX) or source in ("Rule Snooze", "Board AI"):
-		return None
-
-	payload = _build_action_item_projection_payload(doc)
-	return project_external_domain_event(
-		"shop_action_item",
-		payload,
-		idempotency_key=f"action_item:{doc.name}",
-	)
+	"""Exception-only Shop Board: Shop Action Items stay in /cockpit without emitting STATE_MUTATION board pills."""
+	_ = doc, method
+	return None
 
 
 def on_shop_action_item_on_update(doc, method=None):
-	"""1) Silently sync status onto linked ACTION_CARD events (zero confirmation pill).
-	2) Seam 5 soft listener: project meaningful repeat updates on external RO-linked Shop Action Items.
-	"""
+	"""Silently sync Shop Action Item status onto linked ACTION_CARD events (zero STATE_MUTATION pill)."""
+	_ = method
 	if not _board_tables_ready():
 		return None
 
-	# Always keep any linked ACTION_CARD event silently synchronized in-place (zero STATE_MUTATION pill).
 	_sync_linked_action_cards_in_place(doc)
-
-	if getattr(getattr(doc, "flags", None), "skip_board_projection", False):
-		return None
-	if (doc.get("status") or "").strip() not in ("Open", "In Progress"):
-		return None
-
-	dedup_key = (doc.get("dedup_key") or "").strip()
-	source = (doc.get("source") or "").strip()
-	if dedup_key.startswith(SELF_ECHO_DEDUP_PREFIX) or source in ("Rule Snooze", "Board AI"):
-		return None
-
-	prev = doc.get_doc_before_save() if hasattr(doc, "get_doc_before_save") else None
-	if prev is None:
-		return None
-
-	if (
-		str(prev.get("snoozed_until") or "") != str(doc.get("snoozed_until") or "")
-		or str(prev.get("resolved_at") or "") != str(doc.get("resolved_at") or "")
-		or str(prev.get("resolution_notes") or "") != str(doc.get("resolution_notes") or "")
-	):
-		return None
-
-	title = (doc.get("title") or "").strip()
-	details = (doc.get("details") or "").strip()
-	priority = (doc.get("priority") or "").strip()
-	prev_title = (prev.get("title") or "").strip()
-	prev_details = (prev.get("details") or "").strip()
-	prev_priority = (prev.get("priority") or "").strip()
-	if (title, details, priority) == (prev_title, prev_details, prev_priority):
-		return None
-
-	payload = _build_action_item_projection_payload(doc)
-	payload["is_update"] = True
-	digest = hashlib.sha256(f"{title}\x1f{details}\x1f{priority}".encode("utf-8")).hexdigest()[:12]
-	return project_external_domain_event(
-		"shop_action_item",
-		payload,
-		idempotency_key=f"action_item:{doc.name}:upd:{digest}",
-	)
+	return None
 
 
 __all__ = [

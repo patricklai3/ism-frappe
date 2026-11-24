@@ -582,7 +582,8 @@ class TestCrossTrackSeams(ISMTestCase):
 			1,
 		)
 
-		# 2. P4 quote approval + PIN submit + repeat PIN update (.save()) -> RO:<id> SYSTEM cards
+		# 2. P4 quote approval + PIN submit + repeat PIN opt-out -> Shop Action Items in /cockpit,
+		# ZERO routine STATE_MUTATION events on RO:<id> and ZERO items in /board Action Feed
 		ro, customer, _ = self._create_ro(phone="+14165550905", email="seam5pin@example.test")
 		tkey = ensure_thread_for_ro(ro.name)
 		svc_name = ro.services[0].name
@@ -608,17 +609,17 @@ class TestCrossTrackSeams(ISMTestCase):
 			signature_data=TINY_PNG_DATA_URI,
 		)
 		portal_api.submit_pin_to_drive(repair_order=ro.name, pin="1357")
-		count_after_first_pin = frappe.db.count(
-			"Shop Board Event", {"thread": tkey, "actor_type": "SYSTEM"}
+		self.assertEqual(
+			frappe.db.count("Shop Board Event", {"thread": tkey, "actor_type": "SYSTEM"}),
+			0,
 		)
-		self.assertGreaterEqual(count_after_first_pin, 2)
 
-		# Repeat PIN opt-out edits the existing open Shop Action Item -> projects :upd:<hash> card
+		# Repeat PIN opt-out edits the existing open Shop Action Item -> still ZERO board events
 		portal_api.opt_out_pin_to_drive(repair_order=ro.name)
-		count_after_second_pin = frappe.db.count(
-			"Shop Board Event", {"thread": tkey, "actor_type": "SYSTEM"}
+		self.assertEqual(
+			frappe.db.count("Shop Board Event", {"thread": tkey, "actor_type": "SYSTEM"}),
+			0,
 		)
-		self.assertEqual(count_after_second_pin, count_after_first_pin + 1)
 
 		frappe.set_user("Administrator")
 		ro_sais = frappe.get_all(
@@ -626,28 +627,30 @@ class TestCrossTrackSeams(ISMTestCase):
 			filters={"reference_doctype": "Repair Order", "reference_name": ro.name},
 			fields=["name", "dedup_key"],
 		)
+		self.assertGreaterEqual(len(ro_sais), 2)
 		for row in ro_sais:
 			self._track_action_item_and_events(row["name"])
 
 		pin_sai = next(r for r in ro_sais if "pin" in (r["dedup_key"] or "").lower())
-		upd_events = frappe.get_all(
-			"Shop Board Event",
-			filters={"idempotency_key": ["like", f"action_item:{pin_sai['name']}:upd:%"]},
-			pluck="name",
+		self.assertEqual(
+			frappe.db.count("Shop Board Event", {"thread": tkey, "payload_type": "STATE_MUTATION"}),
+			0,
 		)
-		self.assertEqual(len(upd_events), 1)
 
 		# Identical no-op save produces zero extra board events
 		pin_doc = frappe.get_doc("Shop Action Item", pin_sai["name"])
 		pin_doc.save(ignore_permissions=True)
 		self.assertEqual(
 			frappe.db.count("Shop Board Event", {"thread": tkey, "actor_type": "SYSTEM"}),
-			count_after_second_pin,
+			0,
 		)
 
-		# 3. Cockpit snooze-with-notes and dismiss produce ZERO echo events on /board
+		# 3. Manager /board Action Feed excludes routine portal items while /cockpit keeps them
 		mgr_user = self._create_user_with_roles("seam5_mgr", ["ISM Manager"])
 		frappe.set_user(mgr_user)
+		board_feed = board_api.list_board_action_feed(status="Open", repair_order=ro.name)
+		self.assertEqual(board_feed["items"], [])
+
 		board_api.sync_cockpit_action(
 			dedup_key=pin_sai["dedup_key"],
 			action="snooze",
@@ -661,14 +664,32 @@ class TestCrossTrackSeams(ISMTestCase):
 		)
 		self.assertEqual(
 			frappe.db.count("Shop Board Event", {"thread": tkey, "actor_type": "SYSTEM"}),
-			count_after_second_pin,
+			0,
 		)
 
 	def test_seam6_unmocked_pin_visible_on_billed_paid_and_purged_on_closed_released(self) -> None:
 		tech_user = self._create_user_with_roles("seam6_tech", ["ISM Technician"])
+		tech_emp = frappe.get_doc({
+			"doctype": "Employee",
+			"first_name": "Seam6 Tech",
+			"employee_name": "Seam6 Tech",
+			"status": "Active",
+			"designation": "Technician",
+			"company": self.get_manifest().company,
+			"gender": "Male",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"user_id": tech_user,
+		}).insert(ignore_permissions=True)
+		self.track(tech_emp)
 		unauth_user = self._create_user_with_roles("seam6_guest", ["Guest"])
 		phone = "+14165550906"
 		ro, customer, _ = self._create_ro(phone=phone, email="seam6@example.test")
+		self.create_test_schedule_entry(
+			repair_order=ro.name,
+			assigned_technician=tech_emp.name,
+			status="Confirmed",
+		)
 		tkey = ensure_thread_for_ro(ro.name)
 		svc_name = ro.services[0].name
 

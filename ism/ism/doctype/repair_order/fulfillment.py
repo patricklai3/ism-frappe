@@ -201,6 +201,90 @@ def sync_ro_schedule_entries(ro, exclude_entry=None) -> None:
 	ro.set("schedule_entries", rows)
 
 
+def _as_bool(value: Any) -> bool:
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, (int, float)):
+		return bool(value)
+	if isinstance(value, str):
+		return value.strip().lower() in ("1", "true", "yes", "on")
+	return False
+
+
+def _parse_and_validate_odometer_out(ro, odometer_out: Any, *, required: bool) -> Optional[int]:
+	"""Validate and parse odometer_out against ro.odometer_in."""
+	is_blank = odometer_out is None or (isinstance(odometer_out, str) and not odometer_out.strip())
+	if is_blank:
+		if required:
+			frappe.throw(
+				_("Odometer Out is mandatory when parking the vehicle in the lot."),
+				frappe.MandatoryError,
+			)
+		return None
+
+	if isinstance(odometer_out, bool):
+		frappe.throw(_("Odometer Out must be a valid integer."), frappe.ValidationError)
+
+	if isinstance(odometer_out, int):
+		parsed_odo = odometer_out
+	elif isinstance(odometer_out, float):
+		if not odometer_out.is_integer():
+			frappe.throw(_("Odometer Out must be a whole number."), frappe.ValidationError)
+		parsed_odo = int(odometer_out)
+	elif isinstance(odometer_out, str):
+		raw = odometer_out.strip()
+		try:
+			num = float(raw)
+		except ValueError:
+			frappe.throw(_("Odometer Out must be a valid integer."), frappe.ValidationError)
+		if not num.is_integer():
+			frappe.throw(_("Odometer Out must be a whole number."), frappe.ValidationError)
+		parsed_odo = int(num)
+	else:
+		frappe.throw(_("Odometer Out must be a valid integer."), frappe.ValidationError)
+
+	if parsed_odo < 0:
+		frappe.throw(_("Odometer Out cannot be negative."), frappe.ValidationError)
+
+	odo_in = cint(ro.odometer_in or 0)
+	if parsed_odo < odo_in:
+		frappe.throw(
+			_("Odometer Out ({0}) cannot be less than Odometer In ({1}).").format(parsed_odo, odo_in),
+			frappe.ValidationError,
+		)
+
+	return parsed_odo
+
+
+def _publish_ro_execution_updated(ro, action: str) -> None:
+	"""Emit targeted ism_ro_execution_updated realtime event to authorized recipients only."""
+	from ism.permissions import get_realtime_recipients_for_ro
+
+	approved_services = [s for s in (ro.services or []) if s.status == "Approved"]
+	completed_count = sum(1 for s in approved_services if cint(s.is_completed))
+	payload = {
+		"repair_order": ro.name,
+		"action": action,
+		"status": ro.status,
+		"vehicle_location": ro.vehicle_location,
+		"progress_percent": flt(ro.progress_percent or 0.0, 1),
+		"approved_count": len(approved_services),
+		"completed_count": completed_count,
+		"odometer_in": cint(ro.odometer_in or 0),
+		"odometer_out": cint(ro.odometer_out or 0) if ro.odometer_out is not None and ro.odometer_out != "" else None,
+		"picked_up_at": str(ro.picked_up_at) if ro.picked_up_at else None,
+		"parked_at": str(ro.parked_at) if ro.parked_at else None,
+		"total_bay_hours": flt(ro.total_bay_hours or 0.0, 2),
+	}
+	for recipient in get_realtime_recipients_for_ro(ro.name):
+		frappe.publish_realtime(
+			"ism_ro_execution_updated",
+			payload,
+			user=recipient,
+			after_commit=True,
+		)
+
+
 def pick_up_ro_vehicle(ro) -> Dict[str, Any]:
 	"""Technician pulls vehicle from lot into service bay."""
 	ro.check_permission("write")
@@ -230,22 +314,37 @@ def pick_up_ro_vehicle(ro) -> Dict[str, Any]:
 		ro.status = "Authorized - In Progress"
 
 	ro.save()
+	_publish_ro_execution_updated(ro, "pick_up")
 	return {"status": "success", "vehicle_location": ro.vehicle_location, "picked_up_at": ro.picked_up_at}
 
 
-def park_ro_vehicle(ro) -> Dict[str, Any]:
-	"""Technician parks vehicle back in lot."""
+def park_ro_vehicle(ro, odometer_out=None, require_odometer=False, temporary=False) -> Dict[str, Any]:
+	"""Technician parks vehicle back in lot (final drop-off or temporary mid-job park)."""
 	ro.check_permission("write")
+	parsed_odo = _parse_and_validate_odometer_out(
+		ro,
+		odometer_out,
+		required=_as_bool(require_odometer),
+	)
+	is_temporary = _as_bool(temporary)
+
 	prev_status = ro.status
 	ro.parked_at = now_datetime()
 	ro.parked_by = frappe.session.user
+	if parsed_odo is not None:
+		ro.odometer_out = parsed_odo
 	if ro.picked_up_at:
 		ro.total_bay_hours = flt(time_diff_in_hours(ro.parked_at, ro.picked_up_at), 2)
 
 	has_approved = any(s.status == "Approved" for s in ro.services)
 	has_pending = any(s.status in ["Draft", "Estimating", "Pending Approval"] for s in ro.services)
 	approved_services = [s for s in ro.services if s.status == "Approved"]
-	all_approved_completed = bool(has_approved and not has_pending and all(s.is_completed for s in approved_services))
+	all_approved_completed = bool(
+		not is_temporary
+		and has_approved
+		and not has_pending
+		and all(s.is_completed for s in approved_services)
+	)
 
 	if all_approved_completed:
 		ro.vehicle_location = "Completed / Parked in Lot"
@@ -256,9 +355,30 @@ def park_ro_vehicle(ro) -> Dict[str, Any]:
 			ro.status = "Authorized - In Progress"
 
 	ro.save()
-	if prev_status != "Work Completed" and ro.status == "Work Completed":
+
+	if not is_temporary and prev_status != "Work Completed" and ro.status == "Work Completed":
+		complete_linked_schedule_entries(ro.name, ignore_permissions=True)
 		_maybe_send_ready_for_pickup_sms(ro)
-	return {"status": "success", "vehicle_location": ro.vehicle_location, "total_bay_hours": ro.total_bay_hours}
+	elif (is_temporary or ro.status != "Work Completed") and parsed_odo is not None:
+		ro.add_comment(
+			"Comment",
+			_("Temporary lot park recorded by {0} (Odometer Out: {1} km).").format(
+				frappe.session.user,
+				parsed_odo,
+			),
+		)
+
+	_publish_ro_execution_updated(
+		ro,
+		"park_complete" if (not is_temporary and ro.status == "Work Completed") else "park_temporary",
+	)
+	return {
+		"status": "success",
+		"vehicle_location": ro.vehicle_location,
+		"total_bay_hours": ro.total_bay_hours,
+		"odometer_out": ro.odometer_out,
+		"order_status": ro.status,
+	}
 
 
 def toggle_ro_service_completion(ro, service_row_id=None, is_completed=None, **kwargs) -> Dict[str, Any]:
@@ -323,20 +443,29 @@ def toggle_ro_service_completion(ro, service_row_id=None, is_completed=None, **k
 
 	ro.save()
 	if prev_status != "Work Completed" and ro.status == "Work Completed":
+		complete_linked_schedule_entries(ro.name, ignore_permissions=True)
 		_maybe_send_ready_for_pickup_sms(ro)
+	_publish_ro_execution_updated(ro, "toggle_service")
 	return {"status": "success", "progress_percent": ro.progress_percent}
 
 
-def complete_linked_schedule_entries(ro_name) -> List[str]:
+def complete_linked_schedule_entries(ro_name, ignore_permissions: bool = False) -> List[str]:
 	"""Mark non-cancelled Schedule Entries for a completed/released Repair Order as Completed."""
 	if not ro_name or not frappe.db.exists("DocType", "Schedule Entry"):
 		return []
-	frappe.has_permission("Schedule Entry", "write", throw=True)
-	open_entries = frappe.get_list(
-		"Schedule Entry",
-		filters={"repair_order": ro_name, "status": ["in", ["Draft", "Scheduled", "Confirmed", "In Progress"]]},
-		pluck="name",
-	)
+	if not ignore_permissions:
+		frappe.has_permission("Schedule Entry", "write", throw=True)
+		open_entries = frappe.get_list(
+			"Schedule Entry",
+			filters={"repair_order": ro_name, "status": ["in", ["Draft", "Scheduled", "Confirmed", "In Progress"]]},
+			pluck="name",
+		)
+	else:
+		open_entries = frappe.get_all(
+			"Schedule Entry",
+			filters={"repair_order": ro_name, "status": ["in", ["Draft", "Scheduled", "Confirmed", "In Progress"]]},
+			pluck="name",
+		)
 	if not open_entries:
 		return []
 
@@ -347,6 +476,7 @@ def complete_linked_schedule_entries(ro_name) -> List[str]:
 	frappe.publish_realtime(
 		"ism_calendar_update",
 		{"repair_order": ro_name, "schedule_entries": list(open_entries), "action": "bulk_complete"},
+		after_commit=True,
 	)
 	return open_entries
 
@@ -623,6 +753,8 @@ def _notify_ro_parts_ready(ro) -> None:
 		item_doc.title = title
 		item_doc.priority = "High"
 		item_doc.details = details
+		if not (item_doc.dedup_key or "").strip():
+			item_doc.dedup_key = f"parts_ready:{ro.name}"
 		item_doc.clearing_condition_type = clearing_type
 		item_doc.clearing_condition_json = clearing_json
 		item_doc.save(ignore_permissions=True)
@@ -632,6 +764,7 @@ def _notify_ro_parts_ready(ro) -> None:
 		item_doc.category = "Inventory / Parts"
 		item_doc.priority = "High"
 		item_doc.status = "Open"
+		item_doc.dedup_key = f"parts_ready:{ro.name}"
 		item_doc.reference_doctype = "Repair Order"
 		item_doc.reference_name = ro.name
 		item_doc.details = details

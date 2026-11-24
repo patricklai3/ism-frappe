@@ -27,6 +27,8 @@ from ism.board.contracts import (
 	ACTION_CARD_PRIORITIES,
 	BOARD_STATUSES,
 	CAPTURE_LOCKED_RO_STATUSES,
+	is_routine_system_action_item,
+	parse_ro_from_thread_key,
 	ro_thread_key,
 )
 from ism.board.gateways import (
@@ -46,6 +48,11 @@ from ism.board.projections import (
 from ism.ism.doctype.shop_action_item.clearing import (
 	CLEARING_CONDITION_DESCRIPTIONS,
 	sweep_open_action_items,
+)
+from ism.permissions import (
+	assert_can_access_ro,
+	get_eligible_ro_names_for_employee,
+	get_employee_for_user,
 )
 from ism.utils.vehicle_display import (
 	build_vehicle_display_dict,
@@ -171,10 +178,30 @@ def _clearing_description_from_row(row: dict[str, Any]) -> tuple[str, dict[str, 
 	return ctype, enriched, desc
 
 
+def _fetch_exception_counts_map(thread_keys: list[str]) -> dict[str, int]:
+	unique_keys = list(dict.fromkeys(k for k in thread_keys if k))
+	if not unique_keys:
+		return {}
+	placeholders = ", ".join(["%s"] * len(unique_keys))
+	rows = frappe.db.sql(
+		f"""
+		SELECT thread, COUNT(*) AS cnt
+		FROM `tabShop Board Event`
+		WHERE thread IN ({placeholders})
+		  AND IFNULL(payload_type, '') != 'STATE_MUTATION'
+		GROUP BY thread
+		""",
+		tuple(unique_keys),
+		as_dict=True,
+	)
+	return {str(r["thread"]): cint(r["cnt"]) for r in rows if r.get("thread")}
+
+
 def _serialize_thread(
 	row: dict[str, Any] | Any,
 	*,
 	vehicle_map: dict[str, dict[str, Any]] | None = None,
+	exception_event_count: int | None = None,
 ) -> dict[str, Any]:
 	get = row.get if isinstance(row, dict) else lambda k, d=None: getattr(row, k, d)
 	thread_key = get("thread_key") or get("name")
@@ -194,6 +221,11 @@ def _serialize_thread(
 			fallback=stored_display or vehicle_name or vin,
 		)
 	vehicle_display = v_info.get("display") or stored_display or ""
+	exc_count = (
+		cint(exception_event_count)
+		if exception_event_count is not None
+		else cint(get("exception_event_count") or 0)
+	)
 	return {
 		"name": thread_key,
 		"thread_key": thread_key,
@@ -217,6 +249,7 @@ def _serialize_thread(
 		"blocked_since": str(get("blocked_since")) if get("blocked_since") else None,
 		"open_action_count": cint(get("open_action_count")),
 		"open_action_card_ids": _parse_json_safe(get("open_action_card_ids"), []),
+		"exception_event_count": exc_count,
 		"last_event_at": str(get("last_event_at")) if get("last_event_at") else None,
 		"last_event_preview": get("last_event_preview") or "",
 		"projection_version": cint(get("projection_version") or 1),
@@ -418,6 +451,15 @@ def _get_ro_summary(repair_order: str | None) -> dict[str, Any] | None:
 		if ro.vehicle
 		else build_vehicle_display_dict(None)
 	) or build_vehicle_display_dict(None, fallback=ro.vehicle)
+
+	svc_rows = frappe.get_all(
+		"Repair Order Service",
+		filters={"parent": ro.name, "parenttype": "Repair Order", "status": "Approved"},
+		fields=["is_completed"],
+	)
+	approved_count = len(svc_rows)
+	completed_count = sum(1 for s in svc_rows if cint(s.get("is_completed")))
+
 	return {
 		"name": ro.name,
 		"status": ro.status,
@@ -426,9 +468,13 @@ def _get_ro_summary(repair_order: str | None) -> dict[str, Any] | None:
 		"vehicle": ro.vehicle,
 		"vehicle_display": v_info.get("display") or "",
 		"vehicle_compact_display": v_info.get("compact_display") or "",
+		"vehicle_color": v_info.get("color") or "",
+		"license_plate": v_info.get("license_plate") or "",
 		"vehicle_info": v_info,
 		"odometer_in": ro.odometer_in,
 		"odometer_out": ro.odometer_out,
+		"approved_count": approved_count,
+		"completed_count": completed_count,
 		"progress_percent": flt(ro.progress_percent, 1),
 		"manual_parts_hold": cint(ro.manual_parts_hold),
 		"payment_status": ro.payment_status,
@@ -591,8 +637,23 @@ def list_board_threads(
 			conditions.append("board_status = %s")
 			values.append(clean_status)
 
-	if only_assigned:
-		emp_name = frappe.db.get_value("Employee", {"user_id": caller_user}, "name")
+	if actor_role == "TECH":
+		emp_name = get_employee_for_user(caller_user)
+		eligible_ros = sorted(get_eligible_ro_names_for_employee(emp_name)) if emp_name else []
+		if not eligible_ros:
+			return {
+				"ok": True,
+				"actor_role": actor_role,
+				"can_manage": False,
+				"can_approve": False,
+				"threads": [],
+				"count": 0,
+			}
+		placeholders = ", ".join(["%s"] * len(eligible_ros))
+		conditions.append(f"repair_order IN ({placeholders})")
+		values.extend(eligible_ros)
+	elif only_assigned:
+		emp_name = get_employee_for_user(caller_user)
 		if not emp_name:
 			return {
 				"ok": True,
@@ -624,25 +685,36 @@ def list_board_threads(
 	where_sql = " AND ".join(conditions)
 	values.append(safe_limit)
 	vehicle_display_select = ", vehicle_display" if has_vehicle_display_col else ""
-	rows = frappe.db.sql(
-		f"""
-		SELECT name, thread_key, thread_type, title, repair_order, vehicle, vin{vehicle_display_select}, customer,
-		       bay, assigned_technician, board_status, blocked_reason, blocked_since,
-		       open_action_count, open_action_card_ids, last_event_at, last_event_preview,
-		       projection_version
-		FROM `tabShop Board Thread`
-		WHERE {where_sql}
-		ORDER BY
-		    open_action_count DESC,
-		    COALESCE(last_event_at, modified) DESC
-		LIMIT %s
-		""",
-		tuple(values),
-		as_dict=True,
-	)
+	with _as_system_user():
+		rows = frappe.db.sql(
+			f"""
+			SELECT name, thread_key, thread_type, title, repair_order, vehicle, vin{vehicle_display_select}, customer,
+			       bay, assigned_technician, board_status, blocked_reason, blocked_since,
+			       open_action_count, open_action_card_ids, last_event_at, last_event_preview,
+			       projection_version
+			FROM `tabShop Board Thread`
+			WHERE {where_sql}
+			ORDER BY
+			    open_action_count DESC,
+			    COALESCE(last_event_at, modified) DESC
+			LIMIT %s
+			""",
+			tuple(values),
+			as_dict=True,
+		)
+		vehicle_map = get_vehicle_display_map([r.get("vehicle") for r in rows if r.get("vehicle")])
+		exc_count_map = _fetch_exception_counts_map(
+			[r.get("thread_key") or r.get("name") for r in rows if r.get("thread_key") or r.get("name")]
+		)
 
-	vehicle_map = get_vehicle_display_map([r.get("vehicle") for r in rows if r.get("vehicle")])
-	threads = [_serialize_thread(r, vehicle_map=vehicle_map) for r in rows]
+	threads = [
+		_serialize_thread(
+			r,
+			vehicle_map=vehicle_map,
+			exception_event_count=exc_count_map.get(str(r.get("thread_key") or r.get("name") or ""), 0),
+		)
+		for r in rows
+	]
 	return {
 		"ok": True,
 		"actor_role": actor_role,
@@ -662,6 +734,7 @@ def get_board_thread(
 ) -> dict[str, Any]:
 	"""Return an active-RO thread's projection, paginated chronological timeline, live hydrated ACTION_CARDs, and Seam 6 pin_state."""
 	actor_role = resolve_actor_role()
+	caller_user = frappe.session.user
 	safe_limit = optional_int(limit, "limit", min_val=1, max_val=500, default=100)
 	clean_before = optional_str(before_event, "before_event")
 
@@ -670,7 +743,12 @@ def get_board_thread(
 			thread_key=optional_str(thread_key, "thread_key"),
 			repair_order=optional_str(repair_order, "repair_order"),
 		)
+		ro_candidate = parse_ro_from_thread_key(canonical_key) or optional_str(repair_order, "repair_order")
+		assert_can_access_ro(ro_candidate, user=caller_user)
+
 		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
+		if thread_doc.repair_order and thread_doc.repair_order != ro_candidate:
+			assert_can_access_ro(thread_doc.repair_order, user=caller_user)
 
 		if thread_doc.repair_order:
 			try:
@@ -683,7 +761,7 @@ def get_board_thread(
 		event_fields = _get_event_fields()
 		cols_sql = ", ".join(event_fields)
 
-		conditions = ["thread = %s"]
+		conditions = ["thread = %s", "IFNULL(payload_type, '') != 'STATE_MUTATION'"]
 		values: list[Any] = [canonical_key]
 		if clean_before:
 			ref = frappe.db.get_value(
@@ -727,7 +805,12 @@ def get_board_thread(
 
 		action_items_map = _fetch_action_items_map(page_rows + open_card_rows)
 		thread_vehicle_map = get_vehicle_display_map([thread_doc.vehicle]) if thread_doc.vehicle else {}
-		serialized_thread = _serialize_thread(thread_doc, vehicle_map=thread_vehicle_map)
+		exc_count = _fetch_exception_counts_map([canonical_key]).get(canonical_key, 0)
+		serialized_thread = _serialize_thread(
+			thread_doc,
+			vehicle_map=thread_vehicle_map,
+			exception_event_count=exc_count,
+		)
 		thread_vehicle_info = serialized_thread.get("vehicle_info")
 		events = [
 			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
@@ -771,6 +854,7 @@ def get_thread_delta(
 ) -> dict[str, Any]:
 	"""Return incremental events, updated ACTION_CARDs, completed transcripts, and projection state."""
 	actor_role = resolve_actor_role()
+	caller_user = frappe.session.user
 	known_ver = optional_int(known_projection_version, "known_projection_version", min_val=0, default=0)
 	clean_after = optional_str(after_event, "after_event")
 
@@ -779,7 +863,12 @@ def get_thread_delta(
 			thread_key=optional_str(thread_key, "thread_key"),
 			repair_order=optional_str(repair_order, "repair_order"),
 		)
+		ro_candidate = parse_ro_from_thread_key(canonical_key) or optional_str(repair_order, "repair_order")
+		assert_can_access_ro(ro_candidate, user=caller_user)
+
 		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
+		if thread_doc.repair_order and thread_doc.repair_order != ro_candidate:
+			assert_can_access_ro(thread_doc.repair_order, user=caller_user)
 
 		if thread_doc.repair_order:
 			try:
@@ -792,7 +881,7 @@ def get_thread_delta(
 		event_fields = _get_event_fields()
 		cols_sql = ", ".join(event_fields)
 
-		conditions = ["thread = %s"]
+		conditions = ["thread = %s", "IFNULL(payload_type, '') != 'STATE_MUTATION'"]
 		values: list[Any] = [canonical_key]
 		if clean_after:
 			ref = frappe.db.get_value(
@@ -884,6 +973,7 @@ def get_thread_delta(
 					filters={
 						"thread": canonical_key,
 						"name": ["in", parent_ids],
+						"payload_type": ["!=", "STATE_MUTATION"],
 					},
 					fields=event_fields,
 				)
@@ -902,7 +992,12 @@ def get_thread_delta(
 
 		action_items_map = _fetch_action_items_map(raw_rows + open_card_rows + ordered_updated_rows)
 		thread_vehicle_map = get_vehicle_display_map([thread_doc.vehicle]) if thread_doc.vehicle else {}
-		serialized_thread = _serialize_thread(thread_doc, vehicle_map=thread_vehicle_map)
+		exc_count = _fetch_exception_counts_map([canonical_key]).get(canonical_key, 0)
+		serialized_thread = _serialize_thread(
+			thread_doc,
+			vehicle_map=thread_vehicle_map,
+			exception_event_count=exc_count,
+		)
 		thread_vehicle_info = serialized_thread.get("vehicle_info")
 		new_events = [
 			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
@@ -966,22 +1061,28 @@ def post_board_capture(
 			thread_key=optional_str(thread_key, "thread_key"),
 			repair_order=optional_str(repair_order, "repair_order"),
 		)
+		ro_candidate = parse_ro_from_thread_key(canonical_key) or optional_str(repair_order, "repair_order")
+		assert_can_access_ro(ro_candidate, user=caller_user)
+
+		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
+		if thread_doc.repair_order and thread_doc.repair_order != ro_candidate:
+			assert_can_access_ro(thread_doc.repair_order, user=caller_user)
 
 		# Idempotency short-circuit before storing media or creating events
 		if clean_idem:
 			existing_name = frappe.db.get_value("Shop Board Event", {"idempotency_key": clean_idem}, "name")
 			if existing_name:
 				existing_doc = frappe.get_doc("Shop Board Event", existing_name)
-				thread_doc = frappe.get_doc("Shop Board Thread", existing_doc.thread)
+				existing_thread = frappe.get_doc("Shop Board Thread", existing_doc.thread)
+				if existing_thread.repair_order:
+					assert_can_access_ro(existing_thread.repair_order, user=caller_user)
 				return {
 					"ok": True,
 					"duplicate": True,
 					"event": _serialize_event(existing_doc),
-					"thread": _serialize_thread(thread_doc),
+					"thread": _serialize_thread(existing_thread),
 					"ai_enqueued": False,
 				}
-
-		thread_doc = frappe.get_doc("Shop Board Thread", canonical_key)
 
 		ro_status = (
 			frappe.db.get_value("Repair Order", thread_doc.repair_order, "status")
@@ -1100,6 +1201,7 @@ def list_board_action_feed(
 ) -> dict[str, Any]:
 	"""Sweep clearing conditions and return enriched active-RO Shop Action Items for the /board Action Feed."""
 	actor_role = resolve_actor_role()
+	caller_user = frappe.session.user
 	clean_status = optional_str(status, "status") or "Open"
 	clean_ro = optional_str(repair_order, "repair_order")
 	clean_prio = optional_str(priority, "priority")
@@ -1112,6 +1214,19 @@ def list_board_action_feed(
 			),
 			frappe.ValidationError,
 		)
+
+	eligible_ros: set[str] | None = None
+	if actor_role == "TECH":
+		emp_name = get_employee_for_user(caller_user)
+		eligible_ros = get_eligible_ro_names_for_employee(emp_name) if emp_name else set()
+		if not eligible_ros or (clean_ro and clean_ro not in eligible_ros):
+			return {
+				"ok": True,
+				"actor_role": actor_role,
+				"can_manage": False,
+				"count": 0,
+				"items": [],
+			}
 
 	with _as_system_user():
 		try:
@@ -1131,16 +1246,22 @@ def list_board_action_feed(
 
 		if clean_ro:
 			filters["reference_name"] = clean_ro
+		elif eligible_ros is not None:
+			filters["reference_name"] = ["in", sorted(eligible_ros)]
 		if clean_prio:
 			filters["priority"] = clean_prio
 
+		fetch_limit = max(safe_limit * 4, 200)
 		rows = frappe.get_all(
 			"Shop Action Item",
 			filters=filters,
 			fields=_get_action_item_fields(),
 			order_by="creation desc",
-			limit_page_length=safe_limit,
+			limit_page_length=fetch_limit,
 		)
+
+		# Exceptions-only Action Feed for ALL roles (routine approvals, PINs, Square payments, parts-ready live in /cockpit)
+		rows = [r for r in rows if not is_routine_system_action_item(r)]
 
 		# For Open feed without explicit RO, ensure linked ROs are active (not closed/cancelled)
 		if status_lower == "open" and not clean_ro and rows:
@@ -1159,6 +1280,7 @@ def list_board_action_feed(
 				if locked_ros:
 					rows = [r for r in rows if r.get("reference_name") not in locked_ros]
 
+		rows = rows[:safe_limit]
 		items = [_serialize_action_feed_item(r) for r in rows]
 
 	return {
@@ -1352,11 +1474,14 @@ def get_media(event_name: str, file_ref: str):
 	event_row = frappe.db.get_value(
 		"Shop Board Event",
 		clean_event,
-		["name", "media_attachments"],
+		["name", "thread", "repair_order", "media_attachments"],
 		as_dict=True,
 	)
 	if not event_row:
 		frappe.throw(_("Board event not found."), frappe.PermissionError)
+	ro_name = event_row.repair_order or parse_ro_from_thread_key(event_row.thread)
+	assert_can_access_ro(ro_name, user=caller_user)
+
 	media_refs = _parse_json_safe(event_row.media_attachments, [])
 	req = _get_bound_request()
 	range_header = req.headers.get("Range") if (req is not None and getattr(req, "headers", None)) else None
@@ -1375,6 +1500,7 @@ def reveal_ro_pin(repair_order: str) -> dict[str, Any]:
 	"""Seam 6 optional staff-only PIN-to-Drive reveal delegating to Project 4 pin_vault."""
 	resolve_actor_role()
 	clean_ro = require_str(repair_order, "repair_order")
+	assert_can_access_ro(clean_ro, user=frappe.session.user)
 
 	try:
 		from ism.portal.pin_vault import get_ro_pin_for_staff

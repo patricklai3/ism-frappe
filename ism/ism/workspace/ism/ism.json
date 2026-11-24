@@ -183,6 +183,12 @@
    "label": "Shop Cockpit",
    "type": "URL",
    "url": "/cockpit"
+  },
+  {
+   "color": "Purple",
+   "label": "Technician Workbench",
+   "type": "URL",
+   "url": "/tech"
   }
  ],
  "title": "ISM"

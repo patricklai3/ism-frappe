@@ -60,9 +60,9 @@ app_include_js = "/assets/ism/shared/vehicle_display.js"
 # home_page = "login"
 
 # website user home page (by Role)
-# role_home_page = {
-# 	"Role": "home_page"
-# }
+role_home_page = {
+	"ISM Technician": "tech",
+}
 
 # Generators
 # ----------
@@ -126,19 +126,29 @@ after_install = "ism.setup.after_install"
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+permission_query_conditions = {
+	"Repair Order": "ism.permissions.repair_order_permission_query_conditions",
+	"Schedule Entry": "ism.permissions.schedule_entry_permission_query_conditions",
+	"Shop Board Thread": "ism.permissions.shop_board_thread_permission_query_conditions",
+	"Shop Board Event": "ism.permissions.shop_board_event_permission_query_conditions",
+	"Shop Action Item": "ism.permissions.shop_action_item_permission_query_conditions",
+}
+
+has_permission = {
+	"Repair Order": "ism.permissions.repair_order_has_permission",
+	"Schedule Entry": "ism.permissions.schedule_entry_has_permission",
+	"Shop Board Thread": "ism.permissions.shop_board_thread_has_permission",
+	"Shop Board Event": "ism.permissions.shop_board_event_has_permission",
+	"Shop Action Item": "ism.permissions.shop_action_item_has_permission",
+}
 
 after_migrate = "ism.setup.after_migrate"
 
 website_route_rules = [
 	{"from_route": "/quote-approval", "to_route": "quote_approval"},
 	{"from_route": "/portal", "to_route": "portal"},
+	{"from_route": "/tech/<ro_name>", "to_route": "tech"},
+	{"from_route": "/tech", "to_route": "tech"},
 	{"from_route": "/board/<thread_key>", "to_route": "board"},
 	{"from_route": "/board", "to_route": "board"},
 	{"from_route": "/cockpit", "to_route": "cockpit"},

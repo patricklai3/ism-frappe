@@ -582,6 +582,25 @@ function renderAndonHeader() {
 	if (state.roSummary && state.roSummary.status) {
 		chipHtml.push(`<span class="meta-chip">${escapeHtml(state.roSummary.status)}</span>`);
 	}
+	if (state.roSummary) {
+		const locRaw = String(state.roSummary.vehicle_location || "");
+		const locShort =
+			locRaw === "In Bay / Being Serviced"
+				? "In Bay"
+				: locRaw === "In Customer Lot"
+				? "In Lot"
+				: locRaw === "Completed / Parked in Lot"
+				? "Parked (Done)"
+				: locRaw;
+		const approvedCnt =
+			state.roSummary.approved_count ?? state.roSummary.total_services ?? null;
+		const completedCnt =
+			state.roSummary.completed_count ?? state.roSummary.completed_services ?? null;
+		const hasTasks = approvedCnt !== null && Number(approvedCnt) >= 0;
+		const taskPart = hasTasks ? `${Number(completedCnt || 0)}/${Number(approvedCnt)} tasks` : "";
+		const execLabel = [locShort, taskPart].filter(Boolean).join(" · ");
+		if (execLabel) chipHtml.push(`<span class="meta-chip">${escapeHtml(execLabel)}</span>`);
+	}
 	if (t.vin) {
 		chipHtml.push(
 			`<span class="meta-chip meta-chip--vin" title="${escapeHtml(`VIN: ${t.vin}`)}">${escapeHtml(`VIN: ${t.vin}`)}</span>`
@@ -1136,6 +1155,12 @@ function init() {
 			}
 		},
 		onThreadSummary: (payload) => {
+			if (
+				boot.actor_role === "TECH" &&
+				(!boot.tech_id || !payload || payload.assigned_technician !== boot.tech_id)
+			) {
+				return;
+			}
 			upsertThreadSummary(payload);
 		},
 		onCatchUpSync: () => {

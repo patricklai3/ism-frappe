@@ -708,6 +708,20 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 		svc_name = ro.services[0].name
 		ro_token, _ = get_or_create_approval_token(ro.name)
 		tech_user = self._create_user_with_role("portal_tech", "ISM Technician")
+		tech_emp = frappe.get_doc({
+			"doctype": "Employee",
+			"first_name": "Portal Tech",
+			"employee_name": "Portal Tech",
+			"status": "Active",
+			"designation": "Technician",
+			"company": self.get_manifest().company,
+			"gender": "Male",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"user_id": tech_user,
+		}).insert(ignore_permissions=True)
+		self.track(tech_emp)
+		ro.services[0].db_set("assigned_technician", tech_emp.name, update_modified=False)
 
 		frappe.set_user("Guest")
 		try:
@@ -790,6 +804,20 @@ class TestPortalVisitHubAndFeatures(ISMTestCase):
 		booking_url = create_booking_portal_link(se.name)
 		booking_token = parse_qs(urlparse(booking_url).query)["booking_token"][0]
 		tech_user = self._create_user_with_role("portal_se_tech", "ISM Technician")
+		tech_emp = frappe.get_doc({
+			"doctype": "Employee",
+			"first_name": "Portal SE Tech",
+			"employee_name": "Portal SE Tech",
+			"status": "Active",
+			"designation": "Technician",
+			"company": self.get_manifest().company,
+			"gender": "Male",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"user_id": tech_user,
+		}).insert(ignore_permissions=True)
+		self.track(tech_emp)
+		se.db_set("assigned_technician", tech_emp.name, update_modified=False)
 
 		frappe.set_user("Guest")
 		try:

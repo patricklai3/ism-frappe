@@ -62,7 +62,7 @@ def get_context(context):
 
 	roles = sorted(set(frappe.get_roles(user)))
 	if user != "Administrator" and not (set(roles) & ALLOWED_COCKPIT_ROLES):
-		frappe.local.flags.redirect_location = "/board"
+		frappe.local.flags.redirect_location = "/tech"
 		raise frappe.Redirect
 
 	full_name = frappe.utils.get_fullname(user) or user

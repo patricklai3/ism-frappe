@@ -120,6 +120,26 @@ SUGGESTED_ACTION_TO_CLEARING_CONDITION: dict[str, str] = {
 
 SELF_ECHO_DEDUP_PREFIX = "board:"
 
+ROUTINE_SYSTEM_ACTION_DEDUP_PREFIXES: tuple[str, ...] = (
+	"portal:approval:",
+	"portal:pin:",
+	"square:",
+	"self_serve_booking:",
+	"self_serve_reschedule:",
+	"scheduling_event:",
+	"parts_ready:",
+)
+
+ROUTINE_SYSTEM_ACTION_TITLE_PREFIXES: tuple[str, ...] = (
+	"Parts Ready for ",
+	"Customer Approved Estimate for ",
+	"Customer Partially Approved Estimate for ",
+	"Customer Declined Estimate for ",
+	"Customer Provided Vehicle PIN-to-Drive for ",
+	"Customer Opted Out of PIN-to-Drive for ",
+	"Vehicle PIN-to-Drive Status Updated for ",
+)
+
 IMMUTABLE_EVENT_FIELDS: tuple[str, ...] = (
 	"thread",
 	"thread_type",
@@ -238,6 +258,34 @@ def validate_action_card(card: dict[str, Any]) -> dict[str, Any]:
 	return result
 
 
+def is_routine_system_action_item(doc_or_row: Any) -> bool:
+	"""Return True iff a Shop Action Item doc/row represents routine system operations noise.
+
+	Routine system operations (portal approvals, PIN submissions/opt-outs, Square payments,
+	self-serve bookings/reschedules, and parts-ready notices) belong in /cockpit rather than
+	the exception-only Shop Board timeline or /board Action Feed.
+	"""
+	if doc_or_row is None:
+		return False
+
+	if isinstance(doc_or_row, dict):
+		raw_dedup = doc_or_row.get("dedup_key")
+		raw_title = doc_or_row.get("title")
+	else:
+		raw_dedup = getattr(doc_or_row, "dedup_key", None)
+		raw_title = getattr(doc_or_row, "title", None)
+
+	dedup_key = str(raw_dedup or "").strip().lower()
+	if dedup_key and any(dedup_key.startswith(prefix) for prefix in ROUTINE_SYSTEM_ACTION_DEDUP_PREFIXES):
+		return True
+
+	title = str(raw_title or "").strip()
+	if title and any(title.startswith(prefix) for prefix in ROUTINE_SYSTEM_ACTION_TITLE_PREFIXES):
+		return True
+
+	return False
+
+
 __all__ = [
 	"ACTION_CARD_CATEGORIES",
 	"ACTION_CARD_PRIORITIES",
@@ -250,11 +298,14 @@ __all__ = [
 	"IMMUTABLE_EVENT_FIELDS",
 	"PAYLOAD_TYPES",
 	"RESOLUTION_STATES",
+	"ROUTINE_SYSTEM_ACTION_DEDUP_PREFIXES",
+	"ROUTINE_SYSTEM_ACTION_TITLE_PREFIXES",
 	"SELF_ECHO_DEDUP_PREFIX",
 	"SUGGESTED_ACTION_TO_CLEARING_CONDITION",
 	"TARGET_ROLES",
 	"THREAD_TYPES",
 	"BoardContractError",
+	"is_routine_system_action_item",
 	"parse_ro_from_thread_key",
 	"ro_thread_key",
 	"validate_action_card",

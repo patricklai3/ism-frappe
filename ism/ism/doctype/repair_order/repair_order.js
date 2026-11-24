@@ -1495,17 +1495,47 @@ frappe.ui.form.on("Repair Order", {
 				}, __("Workshop"));
 			} else {
 				frm.add_custom_button(__("🅿 Park Vehicle"), () => {
-					frm.call({
-						method: "park_vehicle",
-						doc: frm.doc,
-						freeze: true,
-						callback: (r) => {
-							if (!r.exc) {
-								frappe.show_alert({ message: __("Vehicle parked in lot."), indicator: "green" });
-								frm.reload_doc();
+					const min_odo = cint(frm.doc.odometer_in || 0);
+					frappe.prompt(
+						[
+							{
+								fieldname: "odometer_out",
+								fieldtype: "Int",
+								label: __("Odometer Out"),
+								default: frm.doc.odometer_in,
+								reqd: 1,
+								description: min_odo
+									? __("Required. Must be at least {0}.", [min_odo])
+									: __("Required before parking the vehicle in the customer lot."),
+							},
+						],
+						(values) => {
+							const odo_out = cint(values.odometer_out);
+							if (values.odometer_out == null || values.odometer_out === "" || odo_out < min_odo) {
+								frappe.msgprint(
+									__("Odometer Out must be greater than or equal to Odometer In ({0}).", [min_odo])
+								);
+								return;
 							}
+							frm.call({
+								method: "park_vehicle",
+								doc: frm.doc,
+								args: {
+									odometer_out: odo_out,
+									require_odometer: 1,
+								},
+								freeze: true,
+								callback: (r) => {
+									if (!r.exc) {
+										frappe.show_alert({ message: __("Vehicle parked in lot."), indicator: "green" });
+										frm.reload_doc();
+									}
+								},
+							});
 						},
-					});
+						__("Park Vehicle in Customer Lot"),
+						__("Park Vehicle")
+					);
 				}, __("Workshop"));
 			}
 
@@ -1710,8 +1740,22 @@ frappe.ui.form.on("Repair Order", {
 			frappe.set_route("List", "Schedule Entry", "Calendar");
 		}, __("Navigation"));
 
+		const is_manager_or_advisor =
+			frappe.session.user === "Administrator" ||
+			["System Manager", "ISM Manager", "ISM Service Advisor"].some((role) =>
+				frappe.user.has_role(role)
+			);
+		const is_tech_only = frappe.user.has_role("ISM Technician") && !is_manager_or_advisor;
+
+		frm.add_custom_button(__("Open Tech Workbench"), () => {
+			window.open(`/tech?ro=${encoded_name}`, "_blank");
+		}, __("Navigation"));
+
 		frm.add_custom_button(__("Open Shop Board"), () => {
-			window.open(`/board?thread=${encodeURIComponent(`RO:${frm.doc.name}`)}`, "_blank");
+			const board_url = is_tech_only
+				? `/tech?ro=${encoded_name}&view=board`
+				: `/board?thread=${encodeURIComponent(`RO:${frm.doc.name}`)}`;
+			window.open(board_url, "_blank");
 		}, __("Navigation"));
 
 		if (frm.doc.approval_token) {

@@ -8,3 +8,4 @@ ism.patches.v1_0.drop_service_package_name_unique_index
 ism.patches.v1_0.reduce_board_scope_to_active_ro
 ism.patches.v1_0.backfill_vehicle_display_title
 ism.patches.v1_0.backfill_vehicle_and_manual_generations
+ism.patches.v1_0.prune_routine_board_system_events

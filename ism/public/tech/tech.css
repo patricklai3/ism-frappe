@@ -1,0 +1,1371 @@
+/* ISM Shop OS — 3-Layer Technician Execution Workbench (/tech)
+ * Extends shared dark theme tokens from /assets/ism/board/board.css
+ */
+
+:root {
+	--tech-purple: #8b5cf6;
+	--tech-purple-soft: rgba(139, 92, 246, 0.16);
+	--tech-purple-border: rgba(139, 92, 246, 0.45);
+	--tech-emerald: #10b981;
+	--tech-emerald-soft: rgba(16, 185, 129, 0.14);
+	--tech-emerald-border: rgba(16, 185, 129, 0.45);
+	--tech-cyan: #22d3ee;
+	--tech-cyan-soft: rgba(34, 211, 238, 0.18);
+	--tech-rail-width: 280px;
+}
+
+.tech-body {
+	overflow-x: hidden;
+}
+
+/* =========================================================================
+   Responsive 3-Layer Shell
+   >= 960px: 280px left rail (Layer 1) + Main pane (Layer 2 or Layer 3)
+   < 960px:  Single-column stack driven by data-active-layer="L1"|"L2"|"L3"
+   ========================================================================= */
+
+.tech-shell {
+	flex: 1 1 auto;
+	display: grid;
+	grid-template-columns: var(--tech-rail-width) minmax(0, 1fr);
+	height: calc(100dvh - var(--shop-nav-height));
+	min-height: 0;
+	overflow: hidden;
+	background: var(--shop-bg);
+}
+
+/* =========================================================================
+   Layer 1: Left Rail — My Assigned Jobs
+   ========================================================================= */
+
+.tech-rail {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	background: var(--shop-surface);
+	border-right: 1px solid var(--shop-border);
+}
+
+.tech-rail__header {
+	padding: 12px 12px 10px;
+	border-bottom: 1px solid var(--shop-border);
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.tech-rail__title-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.tech-rail__heading {
+	margin: 0;
+	font-size: 0.96rem;
+	font-weight: 700;
+	color: var(--shop-text);
+	display: flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.tech-rail__count {
+	color: var(--shop-text-muted);
+	font-weight: 600;
+}
+
+.tech-tabs {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 4px;
+	padding: 3px;
+	border-radius: 10px;
+	background: var(--shop-bg);
+	border: 1px solid var(--shop-border);
+}
+
+.tech-tab {
+	appearance: none;
+	border: none;
+	border-radius: 8px;
+	background: transparent;
+	color: var(--shop-text-muted);
+	font-size: 0.8rem;
+	font-weight: 600;
+	padding: 8px 6px;
+	min-height: 36px;
+	cursor: pointer;
+	transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tech-tab:hover {
+	color: var(--shop-text);
+}
+
+.tech-tab.is-active {
+	background: var(--shop-surface-2);
+	color: var(--shop-text);
+	box-shadow: inset 0 0 0 1px var(--shop-border);
+}
+
+.tech-rail__hint {
+	font-size: 0.72rem;
+	color: var(--shop-text-muted);
+	letter-spacing: 0.01em;
+}
+
+.tech-rail__search {
+	font-size: 0.82rem;
+	padding: 7px 10px;
+	min-height: 36px;
+}
+
+.tech-rail__scroll {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: 10px;
+	-webkit-overflow-scrolling: touch;
+}
+
+.tech-jobs-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+/* Job Cards in Layer 1 */
+.job-card {
+	appearance: none;
+	width: 100%;
+	text-align: left;
+	border: 1px solid var(--shop-border);
+	border-left: 4px solid var(--shop-border);
+	border-radius: var(--shop-radius);
+	background: var(--shop-surface-2);
+	color: var(--shop-text);
+	padding: 12px 12px 11px;
+	cursor: pointer;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	transition: background 0.14s ease, border-color 0.14s ease, transform 0.08s ease;
+}
+
+.job-card:hover {
+	background: var(--shop-surface-hover);
+}
+
+.job-card:active {
+	transform: scale(0.99);
+}
+
+.job-card--in-bay {
+	border-left-color: var(--shop-accent);
+}
+
+.job-card--ready-lot {
+	border-left-color: var(--shop-green);
+}
+
+.job-card--done {
+	border-left-color: var(--tech-emerald);
+}
+
+.job-card--diagnostic {
+	border-left-color: var(--tech-purple);
+}
+
+.job-card--completed {
+	border-left-color: var(--shop-text-muted);
+	opacity: 0.88;
+}
+
+.job-card.is-selected {
+	border-color: var(--shop-accent);
+	border-left-width: 4px;
+	background: rgba(59, 130, 246, 0.12);
+	box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.35);
+}
+
+.job-card--diagnostic.is-selected {
+	border-color: var(--tech-purple);
+	background: rgba(139, 92, 246, 0.12);
+	box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.4);
+}
+
+.job-card__selected-tag {
+	font-size: 0.65rem;
+	font-weight: 800;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--shop-sky);
+}
+
+.job-card--diagnostic .job-card__selected-tag {
+	color: #c4b5fd;
+}
+
+.job-card__top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.job-card__top-left {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	min-width: 0;
+}
+
+.job-card__top-right {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	flex-shrink: 0;
+}
+
+.job-card__vehicle {
+	font-size: 0.94rem;
+	font-weight: 700;
+	color: var(--shop-text);
+	line-height: 1.25;
+}
+
+.job-card__meta {
+	font-size: 0.78rem;
+	color: var(--shop-text-muted);
+	line-height: 1.3;
+	word-break: break-word;
+}
+
+.job-card__footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-top: 2px;
+	font-size: 0.75rem;
+	color: var(--shop-text-muted);
+}
+
+.job-card__progress {
+	width: 100%;
+	height: 5px;
+	border-radius: 999px;
+	background: rgba(148, 163, 184, 0.18);
+	overflow: hidden;
+	margin-top: 2px;
+}
+
+.job-card__progress-fill {
+	height: 100%;
+	border-radius: 999px;
+	background: var(--shop-green);
+	transition: width 0.2s ease;
+}
+
+.job-card--in-bay .job-card__progress-fill {
+	background: var(--shop-green);
+}
+
+/* Status & Attribute Pills */
+.tech-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 0.68rem;
+	font-weight: 800;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	white-space: nowrap;
+}
+
+.tech-pill--in-bay {
+	background: rgba(59, 130, 246, 0.22);
+	color: #93c5fd;
+	border: 1px solid rgba(59, 130, 246, 0.45);
+}
+
+.tech-pill--ready-lot {
+	background: rgba(34, 197, 94, 0.2);
+	color: #86efac;
+	border: 1px solid rgba(34, 197, 94, 0.45);
+}
+
+.tech-pill--done {
+	background: rgba(16, 185, 129, 0.24);
+	color: #6ee7b7;
+	border: 1px solid rgba(16, 185, 129, 0.55);
+}
+
+.tech-pill--diagnostic {
+	background: var(--tech-purple-soft);
+	color: #d8b4fe;
+	border: 1px solid var(--tech-purple-border);
+}
+
+.tech-pill--waiter {
+	background: rgba(245, 158, 11, 0.22);
+	color: #fcd34d;
+	border: 1px solid rgba(245, 158, 11, 0.5);
+}
+
+.tech-pill--pin {
+	background: rgba(148, 163, 184, 0.14);
+	color: #cbd5e1;
+	border: 1px solid rgba(148, 163, 184, 0.3);
+	font-size: 0.65rem;
+	padding: 2px 6px;
+}
+
+.tech-pill--issue {
+	background: rgba(239, 68, 68, 0.9);
+	color: #fff;
+	min-width: 20px;
+	justify-content: center;
+	padding: 2px 6px;
+}
+
+.tech-pill--status {
+	background: rgba(148, 163, 184, 0.16);
+	color: var(--shop-text);
+	border: 1px solid var(--shop-border);
+	text-transform: none;
+	font-weight: 600;
+}
+
+.tech-pill--side {
+	background: var(--tech-cyan-soft);
+	color: #67e8f9;
+	border: 1px solid rgba(34, 211, 238, 0.45);
+	font-size: 0.7rem;
+	padding: 2px 7px;
+}
+
+.tech-pill--supplement {
+	background: rgba(245, 158, 11, 0.2);
+	color: #fcd34d;
+	border: 1px solid rgba(245, 158, 11, 0.45);
+}
+
+/* Onboarding / Empty cards */
+.tech-onboarding-card {
+	padding: 16px;
+	border-radius: var(--shop-radius);
+	border: 1px solid rgba(245, 158, 11, 0.45);
+	background: rgba(245, 158, 11, 0.1);
+	color: var(--shop-text);
+}
+
+.tech-onboarding-card h3 {
+	margin: 0 0 6px;
+	font-size: 0.95rem;
+	color: #fcd34d;
+}
+
+.tech-onboarding-card p {
+	margin: 0;
+	font-size: 0.84rem;
+	color: var(--shop-text-muted);
+	line-height: 1.45;
+}
+
+.tech-jobs-empty {
+	padding: 24px 14px;
+	text-align: center;
+	color: var(--shop-text-muted);
+	font-size: 0.85rem;
+	line-height: 1.45;
+}
+
+/* =========================================================================
+   Main Right Pane: Layer 2 & Layer 3
+   ========================================================================= */
+
+.tech-main {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
+	background: var(--shop-bg);
+}
+
+.tech-layer-2,
+.tech-layer-3 {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow: hidden;
+}
+
+.tech-detail-scroll {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: 16px 20px 32px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	max-width: 980px;
+	width: 100%;
+	margin: 0 auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+.tech-empty-panel {
+	flex: 1 1 auto;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+}
+
+.tech-empty-panel__card {
+	max-width: 420px;
+	text-align: center;
+	padding: 28px 24px;
+	border-radius: var(--shop-radius);
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+}
+
+.tech-empty-panel__card h2 {
+	margin: 0 0 8px;
+	font-size: 1.1rem;
+}
+
+.tech-empty-panel__card p {
+	margin: 0;
+	font-size: 0.9rem;
+	color: var(--shop-text-muted);
+	line-height: 1.45;
+}
+
+/* Mobile Layer 2 Back Subbar (hidden on desktop >= 960px) */
+.tech-mobile-subbar {
+	display: none;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding-bottom: 4px;
+}
+
+.tech-mobile-subbar__id {
+	font-size: 0.92rem;
+	font-weight: 700;
+	color: var(--shop-text);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* =========================================================================
+   Hero Cards (Layer 2A Diagnostic SE & Layer 2B Approved RO)
+   ========================================================================= */
+
+.tech-hero {
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	border-radius: 14px;
+	padding: 16px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	position: relative;
+	overflow: hidden;
+}
+
+.tech-hero--diagnostic::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 4px;
+	background: linear-gradient(90deg, var(--tech-purple), #a855f7);
+}
+
+.tech-hero--ro {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+}
+
+.tech-hero__badges {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.tech-hero__top {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.tech-hero__vehicle-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+	min-width: 0;
+}
+
+.tech-hero__vehicle-title {
+	margin: 0;
+	font-size: 1.38rem;
+	font-weight: 800;
+	letter-spacing: -0.01em;
+	color: var(--shop-text);
+	line-height: 1.2;
+}
+
+/* High-contrast white license plate badge */
+.plate-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 4px 12px;
+	border-radius: 8px;
+	background: #f8fafc;
+	color: #0f172a;
+	border: 2px solid #cbd5e1;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-size: 1.02rem;
+	font-weight: 900;
+	letter-spacing: 0.06em;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+	white-space: nowrap;
+}
+
+.tech-hero__actions {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.tech-hero__meta {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.tech-meta-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 4px 10px;
+	border-radius: 8px;
+	background: var(--shop-surface-2);
+	border: 1px solid var(--shop-border);
+	font-size: 0.8rem;
+	font-weight: 500;
+	color: #cbd5e1;
+}
+
+.tech-meta-chip--timer {
+	border-color: rgba(59, 130, 246, 0.45);
+	background: rgba(59, 130, 246, 0.12);
+	color: #93c5fd;
+	font-variant-numeric: tabular-nums;
+	font-weight: 700;
+}
+
+/* Exception Board / Report Issue button */
+.tech-exception-btn {
+	min-height: 40px;
+	padding: 6px 12px;
+	border-radius: 10px;
+	border: 1px solid var(--shop-border);
+	background: var(--shop-surface-2);
+	color: var(--shop-text);
+	font-size: 0.84rem;
+	font-weight: 700;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.tech-exception-btn:hover {
+	background: var(--shop-surface-hover);
+	border-color: rgba(239, 68, 68, 0.6);
+}
+
+.tech-exception-btn--alert {
+	border-color: rgba(239, 68, 68, 0.65);
+	background: rgba(239, 68, 68, 0.12);
+	color: #fca5a5;
+}
+
+/* =========================================================================
+   Info / Concern / Diagnostic Cards
+   ========================================================================= */
+
+.tech-card {
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	border-radius: var(--shop-radius);
+	padding: 14px 16px;
+}
+
+.tech-card__heading {
+	margin: 0 0 8px;
+	font-size: 0.92rem;
+	font-weight: 700;
+	color: var(--shop-text);
+}
+
+.tech-card__body {
+	margin: 0;
+	font-size: 0.92rem;
+	color: #cbd5e1;
+	line-height: 1.5;
+	white-space: pre-wrap;
+}
+
+.tech-concern-card {
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	border-left: 4px solid var(--shop-sky);
+	border-radius: var(--shop-radius);
+	padding: 12px 15px;
+	font-size: 0.92rem;
+	color: var(--shop-text);
+	line-height: 1.45;
+}
+
+.tech-concern-card strong {
+	color: var(--shop-sky);
+}
+
+.tech-se-notice {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 12px 15px;
+	border-radius: var(--shop-radius);
+	background: rgba(139, 92, 246, 0.12);
+	border: 1px solid var(--tech-purple-border);
+	color: #e9d5ff;
+	font-size: 0.88rem;
+	line-height: 1.45;
+}
+
+.tech-info-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	min-width: 20px;
+	border-radius: 50%;
+	background: rgba(139, 92, 246, 0.35);
+	color: #f5f3ff;
+	font-size: 0.75rem;
+	font-weight: 800;
+	font-style: italic;
+}
+
+.tech-booked-list {
+	margin: 0;
+	padding-left: 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	color: #e2e8f0;
+	font-size: 0.92rem;
+}
+
+/* =========================================================================
+   Layer 2B: 4-State Primary Lifecycle Action Banner
+   ========================================================================= */
+
+.lifecycle-banner {
+	border-radius: 14px;
+	padding: 16px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.lifecycle-banner--pickup {
+	background: linear-gradient(180deg, rgba(59, 130, 246, 0.14), rgba(19, 26, 38, 0.95));
+	border: 1px solid rgba(59, 130, 246, 0.55);
+	align-items: center;
+	text-align: center;
+}
+
+.lifecycle-banner__eyebrow {
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: #93c5fd;
+}
+
+.lifecycle-btn-primary {
+	width: 100%;
+	min-height: 56px;
+	font-size: 1.02rem;
+	font-weight: 800;
+	border-radius: 12px;
+	letter-spacing: 0.01em;
+}
+
+.lifecycle-banner--dropoff {
+	background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(16, 185, 129, 0.06));
+	border: 1.5px solid var(--tech-emerald-border);
+}
+
+.lifecycle-dropoff-grid {
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 14px;
+	flex-wrap: wrap;
+}
+
+.lifecycle-dropoff-info {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	flex: 1 1 260px;
+}
+
+.lifecycle-check-circle {
+	width: 38px;
+	height: 38px;
+	min-width: 38px;
+	border-radius: 50%;
+	background: var(--tech-emerald);
+	color: #052e16;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.2rem;
+	font-weight: 900;
+}
+
+.lifecycle-dropoff-title {
+	margin: 0 0 3px;
+	font-size: 1.04rem;
+	font-weight: 800;
+	color: #ecfdf5;
+}
+
+.lifecycle-dropoff-sub {
+	margin: 0;
+	font-size: 0.84rem;
+	color: #a7f3d0;
+	line-height: 1.35;
+}
+
+.lifecycle-dropoff-controls {
+	display: flex;
+	align-items: flex-end;
+	gap: 10px;
+	flex-wrap: wrap;
+	flex: 1 1 320px;
+	justify-content: flex-end;
+}
+
+.odo-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 165px;
+	flex: 1 1 165px;
+}
+
+.odo-field__label {
+	font-size: 0.78rem;
+	font-weight: 700;
+	color: #d1fae5;
+}
+
+.odo-field__input {
+	min-height: 48px;
+	padding: 8px 12px;
+	border-radius: 10px;
+	border: 1.5px solid var(--tech-emerald-border);
+	background: rgba(11, 15, 23, 0.85);
+	color: var(--shop-text);
+	font-size: 1.05rem;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	width: 100%;
+}
+
+.odo-field__input:focus {
+	outline: none;
+	border-color: var(--tech-emerald);
+	box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+}
+
+.odo-field__input.is-invalid {
+	border-color: var(--shop-red);
+	box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22);
+}
+
+.odo-field__error {
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: #fca5a5;
+}
+
+.lifecycle-btn-emerald {
+	min-height: 48px;
+	padding: 10px 18px;
+	border-radius: 10px;
+	border: none;
+	background: #22c55e;
+	color: #052e16;
+	font-size: 0.95rem;
+	font-weight: 800;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background 0.15s ease, transform 0.08s ease;
+}
+
+.lifecycle-btn-emerald:hover:not(:disabled) {
+	background: #16a34a;
+	color: #f0fdf4;
+}
+
+.lifecycle-btn-emerald:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.lifecycle-banner--completed {
+	background: rgba(16, 185, 129, 0.1);
+	border: 1px solid var(--tech-emerald-border);
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+}
+
+/* =========================================================================
+   Service Checklist Cards (Glove-friendly)
+   ========================================================================= */
+
+.checklist-section {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.checklist-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.checklist-header__title {
+	margin: 0;
+	font-size: 0.98rem;
+	font-weight: 700;
+	color: var(--shop-text);
+}
+
+.checklist-header__pct {
+	font-size: 0.86rem;
+	font-weight: 700;
+	color: var(--shop-text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.checklist-progress {
+	width: 100%;
+	height: 7px;
+	border-radius: 999px;
+	background: var(--shop-surface-2);
+	overflow: hidden;
+}
+
+.checklist-progress__fill {
+	height: 100%;
+	border-radius: 999px;
+	background: linear-gradient(90deg, var(--shop-accent), var(--shop-green));
+	transition: width 0.22s ease;
+}
+
+.checklist-progress__fill.is-complete {
+	background: var(--shop-green);
+}
+
+.service-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.service-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 13px 14px;
+	border-radius: var(--shop-radius);
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.service-card.is-completed {
+	border-color: rgba(34, 197, 94, 0.35);
+	background: rgba(19, 26, 38, 0.88);
+}
+
+.service-check-btn {
+	appearance: none;
+	width: 48px;
+	height: 48px;
+	min-width: 48px;
+	border-radius: 12px;
+	border: 2px solid var(--shop-border);
+	background: var(--shop-bg);
+	color: transparent;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.4rem;
+	font-weight: 900;
+	cursor: pointer;
+	transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease, transform 0.08s ease;
+}
+
+.service-check-btn:hover:not(:disabled) {
+	border-color: var(--shop-sky);
+}
+
+.service-check-btn:active:not(:disabled) {
+	transform: scale(0.95);
+}
+
+.service-check-btn.is-checked {
+	background: var(--shop-green);
+	border-color: var(--shop-green);
+	color: #052e16;
+}
+
+.service-check-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.service-card__content {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+.service-card__top {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.service-card__title-wrap {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 7px;
+	min-width: 0;
+}
+
+.service-card__title {
+	font-size: 1rem;
+	font-weight: 700;
+	color: var(--shop-text);
+	line-height: 1.3;
+}
+
+.service-card__hours {
+	font-size: 0.85rem;
+	font-weight: 700;
+	color: var(--shop-text-muted);
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+.service-card__sub {
+	font-size: 0.84rem;
+	color: var(--shop-text-muted);
+	line-height: 1.4;
+}
+
+.service-card__parts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 2px;
+}
+
+.part-chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 3px 8px;
+	border-radius: 7px;
+	background: var(--shop-surface-2);
+	border: 1px solid var(--shop-border);
+	font-size: 0.78rem;
+	color: #e2e8f0;
+}
+
+.service-card__notes {
+	font-size: 0.84rem;
+	color: #cbd5e1;
+	background: rgba(56, 189, 248, 0.08);
+	border-left: 3px solid var(--shop-sky);
+	padding: 6px 10px;
+	border-radius: 6px;
+	margin-top: 2px;
+}
+
+.service-card__links {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-top: 2px;
+}
+
+.service-manual-link {
+	font-size: 0.84rem;
+	font-weight: 600;
+	color: var(--shop-sky);
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+/* =========================================================================
+   Intake Inspection Accordion & Temporary Park Panel
+   ========================================================================= */
+
+.tech-footer-bar {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	margin-top: 4px;
+}
+
+.tech-footer-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	border-radius: var(--shop-radius);
+	padding: 12px 15px;
+}
+
+.inspection-toggle-btn {
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: var(--shop-text);
+	font-size: 0.94rem;
+	font-weight: 700;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 0;
+}
+
+.inspection-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-top: 4px;
+}
+
+.inspection-item {
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	border-radius: var(--shop-radius);
+	padding: 12px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.inspection-item__desc {
+	font-size: 0.92rem;
+	font-weight: 600;
+	color: var(--shop-text);
+}
+
+.inspection-status-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.insp-pill {
+	appearance: none;
+	min-height: 36px;
+	padding: 6px 12px;
+	border-radius: 8px;
+	border: 1px solid var(--shop-border);
+	background: var(--shop-surface-2);
+	color: var(--shop-text-muted);
+	font-size: 0.8rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.insp-pill.is-active[data-insp-status="Pass"] {
+	background: rgba(34, 197, 94, 0.22);
+	border-color: var(--shop-green);
+	color: #86efac;
+}
+
+.insp-pill.is-active[data-insp-status="Attention"] {
+	background: rgba(245, 158, 11, 0.22);
+	border-color: var(--shop-amber);
+	color: #fcd34d;
+}
+
+.insp-pill.is-active[data-insp-status="Fail"] {
+	background: rgba(239, 68, 68, 0.22);
+	border-color: var(--shop-red);
+	color: #fca5a5;
+}
+
+.insp-pill.is-active[data-insp-status="N/A"] {
+	background: rgba(148, 163, 184, 0.22);
+	border-color: var(--shop-text-muted);
+	color: var(--shop-text);
+}
+
+.inspection-note-row {
+	display: flex;
+	gap: 8px;
+}
+
+.inspection-note-input {
+	flex: 1 1 auto;
+	min-height: 36px;
+	padding: 6px 10px;
+	border-radius: 8px;
+	border: 1px solid var(--shop-border);
+	background: var(--shop-bg);
+	color: var(--shop-text);
+	font-size: 0.84rem;
+}
+
+/* Temporary Park Inline Panel */
+.temp-park-panel {
+	background: var(--shop-surface);
+	border: 1px solid rgba(245, 158, 11, 0.5);
+	border-radius: var(--shop-radius);
+	padding: 14px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.temp-park-panel__title {
+	margin: 0;
+	font-size: 0.94rem;
+	font-weight: 700;
+	color: #fcd34d;
+}
+
+.temp-park-panel__sub {
+	margin: 0;
+	font-size: 0.82rem;
+	color: var(--shop-text-muted);
+}
+
+.temp-park-panel__row {
+	display: flex;
+	align-items: flex-end;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+/* Pending Supplements / Declined Collapsed Notice */
+.tech-pending-details {
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	border-radius: var(--shop-radius);
+	padding: 11px 14px;
+	font-size: 0.86rem;
+	color: var(--shop-text-muted);
+}
+
+.tech-pending-details summary {
+	cursor: pointer;
+	font-weight: 600;
+	color: var(--shop-text);
+}
+
+.tech-pending-list {
+	margin: 8px 0 0;
+	padding-left: 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+/* =========================================================================
+   Layer 3: Exception Chat Board
+   ========================================================================= */
+
+.tech-l3-header {
+	padding: 12px 16px;
+	background: var(--shop-surface);
+	border-bottom: 1px solid var(--shop-border);
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.tech-l3-header__left {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.tech-back-btn {
+	min-height: 40px;
+	padding: 6px 12px;
+	font-weight: 700;
+	white-space: nowrap;
+}
+
+.tech-l3-header__titles {
+	min-width: 0;
+}
+
+.tech-l3-title {
+	margin: 0;
+	font-size: 1rem;
+	font-weight: 800;
+	color: var(--shop-text);
+	line-height: 1.2;
+}
+
+.tech-l3-subtitle {
+	font-size: 0.8rem;
+	color: var(--shop-text-muted);
+	margin-top: 2px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tech-l3-header__right {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.tech-l3-info-banner {
+	margin: 10px 16px 0;
+	padding: 9px 12px;
+	border-radius: 10px;
+	background: var(--shop-surface);
+	border: 1px solid var(--shop-border);
+	color: var(--shop-text-muted);
+	font-size: 0.8rem;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.tech-l3-info-banner strong {
+	color: var(--shop-text);
+}
+
+/* Keep Technician Layer 3 Action Cards uncluttered (no Manager Copy for Agent button) */
+.tech-layer-3 .action-card__footer {
+	display: none;
+}
+
+/* =========================================================================
+   Responsive Breakpoints (< 960px Mobile 3-Layer Stack)
+   ========================================================================= */
+
+@media (max-width: 959px) {
+	.tech-shell {
+		grid-template-columns: 1fr;
+	}
+
+	.tech-shell[data-active-layer="L1"] .tech-rail {
+		display: flex;
+	}
+
+	.tech-shell[data-active-layer="L1"] .tech-main {
+		display: none;
+	}
+
+	.tech-shell[data-active-layer="L2"] .tech-rail,
+	.tech-shell[data-active-layer="L3"] .tech-rail {
+		display: none;
+	}
+
+	.tech-shell[data-active-layer="L2"] .tech-main,
+	.tech-shell[data-active-layer="L3"] .tech-main {
+		display: flex;
+	}
+
+	.tech-mobile-subbar {
+		display: flex;
+	}
+
+	.tech-hero__actions .tech-exception-btn--desktop {
+		display: none;
+	}
+
+	.tech-detail-scroll {
+		padding: 12px 12px 28px;
+	}
+
+	.tech-hero {
+		padding: 14px;
+	}
+
+	.tech-hero__vehicle-title {
+		font-size: 1.2rem;
+	}
+
+	.lifecycle-dropoff-controls {
+		width: 100%;
+		justify-content: stretch;
+	}
+
+	.lifecycle-btn-emerald {
+		width: 100%;
+	}
+}

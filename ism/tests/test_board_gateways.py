@@ -434,13 +434,31 @@ class TestBoardGateways(ISMTestCase):
 				"auto_mask_seconds": 15,
 			}
 		)
+		tech_email = self._create_user_with_roles("pin_tech_test@example.com", ["ISM Technician"])
+		tech_emp = frappe.get_doc({
+			"doctype": "Employee",
+			"first_name": "Board GW Pin Tech",
+			"employee_name": "Board GW Pin Tech",
+			"status": "Active",
+			"designation": "Technician",
+			"company": self.get_manifest().company,
+			"gender": "Male",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"user_id": tech_email,
+		}).insert(ignore_permissions=True)
+		self.track(tech_emp)
+		self.create_test_schedule_entry(
+			repair_order=ro.name,
+			assigned_technician=tech_emp.name,
+			status="Confirmed",
+		)
 		with patch.dict(sys.modules, {"ism.portal": fake_portal, "ism.portal.pin_vault": fake_vault}):
 			present_view = board_api.get_board_thread(repair_order=ro.name)
 			self.assertTrue(present_view["pin_state"]["pin_feature_installed"])
 			self.assertTrue(present_view["pin_state"]["can_reveal"])
 			self.assertNotIn("pin", present_view["pin_state"])
 
-			tech_email = self._create_user_with_roles("pin_tech_test@example.com", ["ISM Technician"])
 			frappe.set_user(tech_email)
 			revealed = board_api.reveal_ro_pin(ro.name)
 			self.assertTrue(revealed["available"])
