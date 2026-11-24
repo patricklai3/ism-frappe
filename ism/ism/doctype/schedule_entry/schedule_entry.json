@@ -57,6 +57,18 @@
   "pin_to_drive_last_viewed_by",
   "pin_to_drive_last_viewed_at",
   "pin_to_drive_view_count",
+  "sec_tesla_phone_key",
+  "tesla_phone_key_status",
+  "tesla_phone_key_encrypted",
+  "tesla_phone_key_submitted_at",
+  "tesla_phone_key_updated_at",
+  "cb_tesla_phone_key",
+  "tesla_phone_key_released_at",
+  "tesla_phone_key_released_by",
+  "tesla_phone_key_purged_at",
+  "tesla_phone_key_last_viewed_by",
+  "tesla_phone_key_last_viewed_at",
+  "tesla_phone_key_view_count",
   "section_break_notes",
   "items_summary",
   "notes"
@@ -414,6 +426,95 @@
    "read_only": 1
   },
   {
+   "collapsible": 1,
+   "fieldname": "sec_tesla_phone_key",
+   "fieldtype": "Section Break",
+   "label": "Tesla Phone Key (Optional Ephemeral)"
+  },
+  {
+   "default": "Not Provided",
+   "fieldname": "tesla_phone_key_status",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Tesla Phone Key Status",
+   "no_copy": 1,
+   "options": "Not Provided\nProvided\nReleased\nPurged",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_encrypted",
+   "fieldtype": "Password",
+   "hidden": 1,
+   "label": "Tesla Phone Key Invite (Encrypted)",
+   "no_copy": 1,
+   "print_hide": 1,
+   "read_only": 1,
+   "report_hide": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_submitted_at",
+   "fieldtype": "Datetime",
+   "label": "Phone Key Submitted At",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_updated_at",
+   "fieldtype": "Datetime",
+   "label": "Phone Key Updated At",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "cb_tesla_phone_key",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "tesla_phone_key_released_at",
+   "fieldtype": "Datetime",
+   "label": "Phone Key Released At",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_released_by",
+   "fieldtype": "Link",
+   "label": "Phone Key Released By",
+   "no_copy": 1,
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_purged_at",
+   "fieldtype": "Datetime",
+   "label": "Phone Key Purged At",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_last_viewed_by",
+   "fieldtype": "Link",
+   "label": "Phone Key Last Viewed By",
+   "no_copy": 1,
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tesla_phone_key_last_viewed_at",
+   "fieldtype": "Datetime",
+   "label": "Phone Key Last Viewed At",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "tesla_phone_key_view_count",
+   "fieldtype": "Int",
+   "label": "Phone Key View Count",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
    "fieldname": "section_break_notes",
    "fieldtype": "Section Break",
    "label": "Summary & Notes"
@@ -434,7 +535,7 @@
  "index_web_pages_for_search": 1,
  "is_calendar_and_gantt": 1,
  "links": [],
- "modified": "2026-11-24 04:00:00.000000",
+ "modified": "2026-11-24 05:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Schedule Entry",

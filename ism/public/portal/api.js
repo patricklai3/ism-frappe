@@ -226,6 +226,28 @@ export function optOutPinToDrive({ repair_order, schedule_entry }) {
 	return portalPost("opt_out_pin_to_drive", body);
 }
 
+export function submitTeslaPhoneKey({ repair_order, schedule_entry, invite_url }) {
+	const body = { invite_url };
+	if (repair_order) {
+		body.repair_order = repair_order;
+	}
+	if (schedule_entry) {
+		body.schedule_entry = schedule_entry;
+	}
+	return portalPost("submit_tesla_phone_key", body);
+}
+
+export function removeTeslaPhoneKey({ repair_order, schedule_entry }) {
+	const body = {};
+	if (repair_order) {
+		body.repair_order = repair_order;
+	}
+	if (schedule_entry) {
+		body.schedule_entry = schedule_entry;
+	}
+	return portalPost("remove_tesla_phone_key", body);
+}
+
 export function getRescheduleOptions({ schedule_entry, start_date, days_ahead } = {}) {
 	return portalGet("get_reschedule_options", { schedule_entry, start_date, days_ahead });
 }

@@ -11,6 +11,7 @@ import {
 	getThreadDelta,
 	listBoardActionFeed,
 	listBoardThreads,
+	revealRoPhoneKey,
 	revealRoPin,
 	setOfflineHandler,
 	updateBoardActionCard,
@@ -20,6 +21,7 @@ import { escapeHtml, renderEventCard } from "./cards.js";
 import { BoardRealtimeClient } from "./realtime.js";
 
 const PIN_AUTO_MASK_SECONDS = 15;
+const PHONE_KEY_AUTO_MASK_SECONDS = 60;
 
 const boot = window.ISM_BOARD_BOOT || {};
 const CAN_MANAGE = Boolean(boot.can_manage ?? boot.can_approve);
@@ -36,6 +38,7 @@ const state = {
 	hasMore: false,
 	nextBeforeEvent: null,
 	pinState: null,
+	phoneKeyState: null,
 	roSummary: null,
 	canPost: true,
 	readOnlyReason: "",
@@ -44,10 +47,13 @@ const state = {
 	isLoadingThread: false,
 	isSyncingDelta: false,
 	pendingDeltaSync: false,
-	// Transient in-memory PIN reveal state (NEVER persisted to storage or DOM datasets)
+	// Transient in-memory PIN & Phone Key reveal state (NEVER persisted to storage or DOM datasets)
 	pinRevealed: false,
 	pinSecondsLeft: 0,
 	pinTimerId: null,
+	phoneKeyRevealed: false,
+	phoneKeySecondsLeft: 0,
+	phoneKeyTimerId: null,
 };
 
 const el = {
@@ -75,6 +81,7 @@ const el = {
 	andonBlockedReason: document.getElementById("andon-blocked-reason"),
 	andonDeskLink: document.getElementById("andon-desk-link"),
 	pinPillSlot: document.getElementById("pin-pill-slot"),
+	phoneKeyPillSlot: document.getElementById("phone-key-pill-slot"),
 	refreshThreadBtn: document.getElementById("refresh-thread-btn"),
 	timelineScroll: document.getElementById("timeline-scroll"),
 	loadMoreWrap: document.getElementById("load-more-wrap"),
@@ -201,6 +208,116 @@ function clearPinRevealState() {
 	}
 	state.pinRevealed = false;
 	state.pinSecondsLeft = 0;
+}
+
+function clearPhoneKeyRevealState() {
+	if (state.phoneKeyTimerId) {
+		clearInterval(state.phoneKeyTimerId);
+		state.phoneKeyTimerId = null;
+	}
+	state.phoneKeyRevealed = false;
+	state.phoneKeySecondsLeft = 0;
+}
+
+function renderPhoneKeyPill(revealedInviteUrl = null) {
+	if (!el.phoneKeyPillSlot) return;
+	el.phoneKeyPillSlot.innerHTML = "";
+
+	const thread = state.activeThread;
+	const pks = state.phoneKeyState;
+	const shouldShow =
+		Boolean(thread && thread.repair_order) &&
+		Boolean(pks && pks.phone_key_feature_installed && pks.has_phone_key && pks.can_reveal);
+
+	if (!shouldShow) {
+		clearPhoneKeyRevealState();
+		return;
+	}
+
+	const pill = document.createElement("span");
+	pill.className = "pin-pill";
+
+	const label = document.createElement("span");
+	label.textContent = "🔑 Phone Key:";
+	pill.appendChild(label);
+
+	if (state.phoneKeyRevealed && revealedInviteUrl) {
+		const openLink = document.createElement("a");
+		openLink.className = "pin-pill__btn";
+		openLink.href = String(revealedInviteUrl);
+		openLink.target = "_blank";
+		openLink.rel = "noopener noreferrer";
+		openLink.textContent = "Open Invite";
+		pill.appendChild(openLink);
+
+		const copyBtn = document.createElement("button");
+		copyBtn.type = "button";
+		copyBtn.className = "pin-pill__btn";
+		copyBtn.textContent = "Copy";
+		copyBtn.addEventListener("click", async () => {
+			try {
+				await navigator.clipboard.writeText(String(revealedInviteUrl));
+				showToast("Tesla Phone Key invite link copied.", "success");
+			} catch (_err) {
+				showToast("Unable to copy invite link.", "warn");
+			}
+		});
+		pill.appendChild(copyBtn);
+
+		const countdown = document.createElement("span");
+		countdown.className = "pin-pill__countdown";
+		countdown.textContent = `${state.phoneKeySecondsLeft}s`;
+		pill.appendChild(countdown);
+
+		const hideBtn = document.createElement("button");
+		hideBtn.type = "button";
+		hideBtn.className = "pin-pill__btn";
+		hideBtn.textContent = "Hide";
+		hideBtn.addEventListener("click", () => {
+			clearPhoneKeyRevealState();
+			renderPhoneKeyPill(null);
+		});
+		pill.appendChild(hideBtn);
+	} else {
+		const revealBtn = document.createElement("button");
+		revealBtn.type = "button";
+		revealBtn.className = "pin-pill__btn";
+		revealBtn.textContent = "Open Invite";
+		revealBtn.addEventListener("click", async () => {
+			revealBtn.disabled = true;
+			try {
+				const res = await revealRoPhoneKey(thread.repair_order);
+				const inviteUrl = res && res.invite_url;
+				if (!res || !res.available || !inviteUrl) {
+					showToast("Tesla Phone Key invite is not available for this Repair Order.", "warn");
+					renderPhoneKeyPill(null);
+					return;
+				}
+				const maskSecs = Number(res.auto_mask_seconds || PHONE_KEY_AUTO_MASK_SECONDS);
+				clearPhoneKeyRevealState();
+				state.phoneKeyRevealed = true;
+				state.phoneKeySecondsLeft = maskSecs;
+				renderPhoneKeyPill(inviteUrl);
+
+				state.phoneKeyTimerId = setInterval(() => {
+					state.phoneKeySecondsLeft -= 1;
+					const cdEl = el.phoneKeyPillSlot.querySelector(".pin-pill__countdown");
+					if (state.phoneKeySecondsLeft <= 0) {
+						clearPhoneKeyRevealState();
+						renderPhoneKeyPill(null);
+					} else if (cdEl) {
+						cdEl.textContent = `${state.phoneKeySecondsLeft}s`;
+					}
+				}, 1000);
+			} catch (err) {
+				showToast(err.message || "Unable to access Tesla Phone Key invite.", "error");
+				revealBtn.disabled = false;
+			}
+		});
+		pill.appendChild(revealBtn);
+	}
+
+	el.phoneKeyPillSlot.appendChild(pill);
 }
 
 function renderPinPill(revealedPlaintext = null) {
@@ -552,6 +669,7 @@ function renderAndonHeader() {
 		el.andonBlockedReason.classList.add("is-hidden");
 		el.andonDeskLink.classList.add("is-hidden");
 		renderPinPill(null);
+		renderPhoneKeyPill(null);
 		updateBlockedTimerDisplay();
 		return;
 	}
@@ -624,6 +742,7 @@ function renderAndonHeader() {
 
 	updateBlockedTimerDisplay();
 	renderPinPill(null);
+	renderPhoneKeyPill(null);
 }
 
 function renderTimeline({ scrollToBottom = false } = {}) {
@@ -765,6 +884,7 @@ async function selectThread(threadKey, { pushHistory = false } = {}) {
 	}
 
 	clearPinRevealState();
+	clearPhoneKeyRevealState();
 	state.activeThreadKey = threadKey;
 	state.isLoadingThread = true;
 	renderThreadRail();
@@ -788,6 +908,7 @@ async function selectThread(threadKey, { pushHistory = false } = {}) {
 		state.hasMore = Boolean(res.has_more);
 		state.nextBeforeEvent = res.next_before_event || null;
 		state.pinState = res.pin_state || null;
+		state.phoneKeyState = res.phone_key_state || null;
 		state.roSummary = res.repair_order_summary || null;
 		state.canPost = res.can_post !== false;
 		state.readOnlyReason = res.read_only_reason || "";
@@ -863,6 +984,9 @@ async function syncThreadDelta() {
 		}
 		if (res.pin_state) {
 			state.pinState = res.pin_state;
+		}
+		if (res.phone_key_state) {
+			state.phoneKeyState = res.phone_key_state;
 		}
 		if (res.can_post !== undefined) {
 			state.canPost = res.can_post !== false;
@@ -1174,6 +1298,7 @@ function init() {
 	blockedTimerInterval = setInterval(updateBlockedTimerDisplay, 1000);
 	window.addEventListener("beforeunload", () => {
 		clearPinRevealState();
+		clearPhoneKeyRevealState();
 		if (blockedTimerInterval) clearInterval(blockedTimerInterval);
 		if (realtimeClient) realtimeClient.destroy();
 	});

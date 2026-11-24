@@ -1311,6 +1311,12 @@ def create_repair_order_from_schedule_entry(
 		transfer_schedule_entry_pin_to_ro(se.name, ro.name)
 	except ImportError:
 		pass
+	try:
+		from ism.portal.phone_key_vault import transfer_schedule_entry_phone_key_to_ro
+
+		transfer_schedule_entry_phone_key_to_ro(se.name, ro.name)
+	except ImportError:
+		pass
 	if hasattr(ro, "sync_schedule_entries"):
 		ro.sync_schedule_entries()
 

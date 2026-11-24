@@ -284,6 +284,12 @@ export async function revealRoPin(repairOrder) {
 	});
 }
 
+export async function revealRoPhoneKey(repairOrder) {
+	return callJsonEndpoint("reveal_ro_phone_key", {
+		repair_order: repairOrder,
+	});
+}
+
 export function getMediaUrl(eventName, fileRef) {
 	return (
 		`${METHOD_BASE}.get_media` +

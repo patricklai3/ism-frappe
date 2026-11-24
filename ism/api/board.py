@@ -420,6 +420,37 @@ def _get_ro_pin_state_safe(repair_order: str | None) -> dict[str, Any]:
 	return result
 
 
+def _get_ro_phone_key_state_safe(repair_order: str | None) -> dict[str, Any]:
+	"""Soft import: return non-sensitive Tesla Phone Key state for Advisors/Managers, never invite_url."""
+	absent_state = {
+		"phone_key_feature_installed": False,
+		"status": "Not Provided",
+		"has_phone_key": False,
+		"can_reveal": False,
+	}
+	if not repair_order:
+		return absent_state
+
+	try:
+		from ism.portal.phone_key_vault import get_ro_phone_key_state
+	except ImportError:
+		return absent_state
+
+	state = get_ro_phone_key_state(repair_order)
+	if not isinstance(state, dict):
+		return absent_state
+
+	result = dict(state)
+	result.pop("invite_url", None)
+	result.pop("tesla_phone_key_url", None)
+	result.setdefault("repair_order", repair_order)
+	result.setdefault("phone_key_feature_installed", True)
+	result.setdefault("status", "Not Provided")
+	result.setdefault("has_phone_key", False)
+	result.setdefault("can_reveal", False)
+	return result
+
+
 def _get_ro_summary(repair_order: str | None) -> dict[str, Any] | None:
 	if not repair_order or not frappe.db.exists("Repair Order", repair_order):
 		return None
@@ -827,6 +858,7 @@ def get_board_thread(
 		can_post, read_only_reason = _compute_capture_lock((ro_summary or {}).get("status"))
 
 	pin_state = _get_ro_pin_state_safe(ro_for_pin)
+	phone_key_state = _get_ro_phone_key_state_safe(ro_for_pin)
 
 	return {
 		"ok": True,
@@ -841,6 +873,7 @@ def get_board_thread(
 		"has_more": has_more,
 		"next_before_event": next_before_event,
 		"pin_state": pin_state,
+		"phone_key_state": phone_key_state,
 		"repair_order_summary": ro_summary,
 	}
 
@@ -1017,6 +1050,7 @@ def get_thread_delta(
 		can_post, read_only_reason = _compute_capture_lock(ro_status)
 
 	pin_state = _get_ro_pin_state_safe(ro_for_pin)
+	phone_key_state = _get_ro_phone_key_state_safe(ro_for_pin)
 
 	return {
 		"ok": True,
@@ -1032,6 +1066,7 @@ def get_thread_delta(
 		"open_cards": open_cards,
 		"updated_cards": updated_cards,
 		"pin_state": pin_state,
+		"phone_key_state": phone_key_state,
 	}
 
 
@@ -1528,6 +1563,39 @@ def reveal_ro_pin(repair_order: str) -> dict[str, Any]:
 	}
 
 
+@frappe.whitelist()
+def reveal_ro_phone_key(repair_order: str) -> dict[str, Any]:
+	"""Advisor/Manager-only Tesla Phone Key reveal delegating to ism.portal.phone_key_vault."""
+	resolve_actor_role()
+	clean_ro = require_str(repair_order, "repair_order")
+	assert_can_access_ro(clean_ro, user=frappe.session.user)
+
+	try:
+		from ism.portal.phone_key_vault import get_ro_phone_key_for_staff
+	except ImportError:
+		return {
+			"ok": True,
+			"available": False,
+			"phone_key_feature_installed": False,
+			"repair_order": clean_ro,
+		}
+
+	res = get_ro_phone_key_for_staff(clean_ro, channel="Board")
+	if isinstance(res, dict):
+		return {
+			"ok": True,
+			"available": bool(res.get("available")),
+			"phone_key_feature_installed": True,
+			**res,
+		}
+	return {
+		"ok": True,
+		"available": False,
+		"phone_key_feature_installed": True,
+		"repair_order": clean_ro,
+	}
+
+
 # ---------------------------------------------------------------------------
 # Manager / Advisor Only Cockpit & Storage Admin Endpoints
 # ---------------------------------------------------------------------------
@@ -1585,6 +1653,7 @@ __all__ = [
 	"list_board_action_feed",
 	"list_board_threads",
 	"post_board_capture",
+	"reveal_ro_phone_key",
 	"reveal_ro_pin",
 	"sync_cockpit_action",
 	"test_media_storage",

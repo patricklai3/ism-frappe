@@ -233,7 +233,8 @@ def _acquire_locked_ro_state(ro) -> Dict[str, Any]:
 
 	locked_rows = frappe.db.sql(
 		"""
-		SELECT name, status, sales_invoice, vehicle_released, customer, company, grand_total, paid_amount
+		SELECT name, status, sales_invoice, vehicle_released, customer, company, grand_total, paid_amount,
+		       tesla_phone_key_status
 		FROM `tabRepair Order`
 		WHERE name = %s
 		FOR UPDATE
@@ -704,6 +705,7 @@ def process_ro_payment_and_release(
 	paid_amount=None,
 	odometer_out=None,
 	payments=None,
+	phone_key_removed_confirmed=False,
 	**kwargs,
 ) -> Dict[str, Any]:
 	"""
@@ -725,6 +727,9 @@ def process_ro_payment_and_release(
 		paid_amount = payment_method.get("paid_amount", paid_amount)
 		odometer_out = payment_method.get("odometer_out", odometer_out)
 		payments = payment_method.get("payments", payments)
+		phone_key_removed_confirmed = payment_method.get(
+			"phone_key_removed_confirmed", phone_key_removed_confirmed
+		)
 		if payment_method.get("payment_method"):
 			explicit_method_supplied = True
 		payment_method = payment_method.get("payment_method") or "Debit / Interac"
@@ -741,12 +746,37 @@ def process_ro_payment_and_release(
 		odometer_out = kwargs.get("odometer_out")
 	if payments is None and "payments" in kwargs:
 		payments = kwargs.get("payments")
+	if not phone_key_removed_confirmed and "phone_key_removed_confirmed" in kwargs:
+		phone_key_removed_confirmed = kwargs.get("phone_key_removed_confirmed")
 
 	pay_amt: float | None = None
 	if paid_amount is not None and payments is None:
 		pay_amt = _parse_strict_amount(paid_amount, "Paid amount", allow_zero=True)
 
-	_acquire_locked_ro_state(ro)
+	locked_ro = _acquire_locked_ro_state(ro)
+
+	has_active_phone_key = (
+		(locked_ro.get("tesla_phone_key_status") or getattr(ro, "tesla_phone_key_status", None))
+		== "Provided"
+	)
+	if has_active_phone_key:
+		confirmed_flag = (
+			phone_key_removed_confirmed
+			if isinstance(phone_key_removed_confirmed, bool)
+			else (
+				str(phone_key_removed_confirmed).strip().lower() in ("1", "true", "yes", "on")
+				if isinstance(phone_key_removed_confirmed, str)
+				else bool(cint(phone_key_removed_confirmed))
+			)
+		)
+		if not confirmed_flag:
+			frappe.throw(
+				_(
+					"Please remove this vehicle's Tesla Phone Key from the shop phone and confirm removal "
+					"before releasing the vehicle."
+				),
+				frappe.ValidationError,
+			)
 
 	if odometer_out is not None:
 		ro.odometer_out = _parse_strict_odometer(odometer_out, "Odometer Out")
@@ -1048,6 +1078,9 @@ def process_ro_payment_and_release(
 	ro.vehicle_released = 1
 	ro.status = "Closed / Released"
 	ro.checkout_date = now_datetime()
+	if has_active_phone_key:
+		ro.tesla_phone_key_released_by = getattr(frappe.session, "user", None) or "Administrator"
+		ro.tesla_phone_key_released_at = ro.checkout_date
 
 	if ro.vehicle:
 		frappe.db.set_value(

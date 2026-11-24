@@ -18,16 +18,24 @@ from frappe import _
 
 from ism.ism.doctype.shop_action_item.clearing import build_clearing_condition_for_ro
 from ism.portal.contracts import (
+	PHONE_KEY_STATUS_NOT_PROVIDED,
+	PHONE_KEY_STATUS_PROVIDED,
+	PHONE_KEY_STATUS_PURGED,
+	PHONE_KEY_STATUS_RELEASED,
 	PIN_STATUS_OPTED_OUT,
 	PIN_STATUS_PROVIDED,
 	PIN_STATUS_PURGED,
 )
 
 __all__ = [
+	"emit_portal_phone_key_purged_event",
+	"emit_portal_phone_key_submitted_event",
 	"emit_portal_pin_purged_event",
 	"emit_portal_pin_submitted_event",
 	"emit_portal_quote_approved_event",
 	"emit_portal_reschedule_event",
+	"emit_portal_schedule_entry_phone_key_purged_event",
+	"emit_portal_schedule_entry_phone_key_submitted_event",
 	"emit_portal_schedule_entry_pin_purged_event",
 	"emit_portal_schedule_entry_pin_submitted_event",
 ]
@@ -325,6 +333,133 @@ def emit_portal_schedule_entry_pin_purged_event(se_name: str, *, reason: str = "
 			"event_type": "pin_purged",
 			"schedule_entry": se_name,
 			"pin_status": PIN_STATUS_PURGED,
+			"reason": reason,
+		},
+		after_commit=True,
+	)
+
+
+def emit_portal_phone_key_submitted_event(ro_name: str, phone_key_status: str) -> None:
+	"""Upsert a non-sensitive Shop Action Item and emit realtime for Tesla Phone Key updates.
+
+	Strictly NEVER includes the invite URL in any title, details, or realtime payload.
+	"""
+	if phone_key_status == PHONE_KEY_STATUS_PROVIDED:
+		title = _("Customer Shared Tesla Phone Key Invite for {0}").format(ro_name)
+		details = _(
+			"Customer shared an optional encrypted Tesla Phone Key invitation link via the Customer Portal. "
+			"Authorized service advisors and managers can open it from the Repair Order or Shop Board "
+			"and must remove the vehicle from the shop phone before checkout release."
+		)
+	elif phone_key_status == PHONE_KEY_STATUS_NOT_PROVIDED:
+		title = _("Customer Removed Tesla Phone Key Invite for {0}").format(ro_name)
+		details = _(
+			"Customer removed their Tesla Phone Key invitation link via the Customer Portal. "
+			"If the vehicle was already added to the shop phone, please remove it from the Tesla app."
+		)
+	else:
+		title = _("Tesla Phone Key Status Updated for {0}").format(ro_name)
+		details = _("Tesla Phone Key status changed to {0}.").format(phone_key_status)
+
+	clearing_type, clearing_params = build_clearing_condition_for_ro(
+		"ro_closed",
+		ro_name,
+		overrides={"description": "When Repair Order closes or is cancelled"},
+	)
+
+	_upsert_ro_action_item(
+		ro_name=ro_name,
+		dedup_key=f"portal:phone_key:{ro_name}",
+		title=title,
+		priority="Low",
+		details=details,
+		clearing_condition_type=clearing_type,
+		clearing_condition_json=clearing_params,
+	)
+
+	frappe.publish_realtime(
+		"ism_portal_event",
+		{
+			"event_type": "phone_key_updated",
+			"repair_order": ro_name,
+			"phone_key_status": phone_key_status,
+		},
+		after_commit=True,
+	)
+
+
+def emit_portal_phone_key_purged_event(
+	ro_name: str,
+	*,
+	status: str = PHONE_KEY_STATUS_RELEASED,
+	reason: str = "Closed / Released",
+) -> None:
+	"""Emit non-sensitive realtime notification after a Repair Order Tesla Phone Key is released/purged."""
+	event_type = "phone_key_released" if status == PHONE_KEY_STATUS_RELEASED else "phone_key_purged"
+	frappe.publish_realtime(
+		"ism_portal_event",
+		{
+			"event_type": event_type,
+			"repair_order": ro_name,
+			"phone_key_status": status,
+			"reason": reason,
+		},
+		after_commit=True,
+	)
+
+
+def emit_portal_schedule_entry_phone_key_submitted_event(se_name: str, phone_key_status: str) -> None:
+	"""Upsert a non-sensitive Shop Action Item and realtime event for Schedule Entry Phone Key updates.
+
+	Strictly NEVER includes the invite URL in any title, details, or realtime payload.
+	"""
+	if phone_key_status == PHONE_KEY_STATUS_PROVIDED:
+		title = _("Customer Shared Tesla Phone Key Invite for Appointment {0}").format(se_name)
+		details = _(
+			"Customer shared an optional encrypted Tesla Phone Key invitation link for their appointment. "
+			"Authorized service advisors and managers can access it on the Schedule Entry (or linked Repair Order once checked in)."
+		)
+	elif phone_key_status == PHONE_KEY_STATUS_NOT_PROVIDED:
+		title = _("Customer Removed Tesla Phone Key Invite for Appointment {0}").format(se_name)
+		details = _("Customer removed their Tesla Phone Key invitation link for this appointment.")
+	else:
+		title = _("Tesla Phone Key Status Updated for Appointment {0}").format(se_name)
+		details = _("Tesla Phone Key status changed to {0}.").format(phone_key_status)
+
+	_upsert_portal_action_item(
+		reference_doctype="Schedule Entry",
+		reference_name=se_name,
+		dedup_key=f"portal:phone_key:se:{se_name}",
+		title=title,
+		priority="Low",
+		details=details,
+	)
+
+	frappe.publish_realtime(
+		"ism_portal_event",
+		{
+			"event_type": "phone_key_updated",
+			"schedule_entry": se_name,
+			"phone_key_status": phone_key_status,
+		},
+		after_commit=True,
+	)
+
+
+def emit_portal_schedule_entry_phone_key_purged_event(
+	se_name: str,
+	*,
+	status: str = PHONE_KEY_STATUS_PURGED,
+	reason: str = "Cancelled",
+) -> None:
+	"""Emit non-sensitive realtime notification after a Schedule Entry Tesla Phone Key is released/purged."""
+	event_type = "phone_key_released" if status == PHONE_KEY_STATUS_RELEASED else "phone_key_purged"
+	frappe.publish_realtime(
+		"ism_portal_event",
+		{
+			"event_type": event_type,
+			"schedule_entry": se_name,
+			"phone_key_status": status,
 			"reason": reason,
 		},
 		after_commit=True,
