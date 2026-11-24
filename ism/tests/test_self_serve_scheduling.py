@@ -101,6 +101,7 @@ class TestSelfServeScheduling(ISMTestCase):
 			customer_arrival_offset_minutes=15,
 			reschedule_cutoff_hours=24,
 			max_self_reschedules=2,
+			max_concurrent_bookings_per_phone=2,
 			self_serve_default_entry_type="Diagnostic",
 			self_serve_min_lead_time_minutes=120,
 			self_serve_horizon_days=30,
@@ -179,6 +180,8 @@ class TestSelfServeScheduling(ISMTestCase):
 			self.assertNotIn(word, joined, f"Forbidden customer word '{word}' found in: {joined}")
 
 	def _create_scheduled_entry(self, sched_date, sched_time="09:00:00", duration=60, bay=None, **kwargs):
+		seq = getattr(self, "_sched_phone_seq", 100) + 1
+		self._sched_phone_seq = seq
 		payload = {
 			"doctype": "Schedule Entry",
 			"entry_type": "Diagnostic",
@@ -187,8 +190,8 @@ class TestSelfServeScheduling(ISMTestCase):
 			"scheduled_time": sched_time,
 			"estimated_duration": duration,
 			"service_bay": bay or self.bay1,
-			"provisional_customer_name": "Jordan Rivera",
-			"provisional_phone": "+16045550101",
+			"provisional_customer_name": f"Jordan Rivera {seq}",
+			"provisional_phone": f"+1604555{seq:04d}",
 			"booking_source": "Website Self-Serve",
 		}
 		payload.update(kwargs)
@@ -1652,4 +1655,169 @@ class TestSelfServeScheduling(ISMTestCase):
 		)
 		self.assertEqual(norm["vehicle_generation"], "Model S Apr 2016 - Jan 2021")
 		self.assertEqual(norm["provisional_vehicle_info"], "2021 Pearl White Model S (EV 2021)")
+
+	def test_reschedule_and_slot_discovery_block_overlapping_same_vehicle_and_phone(self):
+		"""Reschedule slot discovery hides overlapping slots for the same car/phone and atomic reschedule rejects them."""
+		day1 = str(self.base_date)
+		day2 = str(add_days(self.base_date, 1))
+		shared_phone = "+16045550166"
+
+		# Entry 1 on day1 08:00-09:00 in Bay 1
+		se1 = self._create_scheduled_entry(
+			day1,
+			sched_time="08:00:00",
+			duration=60,
+			bay=self.bay1,
+			provisional_phone=shared_phone,
+			provisional_vehicle_model="Model 3",
+			provisional_vehicle_color="Pearl White",
+			provisional_license_plate="DBL 101",
+		)
+		# Entry 2 on day2 10:00-11:00 in Bay 2 for the same phone & plate
+		se2 = self._create_scheduled_entry(
+			day2,
+			sched_time="10:00:00",
+			duration=60,
+			bay=self.bay2,
+			provisional_phone=shared_phone,
+			provisional_vehicle_model="Model 3",
+			provisional_vehicle_color="Pearl White",
+			provisional_license_plate="DBL 101",
+		)
+
+		# Slot discovery for rescheduling se2 must exclude day1 07:45 (internal 08:00) & 08:15 (internal 08:30)
+		slots_res = find_self_serve_slots(
+			duration_minutes=60,
+			start_date=day1,
+			days_ahead=1,
+			exclude_entry=se2.name,
+			vehicle_identity=se2,
+			now_dt=self.now_anchor,
+		)
+		day1_arrivals = [
+			s["customer_arrival_time"]
+			for d in slots_res["days"]
+			if d["date"] == day1
+			for s in d["slots"]
+		]
+		self.assertNotIn("07:45:00", day1_arrivals)
+		self.assertNotIn("08:15:00", day1_arrivals)
+		self.assertIn("08:45:00", day1_arrivals)  # Internal 09:00 back-to-back is allowed
+
+		# Attempting to reschedule se2 onto day1 08:15 (internal 08:30, overlapping se1) fails atomically
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			reschedule_self_serve_appointment(
+				se2.name,
+				day1,
+				"08:15",
+				now_dt=self.now_anchor,
+				emit_notification=False,
+			)
+		self.assertEqual(getattr(ctx.exception, "reason_code", None), "vehicle_conflict")
+		# Zero-leak assertion: no internal Schedule Entry ID or Bay name exposed
+		self.assertNotIn(se1.name, str(ctx.exception))
+		self.assertNotIn(self.bay1, str(ctx.exception))
+
+		# Original slot for se2 is completely preserved
+		se2.reload()
+		self.assertEqual(str(se2.scheduled_date), day2)
+		self.assertEqual(se2.scheduled_time, timedelta(hours=10))
+		self.assertEqual(se2.reschedule_count, 0)
+
+		# Rescheduling se2 to back-to-back day1 08:45 (internal 09:00) succeeds
+		ok_res = reschedule_self_serve_appointment(
+			se2.name,
+			day1,
+			"08:45",
+			now_dt=self.now_anchor,
+			emit_notification=False,
+		)
+		self.assertEqual(ok_res["schedule_entry"], se2.name)
+		self.assertEqual(ok_res["reschedule_count"], 1)
+
+	def test_concurrent_same_vehicle_different_bays_race(self):
+		"""Two threads simultaneously book the SAME Repair Vehicle into TWO DIFFERENT bays: strictly 1 succeeds."""
+		frappe.db.rollback()
+		site = frappe.local.site
+		race_date = str(add_days(today(), 16))
+		created_se_names = []
+
+		try:
+			self._set_ism_settings(
+				operating_hours_start="08:00:00",
+				operating_hours_end="17:00:00",
+				break_start="12:00:00",
+				break_end="12:30:00",
+				default_slot_interval=30,
+				enable_technician_capacity=0,
+				holiday_list=None,
+			)
+			frappe.db.commit()
+
+			barrier = threading.Barrier(2)
+			results = []
+			results_lock = threading.Lock()
+			target_bays = [self.bay1, self.bay2]
+
+			def _worker(idx: int):
+				frappe.init(site=site)
+				frappe.connect()
+				frappe.set_user("Administrator")
+				try:
+					barrier.wait(timeout=10)
+					se = frappe.get_doc({
+						"doctype": "Schedule Entry",
+						"entry_type": "Diagnostic",
+						"status": "Scheduled",
+						"customer": self.customer,
+						"repair_vehicle": self.vehicle,
+						"scheduled_date": race_date,
+						"scheduled_time": "09:00:00",
+						"estimated_duration": 60,
+						"service_bay": target_bays[idx],
+					}).insert(ignore_permissions=True)
+					frappe.db.commit()
+					with results_lock:
+						results.append(("ok", se.name))
+				except Exception as exc:
+					frappe.db.rollback()
+					with results_lock:
+						results.append(("err", exc))
+				finally:
+					frappe.destroy()
+
+			t1 = threading.Thread(target=_worker, args=(0,))
+			t2 = threading.Thread(target=_worker, args=(1,))
+			t1.start()
+			t2.start()
+			t1.join(timeout=30)
+			t2.join(timeout=30)
+
+			frappe.db.rollback()
+			successes = [ref for kind, ref in results if kind == "ok"]
+			failures = [exc for kind, exc in results if kind == "err"]
+			created_se_names.extend(successes)
+
+			self.assertEqual(len(results), 2, f"Expected 2 thread outcomes, got: {results}")
+			self.assertEqual(len(successes), 1, f"Expected exactly 1 winner, got: {results}")
+			self.assertEqual(len(failures), 1, f"Expected exactly 1 loser, got: {results}")
+			self.assertIsInstance(failures[0], (frappe.ValidationError, frappe.QueryDeadlockError))
+
+			active_for_vehicle = frappe.get_all(
+				"Schedule Entry",
+				filters={
+					"repair_vehicle": self.vehicle,
+					"scheduled_date": race_date,
+					"status": ["not in", ["Cancelled", "Completed", "No Show"]],
+				},
+				pluck="name",
+			)
+			self.assertEqual(len(active_for_vehicle), 1)
+			self.assertEqual(active_for_vehicle[0], successes[0])
+		finally:
+			frappe.db.rollback()
+			for se_name in created_se_names:
+				if frappe.db.exists("Schedule Entry", se_name):
+					frappe.delete_doc("Schedule Entry", se_name, force=True, ignore_permissions=True)
+			frappe.db.commit()
 

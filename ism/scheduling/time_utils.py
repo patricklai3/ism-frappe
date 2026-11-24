@@ -23,6 +23,7 @@ DEFAULT_SHOP_SETTINGS: Dict[str, Any] = {
 	"customer_arrival_offset_minutes": 15,
 	"reschedule_cutoff_hours": 24,
 	"max_self_reschedules": 2,
+	"max_concurrent_bookings_per_phone": 2,
 	"self_serve_default_entry_type": "Diagnostic",
 	"self_serve_min_lead_time_minutes": 120,
 	"self_serve_horizon_days": 30,
@@ -249,6 +250,9 @@ def get_shop_settings() -> Dict[str, Any]:
 	raw_max_reschedules = getattr(doc, "max_self_reschedules", None)
 	if raw_max_reschedules is not None and raw_max_reschedules != "":
 		settings["max_self_reschedules"] = max(0, cint(raw_max_reschedules))
+	raw_max_concurrent_phone = getattr(doc, "max_concurrent_bookings_per_phone", None)
+	if raw_max_concurrent_phone is not None and raw_max_concurrent_phone != "":
+		settings["max_concurrent_bookings_per_phone"] = min(10, max(1, cint(raw_max_concurrent_phone)))
 	if getattr(doc, "self_serve_default_entry_type", None):
 		settings["self_serve_default_entry_type"] = doc.self_serve_default_entry_type
 	raw_lead_time = getattr(doc, "self_serve_min_lead_time_minutes", None)

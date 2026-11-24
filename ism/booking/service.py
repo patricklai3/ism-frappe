@@ -31,6 +31,7 @@ from ism.booking.contracts import (
 	ERR_MAX_PACKAGES_EXCEEDED,
 	ERR_SLOT_UNAVAILABLE,
 	ERR_SMS_UNCONFIGURED,
+	ERR_VEHICLE_CONFLICT,
 	HONEYPOT_FIELD_NAME,
 	PORTAL_ROUTE,
 	VEHICLE_MIN_YEAR,
@@ -59,13 +60,17 @@ from ism.scheduling.bookable_catalog import (
 	compute_packages_booking_requirements,
 	list_bookable_packages,
 )
+from ism.scheduling.entry_queries import (
+	build_holiday_checker,
+	find_conflicting_vehicle_entries,
+)
 from ism.scheduling.self_serve import (
 	create_provisional_booking,
 	find_self_serve_slots,
 	get_self_serve_policy,
 	normalize_provisional_intake,
 )
-from ism.scheduling.time_utils import normalize_date
+from ism.scheduling.time_utils import get_shop_settings, normalize_date
 from ism.utils.tesla_manual import get_generation_catalog
 
 _COMMIT_SAVEPOINT_NAME: str = "p5_booking_commit"
@@ -825,7 +830,7 @@ def initiate_booking_otp(
 
 	prior_len = _message_log_len()
 	try:
-		compute_packages_booking_requirements(
+		reqs = compute_packages_booking_requirements(
 			deduped_ids,
 			vehicle_model=normalized["vehicle_model"],
 			vehicle_year=normalized["vehicle_year"],
@@ -871,6 +876,40 @@ def initiate_booking_otp(
 			error_code=phone_guard.error_code or "RATE_LIMITED",
 			error=phone_guard.error or "Unable to schedule another appointment right now.",
 			http_status=phone_guard.http_status,
+		)
+
+	shop_settings = get_shop_settings()
+	holiday_fn = build_holiday_checker(shop_settings.get("holiday_list"), iso_date)
+	veh_conflicts = find_conflicting_vehicle_entries(
+		target_entry={
+			"provisional_customer_name": normalized["customer_name"],
+			"provisional_phone": normalized["phone"],
+			"provisional_email": normalized["email"],
+			"provisional_vehicle_model": normalized["vehicle_model"],
+			"provisional_vehicle_year": normalized["vehicle_year"],
+			"provisional_vehicle_color": normalized["vehicle_color"],
+			"provisional_license_plate": normalized["license_plate"],
+			"provisional_vin_or_plate": normalized["vin_or_plate"],
+			"provisional_vehicle_info": normalized["provisional_vehicle_info"],
+		},
+		scheduled_date=iso_date,
+		scheduled_time=internal_start_time,
+		duration_minutes=int(reqs["duration_minutes"]),
+		is_holiday_fn=holiday_fn,
+	)
+	if veh_conflicts:
+		match_kind = veh_conflicts[0].get("_conflict_match_kind") or "vehicle"
+		conflict_msg = (
+			"You have reached the maximum number of overlapping appointments allowed for this phone number. "
+			"Please select another time or manage your appointments in the Customer Portal."
+			if match_kind == "phone"
+			else "This vehicle already has an overlapping appointment scheduled during the selected time. "
+			"Please select another time or manage your appointment in the Customer Portal."
+		)
+		return _error_result(
+			error_code=ERR_VEHICLE_CONFLICT,
+			error=conflict_msg,
+			http_status=409,
 		)
 
 	prior_len = _message_log_len()
@@ -1160,6 +1199,18 @@ def verify_and_commit_booking(
 			_clear_thrown_messages(prior_len)
 			_rollback_savepoint_safe(_COMMIT_SAVEPOINT_NAME)
 			reason_code = getattr(exc, "reason_code", None)
+			if reason_code == "vehicle_conflict":
+				return _error_result(
+					error_code=ERR_VEHICLE_CONFLICT,
+					error=(
+						"This vehicle or phone number already has an overlapping appointment scheduled "
+						"during the selected time. Please select another time or manage your appointment "
+						"in the Customer Portal."
+					),
+					http_status=409,
+					otp_verified=True,
+					challenge_id=clean_challenge_id,
+				)
 			if reason_code in _SLOT_CONFLICT_REASON_CODES:
 				return _error_result(
 					error_code=ERR_SLOT_UNAVAILABLE,

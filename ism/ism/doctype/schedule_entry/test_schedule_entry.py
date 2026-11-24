@@ -329,3 +329,345 @@ class TestScheduleEntry(ISMTestCase):
 		self.assertIn("(CHK 202)", res["vehicle_display"])
 		self.assertEqual(res["vehicle_info"]["color"], "Quicksilver")
 		self.assertEqual(res["vehicle_info"]["license_plate"], "CHK 202")
+
+	def test_prevent_overlapping_same_vehicle_across_bays_and_unassigned(self):
+		"""Same linked Repair Vehicle cannot overlap across different bays, unassigned bay, lunch, or overnight."""
+		bay1 = self.manifest.bays["main_lift"]
+		bay2 = self.manifest.bays["alignment"]
+		day1 = frappe.utils.add_days(frappe.utils.today(), 7)
+		day2 = frappe.utils.add_days(day1, 1)
+
+		se1 = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Repair",
+			"repair_order": self.ro.name,
+			"scheduled_date": day1,
+			"scheduled_time": "08:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay1,
+			"status": "Scheduled",
+		})
+
+		# Overlapping on different bay -> blocked
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"repair_vehicle": self.vehicle.name,
+				"scheduled_date": day1,
+				"scheduled_time": "08:30:00",
+				"estimated_duration": 45,
+				"service_bay": bay2,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+		self.assertEqual(getattr(ctx.exception, "reason_code", None), "vehicle_conflict")
+
+		# Overlapping with unassigned bay (service_bay=None) -> also blocked
+		with self.assertRaises(frappe.ValidationError) as ctx_unassigned:
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"repair_order": self.ro.name,
+				"scheduled_date": day1,
+				"scheduled_time": "08:15:00",
+				"estimated_duration": 30,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+		self.assertEqual(getattr(ctx_unassigned.exception, "reason_code", None), "vehicle_conflict")
+
+		# Linking an existing entry to the same RO during an overlapping window on update -> blocked
+		other_se = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"scheduled_date": day1,
+			"scheduled_time": "08:30:00",
+			"estimated_duration": 30,
+			"service_bay": bay2,
+			"status": "Scheduled",
+		})
+		other_se.repair_order = self.ro.name
+		with self.assertRaises(frappe.ValidationError):
+			other_se.save(ignore_permissions=True)
+		other_se.delete(ignore_permissions=True)
+
+		# Adjacent back-to-back on different bay (09:00-10:00) -> allowed
+		se_adj = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Repair",
+			"repair_order": self.ro.name,
+			"scheduled_date": day1,
+			"scheduled_time": "09:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay2,
+			"status": "Scheduled",
+		})
+		self.assertTrue(se_adj.name)
+
+		# Self-update (extending duration without hitting se_adj, or changing notes) -> allowed
+		se1.notes = "Updated notes"
+		se1.save(ignore_permissions=True)
+
+		# Overnight span (15:00 Day 1 for 240 min -> finishes Day 2 10:00) blocks Day 2 08:30
+		self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Repair",
+			"repair_order": self.ro.name,
+			"scheduled_date": day1,
+			"scheduled_time": "15:00:00",
+			"estimated_duration": 240,
+			"service_bay": bay1,
+			"status": "Scheduled",
+		})
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"repair_vehicle": self.vehicle.name,
+				"scheduled_date": day2,
+				"scheduled_time": "08:30:00",
+				"estimated_duration": 60,
+				"service_bay": bay2,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+
+		# Marking se1 Cancelled / Completed / No Show releases vehicle capacity for [08:00, 09:00)
+		se1.status = "Cancelled"
+		se1.save(ignore_permissions=True)
+		se_rebooked = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"repair_vehicle": self.vehicle.name,
+			"scheduled_date": day1,
+			"scheduled_time": "08:30:00",
+			"estimated_duration": 30,
+			"service_bay": bay2,
+			"status": "Scheduled",
+		})
+		self.assertTrue(se_rebooked.name)
+
+	def test_cross_tier_vin_plate_phone_and_false_positive_guards(self):
+		"""Cross-matches VIN/plate, enforces one-phone-at-a-time (Slot 5 case), and allows distinct cars/customers."""
+		bay1 = self.manifest.bays["main_lift"]
+		bay2 = self.manifest.bays["alignment"]
+		bay4 = self.manifest.bays["tire_quick"]
+		target_date = frappe.utils.add_days(frappe.utils.today(), 8)
+
+		veh = self.create_test_vehicle(
+			customer=self.customer.name,
+			color="Pearl White",
+			license_plate="EV 7788",
+		)
+		self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"customer": self.customer.name,
+			"repair_vehicle": veh.name,
+			"scheduled_date": target_date,
+			"scheduled_time": "08:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay1,
+			"status": "Scheduled",
+		})
+
+		# Linked <-> Provisional cross-match via license plate with different spacing/case/hyphen + different phone
+		with self.assertRaises(frappe.ValidationError) as ctx_plate:
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"provisional_customer_name": "Spouse Driver",
+				"provisional_phone": "+16045559991",
+				"provisional_license_plate": "ev-7788",
+				"scheduled_date": target_date,
+				"scheduled_time": "08:30:00",
+				"estimated_duration": 45,
+				"service_bay": bay2,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+		self.assertEqual(getattr(ctx_plate.exception, "reason_code", None), "vehicle_conflict")
+
+		# Linked <-> Provisional cross-match via 17-char VIN
+		with self.assertRaises(frappe.ValidationError) as ctx_vin:
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"provisional_customer_name": "Another Driver",
+				"provisional_phone": "+16045559992",
+				"provisional_vin_or_plate": veh.vin.lower(),
+				"scheduled_date": target_date,
+				"scheduled_time": "08:15:00",
+				"estimated_duration": 30,
+				"service_bay": bay4,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+		self.assertEqual(getattr(ctx_vin.exception, "reason_code", None), "vehicle_conflict")
+
+		# Slot 5 exact reproduction + one-phone-at-a-time rule (even with blank vehicle model/plate/year)
+		slot5_date = frappe.utils.add_days(frappe.utils.today(), 9)
+		self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"booking_source": "Website Self-Serve",
+			"provisional_customer_name": "test",
+			"provisional_phone": "+15552311564",
+			"provisional_vehicle_year": 2023,
+			"provisional_vehicle_model": "Model 3",
+			"provisional_vehicle_color": "Pearl White",
+			"provisional_vehicle_info": "2023 Pearl White Model 3",
+			"scheduled_date": slot5_date,
+			"scheduled_time": "08:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay1,
+			"status": "Scheduled",
+		})
+
+		# Same phone, overlapping 08:30-09:15 on Bay 4 (exact Slot 5 SE-00002 shape) -> STILL blocked as same car even with default phone limit=2
+		with self.assertRaises(frappe.ValidationError) as ctx_slot5:
+			frappe.get_doc({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"booking_source": "Website Self-Serve",
+				"provisional_customer_name": "Test User",
+				"provisional_phone": "555-231-1564",
+				"provisional_vehicle_year": 0,
+				"provisional_vehicle_model": "Model 3",
+				"provisional_vehicle_color": "Pearl White",
+				"provisional_vehicle_info": "Pearl White Model 3",
+				"scheduled_date": slot5_date,
+				"scheduled_time": "08:30:00",
+				"estimated_duration": 45,
+				"service_bay": bay4,
+				"status": "Scheduled",
+			}).insert(ignore_permissions=True)
+		self.assertEqual(getattr(ctx_slot5.exception, "reason_code", None), "vehicle_conflict")
+
+		# ISM Settings max_concurrent_bookings_per_phone defaults to 2 and validates bounds (1-10)
+		settings = frappe.get_single("ISM Settings")
+		orig_phone_limit = settings.get("max_concurrent_bookings_per_phone")
+		self.assertEqual(int(orig_phone_limit or 2), 2)
+		try:
+			for bad_val in (0, 11):
+				settings.max_concurrent_bookings_per_phone = bad_val
+				with self.assertRaises(frappe.ValidationError):
+					settings.save(ignore_permissions=True)
+				settings.reload()
+
+			# Default limit=2: same phone CAN book a 2nd DIFFERENT car (Model Y) at overlapping time
+			second_car_se = self._insert_entry({
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"provisional_phone": "+15552311564",
+				"provisional_vehicle_model": "Model Y",
+				"provisional_vehicle_color": "Deep Blue",
+				"scheduled_date": slot5_date,
+				"scheduled_time": "08:30:00",
+				"estimated_duration": 30,
+				"service_bay": bay2,
+				"status": "Scheduled",
+			})
+			self.assertTrue(second_car_se.name)
+
+			# Default limit=2: a 3rd overlapping appointment for the same phone is BLOCKED
+			with self.assertRaises(frappe.ValidationError) as ctx_third:
+				frappe.get_doc({
+					"doctype": "Schedule Entry",
+					"entry_type": "Diagnostic",
+					"provisional_phone": "+15552311564",
+					"provisional_vehicle_model": "Model S",
+					"provisional_vehicle_color": "Ultra Red",
+					"scheduled_date": slot5_date,
+					"scheduled_time": "08:30:00",
+					"estimated_duration": 30,
+					"service_bay": bay4,
+					"status": "Scheduled",
+				}).insert(ignore_permissions=True)
+			self.assertEqual(getattr(ctx_third.exception, "reason_code", None), "vehicle_conflict")
+
+			# Lowering setting to 1 blocks even a 2nd different car / blank-vehicle entry on the same phone
+			settings.max_concurrent_bookings_per_phone = 1
+			settings.save(ignore_permissions=True)
+			frappe.clear_cache(doctype="ISM Settings")
+			second_car_se.delete(ignore_permissions=True)
+
+			with self.assertRaises(frappe.ValidationError) as ctx_limit1:
+				frappe.get_doc({
+					"doctype": "Schedule Entry",
+					"entry_type": "Diagnostic",
+					"provisional_phone": "+15552311564",
+					"scheduled_date": slot5_date,
+					"scheduled_time": "08:30:00",
+					"estimated_duration": 30,
+					"service_bay": bay2,
+					"status": "Scheduled",
+				}).insert(ignore_permissions=True)
+			self.assertEqual(getattr(ctx_limit1.exception, "reason_code", None), "vehicle_conflict")
+		finally:
+			settings.reload()
+			settings.max_concurrent_bookings_per_phone = orig_phone_limit if orig_phone_limit is not None else 2
+			settings.save(ignore_permissions=True)
+			frappe.clear_cache(doctype="ISM Settings")
+
+		# False-positive guard 1: Different customer/phone with identical Pearl White Model 3 -> allowed
+		other_cust_se = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"provisional_customer_name": "Other Customer",
+			"provisional_phone": "+15559998888",
+			"provisional_vehicle_year": 2023,
+			"provisional_vehicle_model": "Model 3",
+			"provisional_vehicle_color": "Pearl White",
+			"provisional_vehicle_info": "2023 Pearl White Model 3",
+			"scheduled_date": slot5_date,
+			"scheduled_time": "08:30:00",
+			"estimated_duration": 45,
+			"service_bay": bay4,
+			"status": "Scheduled",
+		})
+		self.assertTrue(other_cust_se.name)
+
+		# False-positive guard 2: Fleet customer with TWO distinct linked Repair Vehicles -> allowed
+		fleet_date = frappe.utils.add_days(frappe.utils.today(), 10)
+		fleet_cust = self.manifest.customers["fleet_1"]
+		fv1 = self.manifest.vehicles["veh_fleet_1"]
+		fv2 = self.manifest.vehicles["veh_fleet_2"]
+		fse1 = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"customer": fleet_cust,
+			"repair_vehicle": fv1,
+			"scheduled_date": fleet_date,
+			"scheduled_time": "10:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay1,
+			"status": "Scheduled",
+		})
+		fse2 = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Diagnostic",
+			"customer": fleet_cust,
+			"repair_vehicle": fv2,
+			"scheduled_date": fleet_date,
+			"scheduled_time": "10:00:00",
+			"estimated_duration": 60,
+			"service_bay": bay2,
+			"status": "Scheduled",
+		})
+		self.assertNotEqual(fse1.name, fse2.name)
+
+		# False-positive guard 3: Vehicle-less shop entries (Meeting / Internal Service) overlapping -> allowed
+		m1 = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Meeting",
+			"scheduled_date": fleet_date,
+			"scheduled_time": "14:00:00",
+			"estimated_duration": 60,
+			"status": "Scheduled",
+		})
+		m2 = self._insert_entry({
+			"doctype": "Schedule Entry",
+			"entry_type": "Internal Service",
+			"scheduled_date": fleet_date,
+			"scheduled_time": "14:00:00",
+			"estimated_duration": 60,
+			"status": "Scheduled",
+		})
+		self.assertNotEqual(m1.name, m2.name)

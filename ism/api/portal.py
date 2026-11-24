@@ -439,6 +439,7 @@ def get_reschedule_options(
 		start_date=start_date,
 		days_ahead=parsed_days_ahead,
 		exclude_entry=se_name,
+		vehicle_identity=se_doc,
 	)
 
 	current_appt = eligibility.get("current_appointment") or {}

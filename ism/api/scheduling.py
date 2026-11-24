@@ -20,8 +20,10 @@ from ism.scheduling.capacity import (
 from ism.scheduling.entry_queries import (
 	build_holiday_checker,
 	entry_datetimes,
+	extract_vehicle_identity,
 	fetch_blocking_entries,
 	find_conflicting_bay_entries,
+	find_conflicting_vehicle_entries,
 	intervals_overlap,
 	span_datetimes,
 )
@@ -117,6 +119,59 @@ def check_bay_availability(
 			"completion_date",
 			"completion_time",
 		],
+		is_holiday_fn=holiday_fn,
+	)
+	return not conflicts
+
+
+@frappe.whitelist()
+def check_vehicle_availability(
+	date: str,
+	start_time: Union[str, time, timedelta],
+	duration_minutes: Union[int, float],
+	repair_vehicle: Optional[str] = None,
+	repair_order: Optional[str] = None,
+	provisional_phone: Optional[str] = None,
+	provisional_license_plate: Optional[str] = None,
+	provisional_vin_or_plate: Optional[str] = None,
+	exclude_entry: Optional[str] = None,
+) -> bool:
+	"""Check if a vehicle or phone number has no overlapping active Schedule Entries during the window."""
+	_ensure_schedule_read_permission()
+	if not date or not isinstance(date, str):
+		return False
+	if exclude_entry is not None and not isinstance(exclude_entry, str):
+		frappe.throw(_("Invalid exclude_entry identifier."), frappe.ValidationError)
+
+	clean_vehicle = _validate_optional_str(repair_vehicle, "Repair Vehicle")
+	clean_ro = _validate_optional_str(repair_order, "Repair Order")
+	clean_phone = _validate_optional_str(provisional_phone, "Provisional Phone")
+	clean_plate = _validate_optional_str(provisional_license_plate, "Provisional License Plate")
+	clean_vp = _validate_optional_str(provisional_vin_or_plate, "Provisional VIN or Plate")
+
+	if clean_ro and frappe.db.exists("Repair Order", clean_ro):
+		frappe.has_permission("Repair Order", "read", doc=clean_ro, throw=True)
+	if clean_vehicle and frappe.db.exists("Repair Vehicle", clean_vehicle):
+		frappe.has_permission("Repair Vehicle", "read", doc=clean_vehicle, throw=True)
+
+	target = {
+		"repair_vehicle": clean_vehicle,
+		"repair_order": clean_ro,
+		"provisional_phone": clean_phone,
+		"provisional_license_plate": clean_plate,
+		"provisional_vin_or_plate": clean_vp,
+	}
+	norm_date = normalize_date(date) or date
+	norm_time = normalize_time(start_time) or start_time
+	settings = get_shop_settings()
+	holiday_fn = build_holiday_checker(settings.get("holiday_list"), add_days(getdate(norm_date), -30))
+
+	conflicts = find_conflicting_vehicle_entries(
+		target_entry=target,
+		scheduled_date=norm_date,
+		scheduled_time=norm_time,
+		duration_minutes=duration_minutes,
+		exclude_entry=exclude_entry,
 		is_holiday_fn=holiday_fn,
 	)
 	return not conflicts
@@ -358,10 +413,13 @@ def get_available_slots(
 	technician: Optional[str] = None,
 	assigned_technician: Optional[str] = None,
 	include_all: Union[int, bool] = 0,
+	repair_order: Optional[str] = None,
+	repair_vehicle: Optional[str] = None,
+	exclude_entry: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 	"""Return available slot dicts for date and duration across operating hours.
 
-	Supports multi-day working spans, technician filtering, and include_all unavailable reasons.
+	Supports multi-day working spans, technician filtering, vehicle overlap filtering, and include_all unavailable reasons.
 	"""
 	_ensure_schedule_read_permission(include_bays=True)
 	norm_date = normalize_date(date) or date
@@ -369,6 +427,19 @@ def get_available_slots(
 	resolved_tech = resolve_technician_identifier(technician) if technician is not None else None
 	if not resolved_tech and assigned_technician is not None:
 		resolved_tech = resolve_technician_identifier(assigned_technician)
+
+	clean_ro = _validate_optional_str(repair_order, "Repair Order")
+	clean_veh = _validate_optional_str(repair_vehicle, "Repair Vehicle")
+	clean_excl = _validate_optional_str(exclude_entry, "Exclude Entry")
+	if clean_ro and frappe.db.exists("Repair Order", clean_ro):
+		frappe.has_permission("Repair Order", "read", doc=clean_ro, throw=True)
+	if clean_veh and frappe.db.exists("Repair Vehicle", clean_veh):
+		frappe.has_permission("Repair Vehicle", "read", doc=clean_veh, throw=True)
+	veh_identity = (
+		{"repair_order": clean_ro, "repair_vehicle": clean_veh}
+		if (clean_ro or clean_veh)
+		else None
+	)
 
 	return search_day_slots(
 		target_date=norm_date,
@@ -378,6 +449,8 @@ def get_available_slots(
 		max_slots=max_slots,
 		technician=resolved_tech,
 		include_all=bool(cint(include_all)),
+		exclude_entry=clean_excl,
+		vehicle_identity=veh_identity,
 	)
 
 
@@ -426,6 +499,9 @@ def find_next_available_slot(
 	service_bay: Optional[str] = None,
 	technician: Optional[str] = None,
 	assigned_technician: Optional[str] = None,
+	repair_order: Optional[str] = None,
+	repair_vehicle: Optional[str] = None,
+	exclude_entry: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
 	"""Search forward from from_date up to scheduling_horizon_days for the earliest date with available slots."""
 	_ensure_schedule_read_permission(include_bays=True)
@@ -434,6 +510,19 @@ def find_next_available_slot(
 	resolved_tech = resolve_technician_identifier(technician) if technician is not None else None
 	if not resolved_tech and assigned_technician is not None:
 		resolved_tech = resolve_technician_identifier(assigned_technician)
+
+	clean_ro = _validate_optional_str(repair_order, "Repair Order")
+	clean_veh = _validate_optional_str(repair_vehicle, "Repair Vehicle")
+	clean_excl = _validate_optional_str(exclude_entry, "Exclude Entry")
+	if clean_ro and frappe.db.exists("Repair Order", clean_ro):
+		frappe.has_permission("Repair Order", "read", doc=clean_ro, throw=True)
+	if clean_veh and frappe.db.exists("Repair Vehicle", clean_veh):
+		frappe.has_permission("Repair Vehicle", "read", doc=clean_veh, throw=True)
+	veh_identity = (
+		{"repair_order": clean_ro, "repair_vehicle": clean_veh}
+		if (clean_ro or clean_veh)
+		else None
+	)
 
 	settings = get_shop_settings()
 	horizon = settings.get("scheduling_horizon_days") or 30
@@ -447,6 +536,8 @@ def find_next_available_slot(
 		required_tags=required_tags,
 		service_bay=resolved_bay,
 		technician=resolved_tech,
+		exclude_entry=clean_excl,
+		vehicle_identity=veh_identity,
 	)
 
 
@@ -576,6 +667,47 @@ def _find_conflicting_bay_entries(
 	]
 
 
+def _find_conflicting_vehicle_entries(
+	target_entry: Any,
+	scheduled_date: str,
+	scheduled_time: Union[str, time, timedelta],
+	duration_minutes: Union[int, float],
+	exclude_entry: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+	"""Return blocking Schedule Entry records overlapping the proposed window for the same vehicle or phone."""
+	settings = get_shop_settings()
+	holiday_fn = build_holiday_checker(
+		settings.get("holiday_list"),
+		add_days(getdate(scheduled_date), -30),
+	)
+	entries = find_conflicting_vehicle_entries(
+		target_entry=target_entry,
+		scheduled_date=scheduled_date,
+		scheduled_time=scheduled_time,
+		duration_minutes=duration_minutes,
+		exclude_entry=exclude_entry,
+		is_holiday_fn=holiday_fn,
+	)
+	base_url = get_url()
+	return [
+		{
+			"name": entry["name"],
+			"repair_order": entry.get("repair_order"),
+			"repair_vehicle": entry.get("repair_vehicle"),
+			"service_bay": entry.get("service_bay"),
+			"assigned_technician": entry.get("assigned_technician"),
+			"scheduled_date": str(entry.get("scheduled_date")),
+			"scheduled_time": str(entry.get("scheduled_time"))[:5],
+			"completion_date": str(entry.get("completion_date") or entry.get("scheduled_date")),
+			"completion_time": str(entry.get("completion_time") or "")[:5],
+			"status": entry.get("status"),
+			"conflict_match_kind": entry.get("_conflict_match_kind") or "vehicle",
+			"desk_url": f"{base_url}/app/schedule-entry/{quote(entry['name'], safe='')}",
+		}
+		for entry in entries
+	]
+
+
 def _find_nearest_alternative_slots(
 	scheduled_date: str,
 	scheduled_time: str,
@@ -583,6 +715,8 @@ def _find_nearest_alternative_slots(
 	service_bay: Optional[str] = None,
 	technician: Optional[str] = None,
 	max_alternatives: int = 5,
+	vehicle_identity: Optional[Any] = None,
+	exclude_entry: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 	"""Find nearest open alternative slots on the requested date or subsequent days."""
 	try:
@@ -596,6 +730,8 @@ def _find_nearest_alternative_slots(
 		start_date=req_dt,
 		end_date=end_dt,
 		skip_holidays=True,
+		exclude_entry=exclude_entry,
+		vehicle_identity=vehicle_identity,
 	)
 
 	alternatives: List[Dict[str, Any]] = []
@@ -636,6 +772,8 @@ def _find_nearest_alternative_slots(
 			service_bay=service_bay,
 			technician=None,
 			max_alternatives=max_alternatives,
+			vehicle_identity=vehicle_identity,
+			exclude_entry=exclude_entry,
 		)
 	return alternatives
 
@@ -651,6 +789,7 @@ def build_conflict_feedback(
 	repair_order: Optional[str] = None,
 	schedule_entry_name: Optional[str] = None,
 	conflicting_entries: Optional[List[Dict[str, Any]]] = None,
+	vehicle_identity: Optional[Any] = None,
 ) -> Dict[str, Any]:
 	"""Build structured conflict response with deep links, resource IDs, and nearest alternatives."""
 	base_url = get_url()
@@ -673,12 +812,18 @@ def build_conflict_feedback(
 	if conflicts and conflicts[0].get("name"):
 		urls["conflicting_entry"] = f"{base_url}/app/schedule-entry/{quote(conflicts[0]['name'], safe='')}"
 
+	alt_vehicle_identity = vehicle_identity
+	if alt_vehicle_identity is None and repair_order:
+		alt_vehicle_identity = {"repair_order": repair_order}
+
 	alternatives = _find_nearest_alternative_slots(
 		scheduled_date=scheduled_date,
 		scheduled_time=scheduled_time,
 		duration_minutes=duration_minutes,
 		service_bay=None if conflict_type == "bay_conflict" else service_bay,
 		technician=None if conflict_type in ("technician_conflict", "technician_on_leave") else technician,
+		vehicle_identity=alt_vehicle_identity,
+		exclude_entry=schedule_entry_name,
 	)
 
 	return {
@@ -962,6 +1107,63 @@ def allocate_schedule_entry(
 				conflicting_entries=bay_conflicts,
 			)
 
+	target_vehicle_payload: Dict[str, Any] = {
+		"repair_order": repair_order or (doc.repair_order if is_update else None),
+		"customer": doc.customer if is_update else None,
+		"repair_vehicle": doc.repair_vehicle if is_update else None,
+		"provisional_customer_name": (
+			provisional_customer_name
+			if provisional_customer_name is not None
+			else (doc.provisional_customer_name if is_update else None)
+		),
+		"provisional_phone": getattr(doc, "provisional_phone", None) if is_update else None,
+		"provisional_email": getattr(doc, "provisional_email", None) if is_update else None,
+		"provisional_vehicle_info": (
+			provisional_vehicle_info
+			if provisional_vehicle_info is not None
+			else (doc.provisional_vehicle_info if is_update else None)
+		),
+		"provisional_vehicle_model": getattr(doc, "provisional_vehicle_model", None) if is_update else None,
+		"provisional_vehicle_year": getattr(doc, "provisional_vehicle_year", None) if is_update else None,
+		"provisional_vehicle_color": getattr(doc, "provisional_vehicle_color", None) if is_update else None,
+		"provisional_license_plate": getattr(doc, "provisional_license_plate", None) if is_update else None,
+		"provisional_vin_or_plate": getattr(doc, "provisional_vin_or_plate", None) if is_update else None,
+	}
+	target_vehicle_identity = extract_vehicle_identity(target_vehicle_payload)
+
+	if scheduled_date and scheduled_time and target_vehicle_identity.get("has_conflict_identity"):
+		veh_conflicts = _find_conflicting_vehicle_entries(
+			target_entry=target_vehicle_identity,
+			scheduled_date=scheduled_date,
+			scheduled_time=scheduled_time,
+			duration_minutes=duration_int,
+			exclude_entry=clean_entry_name if is_update else None,
+		)
+		if veh_conflicts:
+			c0 = veh_conflicts[0]
+			bay_info = f" ({c0['service_bay']})" if c0.get("service_bay") else ""
+			if c0.get("conflict_match_kind") == "phone" and not target_vehicle_identity.get("repair_vehicle"):
+				msg = _(
+					"Phone number already has an overlapping appointment ({0}{1}) during {2} {3}."
+				).format(c0["name"], bay_info, scheduled_date, str(scheduled_time)[:5])
+			else:
+				msg = _(
+					"Vehicle is already booked in {0}{1} during {2} {3}."
+				).format(c0["name"], bay_info, scheduled_date, str(scheduled_time)[:5])
+			return build_conflict_feedback(
+				conflict_type="vehicle_conflict",
+				message=msg,
+				scheduled_date=scheduled_date,
+				scheduled_time=scheduled_time,
+				duration_minutes=duration_int,
+				service_bay=effective_bay,
+				technician=target_tech,
+				repair_order=repair_order or (doc.repair_order if is_update else None),
+				schedule_entry_name=clean_entry_name,
+				conflicting_entries=veh_conflicts,
+				vehicle_identity=target_vehicle_identity,
+			)
+
 	items_summary = _format_services_summary(parsed_services, repair_order)
 
 	try:
@@ -1006,8 +1208,16 @@ def allocate_schedule_entry(
 	except frappe.ValidationError as exc:
 		err_msg = str(exc)
 		lowered_err = err_msg.lower()
-		if any(tok in lowered_err for tok in ("occupied", "capacity", "exhausted", "overlap", "leave", "available")):
-			c_type = "bay_conflict" if "bay" in lowered_err else "technician_pool_exhausted"
+		reason_code = getattr(exc, "reason_code", None)
+		if reason_code == "vehicle_conflict" or any(
+			tok in lowered_err for tok in ("occupied", "capacity", "exhausted", "overlap", "leave", "available", "already booked")
+		):
+			if reason_code == "vehicle_conflict" or "already booked" in lowered_err or "phone number" in lowered_err:
+				c_type = "vehicle_conflict"
+			elif "bay" in lowered_err:
+				c_type = "bay_conflict"
+			else:
+				c_type = "technician_pool_exhausted"
 			return build_conflict_feedback(
 				conflict_type=c_type,
 				message=err_msg,
@@ -1016,8 +1226,9 @@ def allocate_schedule_entry(
 				duration_minutes=duration_int,
 				service_bay=effective_bay,
 				technician=target_tech,
-				repair_order=repair_order,
+				repair_order=repair_order or (doc.repair_order if is_update else None),
 				schedule_entry_name=clean_entry_name,
+				vehicle_identity=target_vehicle_identity,
 			)
 		raise
 

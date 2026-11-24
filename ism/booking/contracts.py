@@ -36,6 +36,7 @@ DEFAULT_BOOKING_INTRO: str = (
 DEFAULT_MAX_PACKAGES_PER_BOOKING: int = 5
 DEFAULT_IP_RATE_LIMIT_PER_HOUR: int = 15
 DEFAULT_PHONE_RATE_LIMIT_PER_DAY: int = 3
+DEFAULT_MAX_CONCURRENT_BOOKINGS_PER_PHONE: int = 2
 
 # Canonical structured error codes returned by ism.booking & ism.api.booking
 ERR_BOOKING_DISABLED: str = "BOOKING_DISABLED"
@@ -46,6 +47,7 @@ ERR_FORM_EXPIRED: str = "FORM_EXPIRED"
 ERR_RATE_LIMITED: str = "RATE_LIMITED"
 ERR_PHONE_DAILY_LIMIT: str = "PHONE_DAILY_LIMIT"
 ERR_DUPLICATE_BOOKING: str = "DUPLICATE_BOOKING"
+ERR_VEHICLE_CONFLICT: str = "VEHICLE_CONFLICT"
 ERR_SLOT_UNAVAILABLE: str = "SLOT_UNAVAILABLE"
 ERR_EMAIL_REQUIRED: str = "EMAIL_REQUIRED"
 ERR_MAX_PACKAGES_EXCEEDED: str = "MAX_PACKAGES_EXCEEDED"
@@ -62,6 +64,7 @@ __all__ = [
 	"DEFAULT_BOOKING_INTRO",
 	"DEFAULT_BOOKING_TITLE",
 	"DEFAULT_IP_RATE_LIMIT_PER_HOUR",
+	"DEFAULT_MAX_CONCURRENT_BOOKINGS_PER_PHONE",
 	"DEFAULT_MAX_PACKAGES_PER_BOOKING",
 	"DEFAULT_PHONE_RATE_LIMIT_PER_DAY",
 	"ERR_BOOKING_DISABLED",
@@ -75,6 +78,7 @@ __all__ = [
 	"ERR_SLOT_UNAVAILABLE",
 	"ERR_SMS_UNCONFIGURED",
 	"ERR_SUBMISSION_TOO_FAST",
+	"ERR_VEHICLE_CONFLICT",
 	"HONEYPOT_FIELD_NAME",
 	"MAX_FORM_NONCE_AGE_SECONDS",
 	"MIN_FORM_FILL_SECONDS",
@@ -101,6 +105,7 @@ class BookingConfigSnapshot:
 	ip_rate_limit_per_hour: int
 	phone_rate_limit_per_day: int
 	honeypot_enabled: bool
+	max_concurrent_bookings_per_phone: int = DEFAULT_MAX_CONCURRENT_BOOKINGS_PER_PHONE
 
 	def to_dict(self) -> dict[str, Any]:
 		return asdict(self)
@@ -181,6 +186,12 @@ def get_booking_settings(settings: Any = None) -> BookingConfigSnapshot:
 			maximum=20,
 		),
 		honeypot_enabled=honeypot_enabled,
+		max_concurrent_bookings_per_phone=_clamp_int(
+			cfg.get("max_concurrent_bookings_per_phone"),
+			default=DEFAULT_MAX_CONCURRENT_BOOKINGS_PER_PHONE,
+			minimum=1,
+			maximum=10,
+		),
 	)
 
 

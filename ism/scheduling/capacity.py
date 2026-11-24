@@ -95,6 +95,7 @@ class ShopCapacityWindow:
 		service_bay: Optional[str] = None,
 		skip_holidays: bool = False,
 		exclude_entry: Optional[str] = None,
+		vehicle_identity: Optional[Any] = None,
 	) -> None:
 		self.settings = get_shop_settings()
 		self.start_dt = getdate(start_date)
@@ -107,6 +108,7 @@ class ShopCapacityWindow:
 		self.enable_tech: int = cint(self.settings.get("enable_technician_capacity"))
 		self.skip_holidays: bool = bool(skip_holidays)
 		self.exclude_entry: Optional[str] = exclude_entry
+		self.vehicle_identity: Optional[Any] = vehicle_identity
 
 		self.candidate_bays: List[str] = []
 		self.bay_tags: Dict[str, List[str]] = {}
@@ -115,6 +117,11 @@ class ShopCapacityWindow:
 		self.holidays: Dict[str, str] = {}
 		self._leaves_by_emp: Dict[str, List[Dict[str, Any]]] = {}
 		self._entries_by_date: Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]] = {}
+		self._vehicle_busy_by_date: Dict[str, List[Tuple[timedelta, timedelta]]] = {}
+		self._phone_busy_by_date: Dict[str, List[Tuple[timedelta, timedelta]]] = {}
+		self._max_phone_concurrent: int = max(
+			1, cint(self.settings.get("max_concurrent_bookings_per_phone") or 2)
+		)
 
 		if self.op_start >= self.op_end or self.interval <= 0 or self.end_dt < self.start_dt:
 			return
@@ -191,17 +198,46 @@ class ShopCapacityWindow:
 		end_str: str,
 	) -> Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]]:
 		se = frappe.qb.DocType("Schedule Entry")
+		select_cols = [
+			se.scheduled_date,
+			se.scheduled_time,
+			se.completion_date,
+			se.completion_time,
+			se.estimated_duration,
+			se.service_bay,
+			se.assigned_technician,
+		]
+		track_vehicle = False
+		target_preview = None
+		if self.vehicle_identity is not None:
+			from ism.scheduling.entry_queries import (
+				extract_vehicle_identity,
+				match_booking_conflict,
+				resolve_conflict_identities_batch,
+			)
+
+			target_preview = extract_vehicle_identity(self.vehicle_identity)
+			if target_preview.get("has_conflict_identity"):
+				track_vehicle = True
+				select_cols.extend([
+					se.name,
+					se.repair_order,
+					se.customer,
+					se.repair_vehicle,
+					se.provisional_customer_name,
+					se.provisional_phone,
+					se.provisional_email,
+					se.provisional_vehicle_info,
+					se.provisional_vehicle_model,
+					se.provisional_vehicle_year,
+					se.provisional_vehicle_color,
+					se.provisional_license_plate,
+					se.provisional_vin_or_plate,
+				])
+
 		query = (
 			frappe.qb.from_(se)
-			.select(
-				se.scheduled_date,
-				se.scheduled_time,
-				se.completion_date,
-				se.completion_time,
-				se.estimated_duration,
-				se.service_bay,
-				se.assigned_technician,
-			)
+			.select(*select_cols)
 			.where(se.scheduled_date <= end_str)
 			.where(Coalesce(se.completion_date, se.scheduled_date) >= start_str)
 			.where(se.status.notin(list(NON_BLOCKING_ENTRY_STATUSES)))
@@ -210,8 +246,15 @@ class ShopCapacityWindow:
 			query = query.where(se.name != self.exclude_entry)
 		entries = query.run(as_dict=True)
 
+		match_kinds: List[Optional[str]] = [None] * len(entries)
+		if track_vehicle and entries:
+			target_id, cand_ids = resolve_conflict_identities_batch(target_preview, entries)
+			match_kinds = [match_booking_conflict(target_id, cid) for cid in cand_ids]
+
 		by_date: Dict[str, List[Tuple[timedelta, timedelta, Optional[str], Optional[str]]]] = {}
-		for entry in entries:
+		vehicle_busy: Dict[str, List[Tuple[timedelta, timedelta]]] = {}
+		phone_busy: Dict[str, List[Tuple[timedelta, timedelta]]] = {}
+		for idx, entry in enumerate(entries):
 			if not entry.get("scheduled_date"):
 				continue
 			s_dt = getdate(entry["scheduled_date"])
@@ -242,6 +285,7 @@ class ShopCapacityWindow:
 
 			bay = entry.get("service_bay")
 			tech = entry.get("assigned_technician")
+			conflict_kind = match_kinds[idx]
 			curr_dt = max(s_dt, self.start_dt)
 			last_dt = min(c_dt, self.end_dt)
 			while curr_dt <= last_dt:
@@ -251,7 +295,13 @@ class ShopCapacityWindow:
 					day_end = c_td if curr_dt == c_dt else self.op_end
 					if day_end > day_start:
 						by_date.setdefault(dt_key, []).append((day_start, day_end, bay, tech))
+						if conflict_kind == "vehicle":
+							vehicle_busy.setdefault(dt_key, []).append((day_start, day_end))
+						elif conflict_kind == "phone":
+							phone_busy.setdefault(dt_key, []).append((day_start, day_end))
 				curr_dt = add_days(curr_dt, 1)
+		self._vehicle_busy_by_date = vehicle_busy
+		self._phone_busy_by_date = phone_busy
 		return by_date
 
 	def is_holiday(self, target_date: Union[str, date, datetime]) -> bool:
@@ -305,6 +355,11 @@ class ShopCapacityWindow:
 
 		min_td = to_timedelta(min_start_time) if min_start_time is not None else None
 		day_intervals = self._entries_by_date.get(target_str, ())
+		vehicle_busy = self._vehicle_busy_by_date.get(target_str, ())
+		phone_busy = self._phone_busy_by_date.get(target_str, ())
+		peak_fn = None
+		if phone_busy:
+			from ism.scheduling.entry_queries import peak_concurrent_overlaps as peak_fn
 		slot_limit = cint(max_slots) if max_slots else 0
 		step = timedelta(minutes=self.interval)
 		curr_time = self.op_start
@@ -320,6 +375,16 @@ class ShopCapacityWindow:
 
 			eff_end = effective_end_time(curr_time, duration_val, self.bs_td, self.be_td)
 			if eff_end > self.op_end:
+				curr_time += step
+				continue
+
+			if vehicle_busy and any(
+				max(curr_time, v_start) < min(eff_end, v_end) for v_start, v_end in vehicle_busy
+			):
+				curr_time += step
+				continue
+
+			if phone_busy and peak_fn is not None and peak_fn(curr_time, eff_end, phone_busy) > self._max_phone_concurrent:
 				curr_time += step
 				continue
 

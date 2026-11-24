@@ -11,11 +11,16 @@ from frappe.utils import add_days, cint, getdate
 
 from ism.scheduling.capacity import parse_required_tags, resolve_candidate_bays
 from ism.scheduling.entry_queries import (
+	VEHICLE_CONFLICT_FIELDS,
 	entry_datetimes,
+	extract_vehicle_identity,
 	fetch_blocking_entries,
 	fetch_leaves_by_employee,
 	intervals_overlap,
 	is_employee_on_leave_for_date,
+	match_booking_conflict,
+	peak_concurrent_overlaps,
+	resolve_conflict_identities_batch,
 	span_datetimes,
 )
 from ism.scheduling.time_utils import (
@@ -40,6 +45,7 @@ class _SlotSearchContext:
 		service_bay: Optional[str] = None,
 		target_tech: Optional[str] = None,
 		exclude_entry: Optional[str] = None,
+		vehicle_identity: Optional[Any] = None,
 	) -> None:
 		self.settings = get_shop_settings()
 		self.op_start: timedelta = self.settings["operating_hours_start"]
@@ -60,6 +66,11 @@ class _SlotSearchContext:
 		self.service_bay = service_bay
 		self.target_tech = target_tech
 		self.exclude_entry = exclude_entry
+		self.vehicle_identity = (
+			extract_vehicle_identity(vehicle_identity) if vehicle_identity is not None else None
+		)
+		if self.vehicle_identity and not self.vehicle_identity.get("has_conflict_identity"):
+			self.vehicle_identity = None
 
 		self.valid_hours: bool = (
 			self.op_start < self.op_end and self.interval > 0 and self.end_dt >= self.start_dt
@@ -78,6 +89,11 @@ class _SlotSearchContext:
 		self.leaves_by_emp: Dict[str, List[Dict[str, Any]]] = {}
 		self.bay_intervals: Dict[str, List[Tuple[datetime, datetime, str]]] = {}
 		self.tech_segments: Dict[str, Dict[str, List[Tuple[timedelta, timedelta, str]]]] = {}
+		self.vehicle_intervals: List[Tuple[datetime, datetime, str]] = []
+		self.phone_intervals: List[Tuple[datetime, datetime, str]] = []
+		self._max_phone_concurrent: int = max(
+			1, cint(self.settings.get("max_concurrent_bookings_per_phone") or 2)
+		)
 
 		if not self.valid_hours:
 			return
@@ -156,14 +172,34 @@ class _SlotSearchContext:
 			self.leaves_by_emp = fetch_leaves_by_employee(self.tech_ids, start_dt, horizon_end_dt)
 
 	def _load_entries(self, start_dt: date, horizon_end_dt: date) -> None:
-		if not self._candidate_bay_set and not self._tech_id_set:
+		if not self._candidate_bay_set and not self._tech_id_set and not self.vehicle_identity:
 			return
-		entries = fetch_blocking_entries(start_dt, horizon_end_dt, exclude_entry=self.exclude_entry)
-		for entry in entries:
+		fields = VEHICLE_CONFLICT_FIELDS if self.vehicle_identity else None
+		entries = fetch_blocking_entries(
+			start_dt,
+			horizon_end_dt,
+			exclude_entry=self.exclude_entry,
+			fields=fields,
+		)
+		match_kinds: List[Optional[str]] = [None] * len(entries)
+		if self.vehicle_identity and entries:
+			target_id, cand_ids = resolve_conflict_identities_batch(self.vehicle_identity, entries)
+			match_kinds = [match_booking_conflict(target_id, cid) for cid in cand_ids]
+
+		for idx, entry in enumerate(entries):
+			entry_span_dt: Optional[Tuple[datetime, datetime]] = None
 			bay = entry.get("service_bay")
 			if bay and bay in self._candidate_bay_set:
-				ex_start_dt, ex_end_dt = entry_datetimes(entry, is_holiday_fn=self.is_holiday)
-				self.bay_intervals.setdefault(bay, []).append((ex_start_dt, ex_end_dt, entry["name"]))
+				entry_span_dt = entry_datetimes(entry, is_holiday_fn=self.is_holiday)
+				self.bay_intervals.setdefault(bay, []).append((entry_span_dt[0], entry_span_dt[1], entry["name"]))
+
+			if match_kinds[idx]:
+				if entry_span_dt is None:
+					entry_span_dt = entry_datetimes(entry, is_holiday_fn=self.is_holiday)
+				if match_kinds[idx] == "vehicle":
+					self.vehicle_intervals.append((entry_span_dt[0], entry_span_dt[1], entry["name"]))
+				else:
+					self.phone_intervals.append((entry_span_dt[0], entry_span_dt[1], entry["name"]))
 
 			tech = entry.get("assigned_technician")
 			if tech and tech in self._tech_id_set:
@@ -181,6 +217,30 @@ class _SlotSearchContext:
 						to_timedelta(seg["end_time"]),
 						entry["name"],
 					))
+
+	def _eval_vehicle_availability(
+		self,
+		prop_start_dt: datetime,
+		prop_end_dt: datetime,
+	) -> Tuple[bool, Optional[str], Optional[str]]:
+		for ex_s, ex_e, entry_name in self.vehicle_intervals:
+			if intervals_overlap(prop_start_dt, prop_end_dt, ex_s, ex_e):
+				return False, entry_name, "vehicle"
+		if self.phone_intervals:
+			overlapping_phone_spans: List[Tuple[datetime, datetime]] = []
+			first_phone_entry: Optional[str] = None
+			for ex_s, ex_e, entry_name in self.phone_intervals:
+				if intervals_overlap(prop_start_dt, prop_end_dt, ex_s, ex_e):
+					overlapping_phone_spans.append((ex_s, ex_e))
+					if first_phone_entry is None:
+						first_phone_entry = entry_name
+			if (
+				overlapping_phone_spans
+				and peak_concurrent_overlaps(prop_start_dt, prop_end_dt, overlapping_phone_spans)
+				> self._max_phone_concurrent
+			):
+				return False, first_phone_entry, "phone"
+		return True, None, None
 
 	def _eval_bay_capacity(
 		self,
@@ -353,8 +413,14 @@ class _SlotSearchContext:
 			avail_techs_count, eff_cap, bottleneck, tech_available, tech_reason, conflict_entry = (
 				self._eval_tech_capacity(span, avail_bays_count)
 			)
+			vehicle_available, veh_conflict_entry, veh_match_kind = self._eval_vehicle_availability(
+				prop_start_dt,
+				prop_end_dt,
+			)
 
-			is_slot_available = bool(eff_cap and eff_cap > 0 and bay_available and tech_available)
+			is_slot_available = bool(
+				eff_cap and eff_cap > 0 and bay_available and tech_available and vehicle_available
+			)
 			spans_days = span["spans_days"]
 			is_multi = span["is_multi_day"]
 
@@ -366,6 +432,18 @@ class _SlotSearchContext:
 				else:
 					badge_label = f"{eff_cap} open"
 				unavailable_reason = None
+			elif not vehicle_available:
+				conflict_entry = veh_conflict_entry or conflict_entry
+				if veh_match_kind == "phone":
+					badge_label = _("Phone Busy")
+					unavailable_reason = _(
+						"Phone number already has an overlapping appointment ({0}) during this time window."
+					).format(veh_conflict_entry)
+				else:
+					badge_label = _("Vehicle Busy")
+					unavailable_reason = _(
+						"Vehicle is already booked in {0} during this time window."
+					).format(veh_conflict_entry)
 			elif not bay_available and not tech_available:
 				badge_label = _("Bay & Tech Busy")
 				unavailable_reason = _("Neither the selected bay nor the technician is available.")
@@ -400,6 +478,7 @@ class _SlotSearchContext:
 					"conflict_entry": conflict_entry,
 					"bay_available": bay_available,
 					"technician_available": tech_available,
+					"vehicle_available": vehicle_available,
 					"is_multi_day": is_multi,
 					"spans_days": spans_days,
 					"spans_lunch": span.get("spans_lunch", False),
@@ -425,6 +504,7 @@ def search_day_slots(
 	technician: Optional[str] = None,
 	include_all: bool = False,
 	exclude_entry: Optional[str] = None,
+	vehicle_identity: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
 	"""Return slots for a single date using a single batched snapshot load."""
 	ctx = _SlotSearchContext(
@@ -435,6 +515,7 @@ def search_day_slots(
 		service_bay=service_bay,
 		target_tech=technician,
 		exclude_entry=exclude_entry,
+		vehicle_identity=vehicle_identity,
 	)
 	return ctx.slots_for_date(target_date, include_all=include_all, max_slots=max_slots)
 
@@ -448,6 +529,7 @@ def find_next_available_slot_batch(
 	service_bay: Optional[str] = None,
 	technician: Optional[str] = None,
 	exclude_entry: Optional[str] = None,
+	vehicle_identity: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
 	"""Find the earliest non-holiday date after start_dt (up to max_days) with open slots."""
 	if max_days <= 0:
@@ -463,6 +545,7 @@ def find_next_available_slot_batch(
 		service_bay=service_bay,
 		target_tech=technician,
 		exclude_entry=exclude_entry,
+		vehicle_identity=vehicle_identity,
 	)
 	if not ctx.valid_hours:
 		return None

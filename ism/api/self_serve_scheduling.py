@@ -196,6 +196,7 @@ def get_reschedule_policy_and_slots(
 			start_date=start_date,
 			days_ahead=capped_days,
 			exclude_entry=se.name,
+			vehicle_identity=se,
 			max_slots_per_day=parsed_max_slots,
 		)
 	else:

@@ -284,6 +284,7 @@ def find_available_slots(
 		required_tags=parsed_tags,
 		service_bay=resolved_bay,
 		skip_holidays=True,
+		vehicle_identity={"repair_order": repair_order} if repair_order else None,
 	)
 
 	results: List[Dict[str, Any]] = []

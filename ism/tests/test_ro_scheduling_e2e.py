@@ -428,11 +428,13 @@ class TestRepairOrderSchedulingE2E(ISMTestCase):
 		)
 		self.track(confirmed_se)
 
+		veh2 = self.create_test_vehicle(customer=self.customer)
+		ro2 = self.create_test_repair_order(self.customer, veh2.name)
 		span_start = today()
 		query_start = add_days(today(), 2)
 		query_end = add_days(today(), 3)
 		span_se = self.create_test_schedule_entry(
-			repair_order=ro.name,
+			repair_order=ro2.name,
 			scheduled_date=span_start,
 			scheduled_time="08:00:00",
 			estimated_duration=60 * 20,
