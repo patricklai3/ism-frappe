@@ -470,3 +470,174 @@ class TestBillingAndDeposits(ISMTestCase):
 		self.assertEqual(chk["paid_amount"], 214.70)
 		self.assertEqual(chk["outstanding_amount"], 0.0)
 		self.assertEqual(chk["payment_status"], "Paid")
+
+	def test_checkout_multi_bin_auto_allocation_and_shared_item_parity(self):
+		"""RO checkout auto-allocates Home Bin first, splits SI rows across bins, and avoids double-allocating shared items."""
+		from ism.api.parts_stock import (
+			adjust_bin_stock,
+			create_bin_location,
+			get_bin_dimension_meta,
+			get_items_bin_stock_batch,
+			set_item_default_bin,
+		)
+		from ism.setup import setup_inventory_dimensions
+
+		setup_inventory_dimensions()
+		dim_meta = get_bin_dimension_meta(use_cache=False)
+		self.assertTrue(dim_meta["enabled"])
+		dim_field = dim_meta["source_fieldname"]
+
+		suffix = frappe.generate_hash(length=5).upper()
+		part_code = f"{TEST_PREFIX}MBIN_PAD_{suffix}"
+		self.create_test_item(part_code, is_stock_item=1, standard_rate=50.0)
+		ro = self._create_approved_ro(
+			tax_rate=0,
+			services=[
+				{
+					"service_title": "Front Brake Assembly",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([
+						{"item_code": part_code, "item_name": "Multi-Bin Brake Pad", "qty": 3, "rate": 50.0}
+					]),
+				},
+				{
+					"service_title": "Rear Brake Assembly",
+					"status": "Approved",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+					"parts": json.dumps([
+						{"item_code": part_code, "item_name": "Multi-Bin Brake Pad", "qty": 2, "rate": 50.0}
+					]),
+				},
+			],
+		)
+		wh = get_default_warehouse(ro.company)
+		bin_home = create_bin_location(bin_code=f"A2-{suffix}", warehouse=wh, zone="A")["bin_code"]
+		bin_over = create_bin_location(bin_code=f"OF-{suffix}", warehouse=wh, zone="O", bin_type="Overflow")["bin_code"]
+		self.track("Storage Bin", bin_home)
+		self.track("Storage Bin", bin_over)
+		set_item_default_bin(part_code, bin_home)
+
+		# Stock 2 in Home Bin and 3 in Overflow Bin (total 5)
+		se1 = adjust_bin_stock("receipt", [{"item_code": part_code, "qty": 2, "rate": 25.0}], bin_location=bin_home, warehouse=wh)
+		se2 = adjust_bin_stock("receipt", [{"item_code": part_code, "qty": 3, "rate": 25.0}], bin_location=bin_over, warehouse=wh)
+		self.track("Stock Entry", se1["stock_entry"])
+		self.track("Stock Entry", se2["stock_entry"])
+
+		chk = ro.process_payment_and_release(payment_method="Cash", odometer_out=40070)
+		self.track("Sales Invoice", chk["sales_invoice"])
+		for pe_name in chk.get("payment_entries") or []:
+			self.track("Payment Entry", pe_name)
+
+		si = frappe.get_doc("Sales Invoice", chk["sales_invoice"])
+		part_rows = [row for row in si.items if row.item_code == part_code]
+		# Service 1 splits across bin_home (2) + bin_over (1); Service 2 consumes remaining bin_over (2)
+		self.assertEqual(len(part_rows), 3)
+		self.assertEqual([(getattr(r, dim_field), flt(r.qty)) for r in part_rows], [
+			(bin_home, 2.0),
+			(bin_over, 1.0),
+			(bin_over, 2.0),
+		])
+		# Exact invoice total parity: labor ($100 + $50) + parts (5 * $50) = $400.00
+		self.assertEqual(flt(si.grand_total, 2), 400.0)
+		self.assertEqual(flt(ro.grand_total, 2), 400.0)
+
+		# Verify zero negative or leftover bin balances
+		post_bins = get_items_bin_stock_batch([part_code], warehouse=wh)[part_code]
+		self.assertEqual(post_bins["bins"], [])
+		self.assertEqual(post_bins["total_binned_qty"], 0.0)
+		self.assertEqual(self._get_bin_qty(part_code, wh), 0.0)
+
+	def test_checkout_legacy_unbinned_stock_and_pinned_bin_guard(self):
+		"""Legacy unbinned stock checks out cleanly under validate_negative_stock=1; short pinned bin fails pre-checkout."""
+		from ism.api.parts_stock import adjust_bin_stock, create_bin_location, get_items_bin_stock_batch
+		from ism.setup import setup_inventory_dimensions
+
+		setup_inventory_dimensions()
+		suffix = frappe.generate_hash(length=5).upper()
+
+		# 1. Legacy unbinned stock checkout succeeds cleanly
+		legacy_code = f"{TEST_PREFIX}UNBIN_{suffix}"
+		self.create_test_item(legacy_code, is_stock_item=1, standard_rate=30.0)
+		ro_legacy = self._create_approved_ro(
+			tax_rate=0,
+			services=[
+				{
+					"service_title": "Legacy Wiper Install",
+					"status": "Approved",
+					"labor_hours": 0.5,
+					"labor_rate": 100.0,
+					"parts": json.dumps([{"item_code": legacy_code, "item_name": "Legacy Wiper", "qty": 2, "rate": 30.0}]),
+				}
+			],
+		)
+		wh = get_default_warehouse(ro_legacy.company)
+		self._receive_stock(legacy_code, qty=2.0, warehouse=wh, company=ro_legacy.company)
+		chk_leg = ro_legacy.process_payment_and_release(payment_method="Cash", odometer_out=40080)
+		self.track("Sales Invoice", chk_leg["sales_invoice"])
+		for pe_name in chk_leg.get("payment_entries") or []:
+			self.track("Payment Entry", pe_name)
+		self.assertEqual(self._get_bin_qty(legacy_code, wh), 0.0)
+
+		# 2. Pinned bin with insufficient stock fails pre-checkout BEFORE creating Sales Invoice
+		pinned_code = f"{TEST_PREFIX}PIN_{suffix}"
+		self.create_test_item(pinned_code, is_stock_item=1, standard_rate=45.0)
+		bin_short = create_bin_location(bin_code=f"PA-{suffix}", warehouse=wh)["bin_code"]
+		bin_full = create_bin_location(bin_code=f"PB-{suffix}", warehouse=wh)["bin_code"]
+		self.track("Storage Bin", bin_short)
+		self.track("Storage Bin", bin_full)
+
+		se_s = adjust_bin_stock("receipt", [{"item_code": pinned_code, "qty": 1, "rate": 20.0}], bin_location=bin_short, warehouse=wh)
+		se_f = adjust_bin_stock("receipt", [{"item_code": pinned_code, "qty": 4, "rate": 20.0}], bin_location=bin_full, warehouse=wh)
+		self.track("Stock Entry", se_s["stock_entry"])
+		self.track("Stock Entry", se_f["stock_entry"])
+
+		ro_pin = self._create_approved_ro(
+			tax_rate=0,
+			services=[
+				{
+					"service_title": "Pinned Bin Service",
+					"status": "Approved",
+					"labor_hours": 1.0,
+					"labor_rate": 100.0,
+					"parts": json.dumps([
+						{
+							"item_code": pinned_code,
+							"item_name": "Pinned Rotor",
+							"qty": 2,
+							"rate": 45.0,
+							"bin_location": bin_short,
+						}
+					]),
+				}
+			],
+		)
+		with self.assertRaises(frappe.ValidationError) as pin_err:
+			ro_pin.process_payment_and_release(payment_method="Cash", odometer_out=40090)
+		self.assertIn(bin_short, str(pin_err.exception))
+		self.assertIn("shortfall 1", str(pin_err.exception))
+		ro_pin.reload()
+		self.assertFalse(ro_pin.sales_invoice)
+
+		# Switch pin to bin_full (qty 4) -> checkout succeeds and deducts strictly from bin_full
+		ro_pin.services[0].parts = json.dumps([
+			{
+				"item_code": pinned_code,
+				"item_name": "Pinned Rotor",
+				"qty": 2,
+				"rate": 45.0,
+				"bin_location": bin_full,
+			}
+		])
+		ro_pin.save(ignore_permissions=True)
+		chk_pin = ro_pin.process_payment_and_release(payment_method="Cash", odometer_out=40090)
+		self.track("Sales Invoice", chk_pin["sales_invoice"])
+		for pe_name in chk_pin.get("payment_entries") or []:
+			self.track("Payment Entry", pe_name)
+
+		post = get_items_bin_stock_batch([pinned_code], warehouse=wh)[pinned_code]
+		post_map = {b["bin_location"]: b["qty"] for b in post["bins"]}
+		self.assertEqual(post_map[bin_short], 1.0)
+		self.assertEqual(post_map[bin_full], 2.0)

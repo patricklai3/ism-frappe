@@ -10,7 +10,14 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, now_datetime, nowdate, today
 
-from ism.api.parts_stock import _find_company_warehouse, _get_stock_settings_default_warehouse
+from ism.api.parts_stock import (
+	_find_company_warehouse,
+	_get_stock_settings_default_warehouse,
+	allocate_item_bins,
+	consume_allocated_bin_slices,
+	get_bin_dimension_meta,
+	get_items_bin_stock_batch,
+)
 from ism.ism.doctype.repair_order.fulfillment import complete_linked_schedule_entries
 from ism.ism.doctype.repair_order.pricing import get_or_create_default_tax_template
 
@@ -138,6 +145,25 @@ def _resolve_billing_context(ro, approved_services: List[Any]) -> Dict[str, Any]
 	)
 	accounts_by_name = {a.account_name: a.name for a in accounts}
 
+	bin_dim_meta = get_bin_dimension_meta()
+	bin_stock_by_wh: Dict[str, Dict[str, Any]] = {}
+	if bin_dim_meta.get("enabled") and stock_items:
+		stock_items_by_wh: Dict[str, List[str]] = {}
+		for idx, _s in enumerate(approved_services):
+			for p in parsed_parts_by_service.get(idx, []):
+				code = p.get("item_code")
+				if not code or code not in stock_items:
+					continue
+				if str(p.get("part_source") or "").strip() == "Customer Supplied":
+					continue
+				part_wh = p.get("warehouse")
+				wh = part_wh if (part_wh and part_wh in valid_warehouses) else default_wh
+				bucket = stock_items_by_wh.setdefault(wh, [])
+				if code not in bucket:
+					bucket.append(code)
+		for wh, codes in stock_items_by_wh.items():
+			bin_stock_by_wh[wh] = get_items_bin_stock_batch(codes, warehouse=wh)
+
 	return {
 		"abbr": abbr,
 		"default_income_account": default_income_account,
@@ -152,6 +178,8 @@ def _resolve_billing_context(ro, approved_services: List[Any]) -> Dict[str, Any]
 		"parsed_parts_by_service": parsed_parts_by_service,
 		"duties_and_taxes": accounts_by_name.get("Duties and Taxes") or f"Duties and Taxes - {abbr}",
 		"hst_account": accounts_by_name.get("HST 13%") or accounts_by_name.get("HST"),
+		"bin_dim_meta": bin_dim_meta,
+		"bin_stock_by_wh": bin_stock_by_wh,
 	}
 
 
@@ -498,8 +526,9 @@ def _recompute_ro_payment_state(
 
 
 def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str, Any]) -> None:
-	"""Verify Bin actual_qty covers all Approved stock parts before Sales Invoice creation."""
+	"""Verify Bin actual_qty and any explicitly pinned Storage Bin balances cover all Approved stock parts."""
 	required_by_key: Dict[tuple[str, str], float] = {}
+	required_by_pinned_bin: Dict[tuple[str, str, str], float] = {}
 	for idx, _service in enumerate(approved_services):
 		for p in ctx["parsed_parts_by_service"].get(idx, []):
 			item_code = p.get("item_code")
@@ -517,6 +546,10 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 			if qty > 0:
 				key = (item_code, wh)
 				required_by_key[key] = flt(required_by_key.get(key, 0.0) + qty, 6)
+				raw_bin = p.get("bin_location")
+				if isinstance(raw_bin, str) and raw_bin.strip():
+					pin_key = (item_code, wh, raw_bin.strip().upper())
+					required_by_pinned_bin[pin_key] = flt(required_by_pinned_bin.get(pin_key, 0.0) + qty, 6)
 
 	if not required_by_key:
 		return
@@ -548,6 +581,32 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 			),
 			frappe.ValidationError,
 		)
+
+	bin_dim_meta = ctx.get("bin_dim_meta") or {}
+	if bin_dim_meta.get("enabled") and required_by_pinned_bin:
+		bin_stock_by_wh = ctx.get("bin_stock_by_wh") or {}
+		bin_deficits: List[str] = []
+		for (item_code, wh, pinned_bin), req_qty in sorted(required_by_pinned_bin.items()):
+			item_bin_info = bin_stock_by_wh.get(wh, {}).get(item_code) or {}
+			avail_bin_qty = 0.0
+			for b in item_bin_info.get("bins") or []:
+				if str(b.get("bin_location") or "").strip().upper() == pinned_bin:
+					avail_bin_qty = flt(b.get("qty"))
+					break
+			if avail_bin_qty < flt(req_qty) - 1e-9:
+				shortfall = flt(req_qty - avail_bin_qty, 3)
+				bin_deficits.append(
+					_("{0} in Bin '{1}' ({2}): required {3}, available {4}, shortfall {5}").format(
+						item_code, pinned_bin, wh, flt(req_qty, 3), flt(avail_bin_qty, 3), shortfall
+					)
+				)
+		if bin_deficits:
+			frappe.throw(
+				_("Insufficient bin stock for Repair Order {0}: {1}").format(
+					ro.name, "; ".join(bin_deficits)
+				),
+				frappe.ValidationError,
+			)
 
 
 def _apply_ro_advances_to_invoice(si, ro_name: str, customer: str) -> float:
@@ -807,6 +866,38 @@ def process_ro_payment_and_release(
 	gross_items_total = 0.0
 	row_discounts_total = 0.0
 
+	bin_dim_meta = ctx.get("bin_dim_meta") or {}
+	bin_dim_enabled = bool(bin_dim_meta.get("enabled") and bin_dim_meta.get("source_fieldname"))
+	bin_dim_field = bin_dim_meta.get("source_fieldname") if bin_dim_enabled else None
+
+	# Mutable working copy of live per-bin balances so multiple services sharing an item never double-allocate a bin.
+	working_bin_stock_by_wh: Dict[str, Dict[str, Dict[str, Any]]] = {}
+	pinned_reserved: Dict[tuple[str, str, str], float] = {}
+	if bin_dim_enabled:
+		for wh_key, item_map in (ctx.get("bin_stock_by_wh") or {}).items():
+			working_bin_stock_by_wh[wh_key] = {
+				code: {
+					**info,
+					"bins": [dict(b) for b in (info.get("bins") or [])],
+				}
+				for code, info in item_map.items()
+			}
+		for idx, _s in enumerate(approved_services):
+			for p in ctx["parsed_parts_by_service"].get(idx, []):
+				ic = p.get("item_code")
+				if not ic or ic not in ctx["stock_items"]:
+					continue
+				if str(p.get("part_source") or "").strip() == "Customer Supplied":
+					continue
+				raw_bin = p.get("bin_location")
+				if isinstance(raw_bin, str) and raw_bin.strip():
+					part_wh = p.get("warehouse")
+					wh = part_wh if (part_wh and part_wh in ctx["valid_warehouses"]) else ctx["default_warehouse"]
+					p_qty = flt(p.get("qty", 1.0))
+					if p_qty > 0:
+						rk = (ic, wh, raw_bin.strip().upper())
+						pinned_reserved[rk] = flt(pinned_reserved.get(rk, 0.0) + p_qty, 6)
+
 	for idx, s in enumerate(approved_services):
 		service_gross = 0.0
 		if flt(s.labor_hours) > 0 or flt(s.labor_amount) > 0:
@@ -873,19 +964,80 @@ def process_ro_payment_and_release(
 				compliance_tag += f" | Warranty: {warranty}"
 			compliance_tag += "]"
 			part_wh = p.get("warehouse")
+			resolved_wh = part_wh if (part_wh and part_wh in ctx["valid_warehouses"]) else ctx["default_warehouse"]
 			part_rate = flt(p.get("rate", 0.0))
-			si.append("items", {
-				"item_code": item_code,
-				"item_name": part_name,
-				"description": f"{part_name} {compliance_tag}",
-				"qty": qty,
-				"uom": p.get("uom") or getattr(item_doc, "stock_uom", "Nos"),
-				"rate": part_rate,
-				"warehouse": part_wh if (part_wh and part_wh in ctx["valid_warehouses"]) else ctx["default_warehouse"],
-				"income_account": ctx["default_income_account"],
-				"cost_center": ctx["default_cost_center"],
-			})
-			service_gross += flt(qty * part_rate, 2)
+			part_uom = p.get("uom") or getattr(item_doc, "stock_uom", "Nos")
+			part_desc = f"{part_name} {compliance_tag}"
+
+			if item_code in ctx["stock_items"] and bin_dim_enabled and bin_dim_field and qty > 0:
+				wh_bucket = working_bin_stock_by_wh.setdefault(resolved_wh, {})
+				working_info = wh_bucket.get(item_code)
+				if working_info is None:
+					fetched = get_items_bin_stock_batch([item_code], warehouse=resolved_wh).get(item_code) or {}
+					working_info = {
+						**fetched,
+						"bins": [dict(b) for b in (fetched.get("bins") or [])],
+					}
+					wh_bucket[item_code] = working_info
+
+				raw_explicit_bin = p.get("bin_location")
+				explicit_bin = (
+					raw_explicit_bin.strip().upper()
+					if isinstance(raw_explicit_bin, str) and raw_explicit_bin.strip()
+					else None
+				)
+				if explicit_bin:
+					rk = (item_code, resolved_wh, explicit_bin)
+					if rk in pinned_reserved:
+						pinned_reserved[rk] = max(0.0, flt(pinned_reserved[rk] - qty, 6))
+					alloc_source = working_info
+				else:
+					adjusted_bins = []
+					for b in working_info.get("bins") or []:
+						b_code = str(b.get("bin_location") or "").strip().upper()
+						reserved = flt(pinned_reserved.get((item_code, resolved_wh, b_code), 0.0), 6)
+						usable = max(0.0, flt(flt(b.get("qty")) - reserved, 6))
+						if usable > 1e-6:
+							adjusted_bins.append({**b, "qty": usable})
+					alloc_source = {**working_info, "bins": adjusted_bins}
+
+				slices = allocate_item_bins(
+					item_code=item_code,
+					required_qty=qty,
+					bin_info=alloc_source,
+					explicit_bin=explicit_bin,
+				)
+				consume_allocated_bin_slices(working_info, slices)
+
+				for alloc_bin, alloc_qty in slices:
+					si_item: Dict[str, Any] = {
+						"item_code": item_code,
+						"item_name": part_name,
+						"description": part_desc,
+						"qty": alloc_qty,
+						"uom": part_uom,
+						"rate": part_rate,
+						"warehouse": resolved_wh,
+						"income_account": ctx["default_income_account"],
+						"cost_center": ctx["default_cost_center"],
+					}
+					if alloc_bin:
+						si_item[bin_dim_field] = alloc_bin
+					si.append("items", si_item)
+				service_gross += flt(sum(flt(alloc_qty * part_rate, 2) for _b, alloc_qty in slices), 2)
+			else:
+				si.append("items", {
+					"item_code": item_code,
+					"item_name": part_name,
+					"description": part_desc,
+					"qty": qty,
+					"uom": part_uom,
+					"rate": part_rate,
+					"warehouse": resolved_wh,
+					"income_account": ctx["default_income_account"],
+					"cost_center": ctx["default_cost_center"],
+				})
+				service_gross += flt(qty * part_rate, 2)
 
 		s_discount = max(0.0, flt(getattr(s, "discount_amount", 0), 2))
 		row_discounts_total = flt(row_discounts_total + min(s_discount, flt(service_gross, 2)), 2)

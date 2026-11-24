@@ -120,7 +120,9 @@
   "portal_booking_token_ttl_days",
   "portal_invoice_print_format",
   "portal_pin_encryption_key",
-  "portal_pin_prompt_disclaimer"
+  "portal_pin_prompt_disclaimer",
+  "sb_inventory_dimensions",
+  "require_bin_on_receive"
  ],
  "fields": [
   {
@@ -804,11 +806,23 @@
    "fieldname": "portal_pin_prompt_disclaimer",
    "fieldtype": "Small Text",
    "label": "PIN-to-Drive Prompt Disclaimer"
+  },
+  {
+   "fieldname": "sb_inventory_dimensions",
+   "fieldtype": "Section Break",
+   "label": "Inventory & Bin Locations"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, Purchase Receipts and stock-updating Purchase Invoices reject lines that lack both an explicit bin location and an Item default bin location.",
+   "fieldname": "require_bin_on_receive",
+   "fieldtype": "Check",
+   "label": "Require Bin Location on Stock Receive"
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-22 04:55:00.000000",
+ "modified": "2026-11-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

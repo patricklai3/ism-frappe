@@ -2520,3 +2520,150 @@ class TestAgentFacade(ISMTestCase):
 		self.assertTrue(unfiltered_slots["data"]["slots"])
 		self.assertIn(main_lift_bay, unfiltered_slots["data"]["slots"][0]["available_bay_ids"])
 
+	def test_bin_location_agent_facade_and_permissions(self):
+		"""Verify agent envelope endpoints and permission guards for Storage Bin operations."""
+		from ism.api.agent import (
+			adjust_bin_stock,
+			check_parts_stock,
+			create_bin_location,
+			list_bin_locations,
+			set_item_default_bin,
+			transfer_bin_stock,
+		)
+		from ism.api.parts import get_default_warehouse, quick_create_part
+		from ism.setup import setup_inventory_dimensions
+
+		setup_inventory_dimensions()
+		wh = get_default_warehouse()
+		suffix = frappe.generate_hash(length=5).upper()
+
+		b1_res = create_bin_location(
+			bin_code=f"fa-{suffix.lower()}",
+			warehouse=wh,
+			zone="FACADE",
+			aisle="A1",
+			rack="R2",
+			shelf="S1",
+			include_summary=True,
+		)
+		self.assertTrue(b1_res["success"])
+		b1 = b1_res["data"]["bin_code"]
+		self.track("Storage Bin", b1)
+		self.assertEqual(b1, f"FA-{suffix}")
+		self.assertIn("storage-bin", b1_res["urls"]["desk"])
+		self.assertIn(b1, b1_res["summary_card"])
+
+		b2_res = create_bin_location(bin_code=f"FB-{suffix}", warehouse=wh, zone="FACADE", bin_type="Overflow")
+		self.assertTrue(b2_res["success"])
+		b2 = b2_res["data"]["bin_code"]
+		self.track("Storage Bin", b2)
+
+		part = quick_create_part(
+			part_number=f"FAC-BIN-{suffix}",
+			part_name="Facade Bin Part",
+			unit_rate=60.0,
+			valuation_rate=30.0,
+		)
+		item_code = part["item_code"]
+		self.track("Item", item_code)
+
+		assign_res = set_item_default_bin(item_code=item_code, bin_location=b1, include_summary=True)
+		self.assertTrue(assign_res["success"])
+		self.assertEqual(assign_res["data"]["default_bin_location"], b1)
+		self.assertIn(b1, assign_res["summary_card"])
+
+		adj_rec = adjust_bin_stock(
+			purpose="receipt",
+			items=[{"item_code": item_code, "qty": 3, "rate": 30.0}],
+			bin_location=b1,
+			warehouse=wh,
+			reason="Facade test putaway",
+			include_summary=True,
+		)
+		self.assertTrue(adj_rec["success"])
+		self.track("Stock Entry", adj_rec["data"]["stock_entry"])
+		self.assertEqual(adj_rec["data"]["purpose"], "Material Receipt")
+
+		trf_res = transfer_bin_stock(
+			from_bin=b1,
+			to_bin=b2,
+			item_code=item_code,
+			qty=1,
+			warehouse=wh,
+			notes="Move to overflow",
+			include_summary=True,
+		)
+		self.assertTrue(trf_res["success"])
+		self.track("Stock Entry", trf_res["data"]["stock_entry"])
+		self.assertEqual(trf_res["data"]["from_bin"], b1)
+		self.assertEqual(trf_res["data"]["to_bin"], b2)
+
+		adj_iss = adjust_bin_stock(
+			purpose="issue",
+			items=[{"item_code": item_code, "qty": 1}],
+			bin_location=b1,
+			warehouse=wh,
+			reason="Facade test issue",
+		)
+		self.assertTrue(adj_iss["success"])
+		self.track("Stock Entry", adj_iss["data"]["stock_entry"])
+
+		listed = list_bin_locations(warehouse=wh, zone="FACADE", include_stock=True, include_summary=True)
+		self.assertTrue(listed["success"])
+		self.assertEqual(listed["data"]["count"], 2)
+		by_bin = {b["bin_code"]: b for b in listed["data"]["bins"]}
+		self.assertEqual(by_bin[b1]["total_qty"], 1.0)
+		self.assertEqual(by_bin[b2]["total_qty"], 1.0)
+
+		chk = check_parts_stock(bin_location=b2)
+		self.assertTrue(chk["success"])
+		self.assertEqual(chk["data"]["bin_location"], b2)
+		self.assertIn(item_code, chk["data"]["items"])
+		self.assertEqual(chk["data"]["items"][item_code]["target_bin_qty"], 1.0)
+
+		# Guest permission isolation
+		orig_user = frappe.session.user
+		try:
+			frappe.set_user("Guest")
+			for call in (
+				lambda: list_bin_locations(),
+				lambda: create_bin_location(bin_code=f"G-{suffix}"),
+				lambda: set_item_default_bin(item_code=item_code, bin_location=b1),
+				lambda: transfer_bin_stock(from_bin=b1, to_bin=b2, item_code=item_code, qty=1),
+				lambda: adjust_bin_stock(purpose="receipt", items=[{"item_code": item_code, "qty": 1}], bin_location=b1),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					call()
+		finally:
+			frappe.set_user(orig_user)
+
+		# ISM Technician has read-only access to Storage Bin, blocked on bin writes/stock entries
+		tech_email = f"tech_bin_{suffix.lower()}@example.com"
+		tech_user = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": tech_email,
+				"first_name": "Tech",
+				"last_name": f"Bin{suffix}",
+				"enabled": 1,
+				"user_type": "System User",
+				"roles": [{"role": "ISM Technician"}],
+			}
+		).insert(ignore_permissions=True)
+		self.track(tech_user)
+		try:
+			frappe.set_user(tech_email)
+			tech_list = list_bin_locations(warehouse=wh, zone="FACADE")
+			self.assertTrue(tech_list["success"])
+			self.assertGreaterEqual(tech_list["data"]["count"], 2)
+			for call in (
+				lambda: create_bin_location(bin_code=f"T-{suffix}"),
+				lambda: set_item_default_bin(item_code=item_code, bin_location=b1),
+				lambda: transfer_bin_stock(from_bin=b1, to_bin=b2, item_code=item_code, qty=1),
+				lambda: adjust_bin_stock(purpose="receipt", items=[{"item_code": item_code, "qty": 1}], bin_location=b1),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					call()
+		finally:
+			frappe.set_user(orig_user)
+

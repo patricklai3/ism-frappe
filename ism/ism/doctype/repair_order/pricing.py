@@ -263,7 +263,7 @@ def _normalize_service_parts(
 		part_wh = p.get("warehouse")
 		valid_wh = part_wh if (part_wh and part_wh in valid_warehouses) else default_wh
 		code = p.get("item_code", "")
-		cleaned_parts.append({
+		cleaned_entry = {
 			"item_code": code,
 			"item_name": p.get("item_name", code),
 			"component_slot": p.get("component_slot") or p.get("item_name", code),
@@ -277,7 +277,11 @@ def _normalize_service_parts(
 			"rate": rate,
 			"amount": amt,
 			"warehouse": valid_wh,
-		})
+		}
+		raw_bin = p.get("bin_location")
+		if isinstance(raw_bin, str) and raw_bin.strip():
+			cleaned_entry["bin_location"] = raw_bin.strip().upper()
+		cleaned_parts.append(cleaned_entry)
 	return cleaned_parts, flt(parts_total, 2)
 
 

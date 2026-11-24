@@ -701,3 +701,212 @@ class TestTechExecutionAndIsolation(ISMTestCase):
 		self.assertNotIn(tech_a_sai, visible_for_b)
 		self.assertNotIn(mgr_sai, visible_for_b)
 		self.assertFalse(frappe.has_permission("Shop Action Item", "read", doc=tech_a_sai))
+
+	def test_tech_repair_order_bin_locations_all_states_and_zero_pricing(self):
+		"""get_tech_repair_order returns all 5 bin_status states for scoped technicians with zero pricing leaks."""
+		from ism.api.parts_stock import _resolve_default_warehouse
+		from ism.setup_tasks.inventory_dimensions import setup_inventory_dimensions
+
+		setup_inventory_dimensions()
+		tech_user, tech_emp = self._create_user_with_roles("tech_bins", ["ISM Technician"], link_employee=True)
+		manifest = self.get_manifest()
+		company = manifest.company
+		wh = _resolve_default_warehouse(company)
+
+		dim_meta = frappe.db.get_value(
+			"Inventory Dimension",
+			{"reference_document": "Storage Bin"},
+			["source_fieldname", "target_fieldname"],
+			as_dict=True,
+		) or {}
+		source_bin_field = dim_meta.get("source_fieldname") or "bin_location"
+		raw_target = dim_meta.get("target_fieldname")
+		target_bin_field = (
+			f"to_{source_bin_field}"
+			if (not raw_target or raw_target == source_bin_field)
+			else raw_target
+		)
+
+		bin_a = f"{TEST_PREFIX}A2-03-{frappe.generate_hash(length=4).upper()}"
+		bin_b = f"{TEST_PREFIX}OF-01-{frappe.generate_hash(length=4).upper()}"
+		for b_code in (bin_a, bin_b):
+			b_doc = frappe.get_doc({
+				"doctype": "Storage Bin",
+				"bin_code": b_code,
+				"warehouse": wh,
+				"bin_type": "Standard" if b_code == bin_a else "Overflow",
+				"is_active": 1,
+			}).insert(ignore_permissions=True)
+			self.track(b_doc)
+
+		item_in_stock = self.create_test_item(
+			f"{TEST_PREFIX}BIN_STOCK_{frappe.generate_hash(length=4)}",
+			is_stock_item=1,
+			standard_rate=45.0,
+		)
+		item_multi = self.create_test_item(
+			f"{TEST_PREFIX}BIN_MULTI_{frappe.generate_hash(length=4)}",
+			is_stock_item=1,
+			standard_rate=60.0,
+			default_bin_location=bin_a,
+		)
+		item_default = self.create_test_item(
+			f"{TEST_PREFIX}BIN_HOME_{frappe.generate_hash(length=4)}",
+			is_stock_item=1,
+			standard_rate=25.0,
+			default_bin_location=bin_a,
+		)
+		item_cust = self.create_test_item(
+			f"{TEST_PREFIX}BIN_CUST_{frappe.generate_hash(length=4)}",
+			is_stock_item=0,
+			standard_rate=30.0,
+			default_bin_location=bin_a,
+		)
+		item_unassigned = self.create_test_item(
+			f"{TEST_PREFIX}BIN_NONE_{frappe.generate_hash(length=4)}",
+			is_stock_item=1,
+			standard_rate=15.0,
+		)
+
+		se_receipt = frappe.get_doc({
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": company,
+			"items": [
+				{
+					"item_code": item_in_stock.name,
+					"qty": 3,
+					"t_warehouse": wh,
+					"basic_rate": 20.0,
+					target_bin_field: bin_a,
+				},
+				{
+					"item_code": item_multi.name,
+					"qty": 2,
+					"t_warehouse": wh,
+					"basic_rate": 30.0,
+					target_bin_field: bin_a,
+				},
+				{
+					"item_code": item_multi.name,
+					"qty": 1,
+					"t_warehouse": wh,
+					"basic_rate": 30.0,
+					target_bin_field: bin_b,
+				},
+				{
+					"item_code": item_default.name,
+					"qty": 1,
+					"t_warehouse": wh,
+					"basic_rate": 10.0,
+				},
+				{
+					"item_code": item_unassigned.name,
+					"qty": 1,
+					"t_warehouse": wh,
+					"basic_rate": 5.0,
+				},
+			],
+		})
+		se_receipt.insert(ignore_permissions=True)
+		se_receipt.submit()
+		self.track(se_receipt)
+
+		customer = self.create_test_customer()
+		vehicle = self.create_test_vehicle(customer=customer.name, model="Model 3", model_year=2023)
+		parts_payload = [
+			{"item_code": item_in_stock.name, "item_name": "Cabin Filter", "qty": 1, "rate": 45.0, "amount": 45.0, "part_source": "OEM"},
+			{"item_code": item_multi.name, "item_name": "Brake Pad Set", "qty": 2, "rate": 60.0, "amount": 120.0, "part_source": "OEM"},
+			{"item_code": item_default.name, "item_name": "Wiper Blade", "qty": 1, "rate": 25.0, "amount": 25.0, "part_source": "Aftermarket"},
+			{"item_code": item_cust.name, "item_name": "Customer Rotor", "qty": 2, "rate": 0.0, "amount": 0.0, "part_source": "Customer Supplied"},
+			{"item_code": item_unassigned.name, "item_name": "Washer Fluid", "qty": 1, "rate": 15.0, "amount": 15.0, "part_source": "OEM"},
+		]
+		ro = self.create_test_repair_order(
+			customer.name,
+			vehicle.name,
+			company=company,
+			status="Authorized - In Progress",
+			approval_status="Approved",
+			services=[{
+				"service_title": "Bin Inspection Service",
+				"status": "Approved",
+				"labor_hours": 1.0,
+				"labor_rate": 150.0,
+				"labor_amount": 150.0,
+				"parts_total": 205.0,
+				"total_amount": 355.0,
+				"parts": json.dumps(parts_payload),
+			}],
+		)
+		self.create_test_schedule_entry(
+			repair_order=ro.name,
+			assigned_technician=tech_emp,
+			status="Confirmed",
+			entry_type="Repair",
+		)
+
+		job_card_html = frappe.get_print("Repair Order", ro.name, "Technician Bay Job Card")
+		self.assertIn(bin_a, job_card_html)
+		self.assertIn(bin_b, job_card_html)
+		self.assertIn("Cust Supplied", job_card_html)
+		self.assertIn("No Bin", job_card_html)
+
+		frappe.set_user(tech_user)
+		self.assertFalse(frappe.has_permission("Stock Ledger Entry", "read", user=tech_user))
+
+		detail = tech_api.get_tech_repair_order(ro.name)
+		self.assertEqual(_find_keys_recursive(detail, FORBIDDEN_PRICING_KEYS), [])
+
+		parts_out = detail["repair_order"]["services"][0]["parts"]
+		by_code = {p["item_code"]: p for p in parts_out}
+
+		# Verify strict zero-pricing on every part dict
+		pricing_tokens = ("rate", "price", "cost", "valuation", "amount", "total")
+		for p in parts_out:
+			for key in p:
+				self.assertFalse(any(tok in key.lower() for tok in pricing_tokens), f"Pricing key leaked: {key}")
+
+		self.assertEqual(by_code[item_in_stock.name]["bin_status"], "IN_STOCK")
+		self.assertEqual(by_code[item_in_stock.name]["primary_bin"], bin_a)
+		self.assertEqual(by_code[item_in_stock.name]["bin_display"], bin_a)
+
+		self.assertEqual(by_code[item_multi.name]["bin_status"], "MULTI_BIN")
+		self.assertEqual(by_code[item_multi.name]["primary_bin"], bin_a)
+		self.assertEqual(by_code[item_multi.name]["bin_display"], f"{bin_a} (×2) · {bin_b} (×1)")
+		self.assertEqual(len(by_code[item_multi.name]["bin_locations"]), 2)
+
+		self.assertEqual(by_code[item_default.name]["bin_status"], "DEFAULT_ONLY")
+		self.assertIsNone(by_code[item_default.name]["primary_bin"])
+		self.assertEqual(by_code[item_default.name]["bin_display"], f"Home: {bin_a}")
+
+		self.assertEqual(by_code[item_cust.name]["bin_status"], "CUSTOMER_SUPPLIED")
+		self.assertIsNone(by_code[item_cust.name]["primary_bin"])
+		self.assertEqual(by_code[item_cust.name]["bin_display"], "Customer Supplied")
+		self.assertEqual(by_code[item_cust.name]["bin_locations"], [])
+
+		self.assertEqual(by_code[item_unassigned.name]["bin_status"], "UNASSIGNED")
+		self.assertIsNone(by_code[item_unassigned.name]["primary_bin"])
+		self.assertEqual(by_code[item_unassigned.name]["bin_display"], "No Bin")
+
+	def test_parse_service_parts_no_price_pinned_bin_and_empty_fallback(self):
+		"""Explicitly pinned bin_location resolves to IN_STOCK; missing stock map degrades to UNASSIGNED."""
+		raw = [
+			{"item_code": "PART-PIN", "item_name": "Pinned Part", "qty": 1, "bin_location": "OF-01", "rate": 99.0},
+			{"item_code": "PART-EMPTY", "item_name": "Empty Part", "qty": 2, "amount": 50.0},
+		]
+		stock_map = {
+			"PART-PIN": {
+				"default_bin_location": "A2-03",
+				"bins": [
+					{"bin_location": "A2-03", "qty": 2.0, "is_default": True},
+					{"bin_location": "OF-01", "qty": 1.0, "is_default": False},
+				],
+			}
+		}
+		parsed = tech_api._parse_service_parts_no_price(raw, bin_stock_map=stock_map)
+		self.assertEqual(parsed[0]["bin_status"], "IN_STOCK")
+		self.assertEqual(parsed[0]["primary_bin"], "OF-01")
+		self.assertEqual(parsed[0]["bin_display"], "OF-01")
+		self.assertEqual(parsed[1]["bin_status"], "UNASSIGNED")
+		self.assertEqual(parsed[1]["bin_display"], "No Bin")
+		self.assertEqual(_find_keys_recursive(parsed, FORBIDDEN_PRICING_KEYS | frozenset({"rate", "amount"})), [])

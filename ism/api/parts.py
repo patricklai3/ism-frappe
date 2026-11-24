@@ -156,6 +156,8 @@ def quick_create_part(
 	side="Both",
 	is_default=0,
 	qty=1.0,
+	default_bin_location=None,
+	bin_location=None,
 ):
 	"""Fast single part creator that ensures standard ERPNext inventory defaults,
 	automotive compliance custom fields, and optional auto-linking to Service Packages.
@@ -179,6 +181,8 @@ def quick_create_part(
 		side=side,
 		is_default=is_default,
 		qty=qty,
+		default_bin_location=default_bin_location,
+		bin_location=bin_location,
 	)
 
 
@@ -194,6 +198,8 @@ def bulk_import_parts(
 	default_condition="New",
 	side="Both",
 	supplier=None,
+	default_bin_location=None,
+	bin_location=None,
 ):
 	"""Batch-create/update parts from structured JSON items (primary) or delimited text.
 
@@ -212,6 +218,8 @@ def bulk_import_parts(
 		default_condition=default_condition,
 		side=side,
 		supplier=supplier,
+		default_bin_location=default_bin_location,
+		bin_location=bin_location,
 	)
 
 
@@ -380,6 +388,7 @@ def create_purchase_invoice(
 	bill_no=None,
 	bill_date=None,
 	attach_advances=True,
+	bin_location=None,
 ):
 	"""Create and immediately submit a Purchase Invoice (from PO or standalone), optionally updating stock and attaching PO advances."""
 	return _create_purchase_invoice_impl(
@@ -391,4 +400,5 @@ def create_purchase_invoice(
 		bill_no=bill_no,
 		bill_date=bill_date,
 		attach_advances=attach_advances,
+		bin_location=bin_location,
 	)

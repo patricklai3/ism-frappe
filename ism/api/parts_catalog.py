@@ -24,7 +24,14 @@ from ism.api._validation import (
 	scalar_str,
 )
 from ism.api.parts_procurement import _apply_supplier_to_item_doc, _ensure_supplier_exists
-from ism.api.parts_stock import _get_item_stock_qty, _get_items_stock_qty_map, _resolve_default_warehouse
+from ism.api.parts_stock import (
+	_get_item_stock_qty,
+	_get_items_stock_qty_map,
+	_normalize_bin_code,
+	_resolve_default_warehouse,
+	_validate_storage_bin_exists,
+	get_items_bin_stock_batch,
+)
 
 LHRH_PATTERN = re.compile(
 	r"\b(LH|RH)\b|\bLeft\s+Hand\b(?!\s*Drive)|\bRight\s+Hand\b(?!\s*Drive)",
@@ -176,7 +183,15 @@ def _ensure_item_custom_fields():
 		setup_item_custom_fields()
 
 
-def _backfill_existing_item_fields(item, unit_rate, valuation_rate, oem_part_number, revision, warranty_period):
+def _backfill_existing_item_fields(
+	item,
+	unit_rate,
+	valuation_rate,
+	oem_part_number,
+	revision,
+	warranty_period,
+	default_bin_location=None,
+):
 	updated = False
 	if unit_rate and not flt(item.standard_rate):
 		item.standard_rate = unit_rate
@@ -192,6 +207,13 @@ def _backfill_existing_item_fields(item, unit_rate, valuation_rate, oem_part_num
 		updated = True
 	if warranty_period and not item.warranty_period:
 		item.warranty_period = warranty_period
+		updated = True
+	if (
+		default_bin_location
+		and frappe.db.has_column("Item", "default_bin_location")
+		and not getattr(item, "default_bin_location", None)
+	):
+		item.default_bin_location = default_bin_location
 		updated = True
 	return updated
 
@@ -433,6 +455,8 @@ def _upsert_part_core(
 	qty=1.0,
 	supplier=None,
 	supplier_part_no=None,
+	default_bin_location=None,
+	bin_location=None,
 	ensured_suppliers: Optional[set[str]] = None,
 	pkg_cache: Optional[dict[str, Any]] = None,
 	fetch_stock_qty: bool = True,
@@ -451,6 +475,14 @@ def _upsert_part_core(
 	side = optional_str(side, "Side") or "Both"
 	supplier = optional_str(supplier, "Supplier")
 	supplier_part_no = optional_str(supplier_part_no, "Supplier Part No")
+	resolved_default_bin = _normalize_bin_code(
+		default_bin_location if default_bin_location is not None else bin_location,
+		"Default Bin Location",
+		required=False,
+	)
+	if resolved_default_bin:
+		frappe.has_permission("Storage Bin", "read", throw=True)
+		_validate_storage_bin_exists(resolved_default_bin, require_active=True)
 
 	norm_source = _normalize_part_source(part_source_str)
 	norm_condition = _normalize_part_condition(part_condition_str)
@@ -515,6 +547,8 @@ def _upsert_part_core(
 		if brand and frappe.db.exists("Brand", brand):
 			item.brand = brand
 		item.warranty_period = warranty_period or "12 Months / 20,000 km"
+		if resolved_default_bin and frappe.db.has_column("Item", "default_bin_location"):
+			item.default_bin_location = resolved_default_bin
 		if supplier:
 			_apply_supplier_to_item_doc(item, supplier, supplier_part_no)
 
@@ -525,7 +559,13 @@ def _upsert_part_core(
 			item = frappe.get_doc("Item", item_code)
 			item.check_permission("read")
 			changed = _backfill_existing_item_fields(
-				item, unit_rate_val, valuation_rate_val, oem_part_number, revision, warranty_period
+				item,
+				unit_rate_val,
+				valuation_rate_val,
+				oem_part_number,
+				revision,
+				warranty_period,
+				default_bin_location=resolved_default_bin,
 			)
 			if supplier and _apply_supplier_to_item_doc(item, supplier, supplier_part_no):
 				changed = True
@@ -534,7 +574,13 @@ def _upsert_part_core(
 				item.save()
 	else:
 		changed = _backfill_existing_item_fields(
-			item, unit_rate_val, valuation_rate_val, oem_part_number, revision, warranty_period
+			item,
+			unit_rate_val,
+			valuation_rate_val,
+			oem_part_number,
+			revision,
+			warranty_period,
+			default_bin_location=resolved_default_bin,
 		)
 		if supplier and _apply_supplier_to_item_doc(item, supplier, supplier_part_no):
 			changed = True
@@ -588,6 +634,7 @@ def _upsert_part_core(
 		"slot_number": target_slot_num,
 		"component_slot": slot_label,
 		"side": resolved_side,
+		"default_bin_location": getattr(item, "default_bin_location", None) or resolved_default_bin or None,
 	}
 	if supplier:
 		payload["supplier"] = supplier
@@ -614,6 +661,8 @@ def quick_create_part(
 	side="Both",
 	is_default=0,
 	qty=1.0,
+	default_bin_location=None,
+	bin_location=None,
 ):
 	"""Fast single part creator that ensures standard ERPNext inventory defaults,
 	automotive compliance custom fields, and optional auto-linking to Service Packages.
@@ -637,6 +686,8 @@ def quick_create_part(
 		side=side,
 		is_default=is_default,
 		qty=qty,
+		default_bin_location=default_bin_location,
+		bin_location=bin_location,
 		fetch_stock_qty=True,
 	)
 	return payload
@@ -728,6 +779,7 @@ def _import_part_record(
 	side="Both",
 	is_first=False,
 	supplier=None,
+	default_bin_location=None,
 	*,
 	ensured_suppliers: Optional[set[str]] = None,
 	pkg_cache: Optional[dict[str, Any]] = None,
@@ -777,6 +829,16 @@ def _import_part_record(
 	supplier_part_no = (
 		scalar_str(record.get("supplier_part_no") or record.get("supplier_sku"), "Supplier Part No") or part_num
 	)
+	row_bin = (
+		scalar_str(
+			record.get("default_bin_location")
+			or record.get("bin_location")
+			or record.get("default_bin")
+			or record.get("bin"),
+			"Default Bin Location",
+		)
+		or default_bin_location
+	)
 
 	res, was_created = _upsert_part_core(
 		part_number=part_num,
@@ -800,6 +862,7 @@ def _import_part_record(
 		qty=qty,
 		supplier=row_supplier or None,
 		supplier_part_no=supplier_part_no,
+		default_bin_location=row_bin,
 		ensured_suppliers=ensured_suppliers,
 		pkg_cache=pkg_cache,
 		fetch_stock_qty=False,
@@ -824,6 +887,7 @@ def _process_structured_import_row(
 	side,
 	supplier,
 	*,
+	default_bin_location: Optional[str] = None,
 	updated_items: Optional[list[Any]] = None,
 	ensured_suppliers: Optional[set[str]] = None,
 	pkg_cache: Optional[dict[str, Any]] = None,
@@ -844,6 +908,7 @@ def _process_structured_import_row(
 			side=side,
 			is_first=is_first,
 			supplier=supplier,
+			default_bin_location=default_bin_location,
 			ensured_suppliers=ensured_suppliers,
 			pkg_cache=pkg_cache,
 			return_created_flag=True,
@@ -868,6 +933,8 @@ def bulk_import_parts(
 	default_condition="New",
 	side="Both",
 	supplier=None,
+	default_bin_location=None,
+	bin_location=None,
 ):
 	"""Batch-create/update parts from structured JSON items (primary) or delimited text.
 
@@ -882,6 +949,14 @@ def bulk_import_parts(
 	default_condition = optional_str(default_condition, "Default Condition") or "New"
 	side = optional_str(side, "Side") or "Both"
 	supplier = optional_str(supplier, "Supplier")
+	fallback_bin = _normalize_bin_code(
+		default_bin_location if default_bin_location is not None else bin_location,
+		"Default Bin Location",
+		required=False,
+	)
+	if fallback_bin:
+		frappe.has_permission("Storage Bin", "read", throw=True)
+		_validate_storage_bin_exists(fallback_bin, require_active=True)
 	if raw_text is not None and not isinstance(raw_text, str):
 		frappe.throw(_("Import raw text must be a string."), frappe.ValidationError)
 
@@ -926,6 +1001,7 @@ def bulk_import_parts(
 				default_condition=default_condition,
 				side=side,
 				supplier=supplier,
+				default_bin_location=fallback_bin,
 				updated_items=updated_items,
 				ensured_suppliers=ensured_suppliers,
 				pkg_cache=pkg_cache,
@@ -946,6 +1022,7 @@ def bulk_import_parts(
 					side=side,
 					is_first=((len(created_items) + len(updated_items)) == 0),
 					supplier=supplier,
+					default_bin_location=fallback_bin,
 					ensured_suppliers=ensured_suppliers,
 					pkg_cache=pkg_cache,
 					return_created_flag=True,
@@ -1084,6 +1161,7 @@ def get_component_alternates(
 	)
 	item_meta_map = {row.name: row for row in item_meta_rows}
 	stock_map = _get_items_stock_qty_map(item_codes)
+	bin_stock_map = get_items_bin_stock_batch(item_codes)
 
 	results = []
 	for ic, data in items.items():
@@ -1101,6 +1179,10 @@ def get_component_alternates(
 				data["rate"] = flt(it_doc.standard_rate)
 
 		data["stock_qty"] = flt(stock_map.get(ic, 0.0))
+		bin_info = bin_stock_map.get(ic) or {}
+		data["bin_locations"] = bin_info.get("bins", [])
+		data["primary_bin"] = bin_info.get("primary_bin")
+		data["default_bin_location"] = bin_info.get("default_bin_location")
 		results.append(data)
 
 	def sort_key(x):

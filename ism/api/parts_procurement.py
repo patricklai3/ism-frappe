@@ -19,8 +19,12 @@ from ism.api._validation import (
 )
 from ism.api.parts_stock import (
 	_extract_ro_metadata,
+	_is_bin_required_on_receive,
+	_normalize_bin_code,
 	_parse_parts_json,
 	_resolve_default_warehouse,
+	_validate_storage_bin_exists,
+	get_bin_dimension_meta,
 	get_item_available_stock,
 	get_items_available_stock_batch,
 )
@@ -752,6 +756,107 @@ def create_purchase_payment(
 	}
 
 
+def _normalize_bin_allocations(bin_allocations: Any) -> dict[str, str]:
+	"""Normalize per-item bin_allocations from dict, list[dict], or JSON string into {item_code: BIN}."""
+	if bin_allocations is None or (isinstance(bin_allocations, str) and not bin_allocations.strip()):
+		return {}
+	parsed = parse_json_arg(bin_allocations, {}, label="bin_allocations") if isinstance(bin_allocations, str) else bin_allocations
+	alloc_map: dict[str, str] = {}
+	if isinstance(parsed, dict):
+		for raw_code, raw_bin in parsed.items():
+			code = require_str(raw_code, "Item Code")
+			bin_code = _normalize_bin_code(raw_bin, f"Bin Location for {code}", required=True)
+			alloc_map[code] = bin_code
+		return alloc_map
+	if isinstance(parsed, list):
+		for idx, entry in enumerate(parsed, start=1):
+			if not isinstance(entry, dict):
+				frappe.throw(_("bin_allocations entry #{0} must be a JSON object.").format(idx), frappe.ValidationError)
+			code = require_str(entry.get("item_code"), f"Item Code (allocation #{idx})")
+			bin_code = _normalize_bin_code(entry.get("bin_location"), f"Bin Location for {code}", required=True)
+			alloc_map[code] = bin_code
+		return alloc_map
+	frappe.throw(_("bin_allocations must be a JSON object or list of {item_code, bin_location} entries."), frappe.ValidationError)
+
+
+def _resolve_and_apply_receive_bin(
+	item_rows: list[Any],
+	default_bin: Optional[str] = None,
+	bin_allocations: Any = None,
+	dim_meta: Optional[dict[str, Any]] = None,
+) -> list[Optional[str]]:
+	"""Resolve and stamp Storage Bin dimension onto Purchase Receipt / Purchase Invoice item rows.
+
+	Resolution order per row:
+	1. per-item bin_allocations[item_code]
+	2. row's own bin_location
+	3. uniform default_bin
+	4. Item.default_bin_location
+	Raises MandatoryError if unresolved on a stock item and ISM Settings.require_bin_on_receive == 1.
+	"""
+	resolved_dim = dim_meta or get_bin_dimension_meta()
+	dim_field = resolved_dim.get("source_fieldname") if resolved_dim.get("enabled") else None
+	uniform_bin = _normalize_bin_code(default_bin, "Bin Location", required=False)
+	alloc_map = _normalize_bin_allocations(bin_allocations)
+
+	explicit_bins: set[str] = set()
+	if uniform_bin:
+		explicit_bins.add(uniform_bin)
+	explicit_bins.update(alloc_map.values())
+	for row in item_rows or []:
+		raw_row_bin = getattr(row, dim_field, None) if dim_field else getattr(row, "bin_location", None)
+		if raw_row_bin:
+			explicit_bins.add(_normalize_bin_code(raw_row_bin, "Bin Location", required=True))
+
+	if explicit_bins:
+		frappe.has_permission("Storage Bin", "read", throw=True)
+		for bin_code in sorted(explicit_bins):
+			_validate_storage_bin_exists(bin_code, require_active=True)
+
+	item_codes = list(dict.fromkeys(getattr(r, "item_code", None) for r in (item_rows or []) if getattr(r, "item_code", None)))
+	has_default_bin_col = frappe.db.has_column("Item", "default_bin_location")
+	item_fields = ["name", "is_stock_item"]
+	if has_default_bin_col:
+		item_fields.append("default_bin_location")
+	item_meta_map: dict[str, dict[str, Any]] = {}
+	if item_codes:
+		for it in frappe.get_all("Item", filters={"name": ["in", item_codes]}, fields=item_fields):
+			item_meta_map[it["name"]] = it
+
+	require_bin = _is_bin_required_on_receive()
+	resolved_per_row: list[Optional[str]] = []
+
+	for row in item_rows or []:
+		code = getattr(row, "item_code", None)
+		it_meta = item_meta_map.get(code) or {}
+		is_stock = cint(it_meta.get("is_stock_item", 1)) == 1
+		raw_row_bin = getattr(row, dim_field, None) if dim_field else getattr(row, "bin_location", None)
+		row_bin = _normalize_bin_code(raw_row_bin, "Bin Location", required=False)
+		item_default = (
+			_normalize_bin_code(it_meta.get("default_bin_location"), "Default Bin Location", required=False)
+			if has_default_bin_col
+			else None
+		)
+
+		resolved = alloc_map.get(code) or row_bin or uniform_bin or item_default
+		if resolved:
+			row_wh = getattr(row, "warehouse", None)
+			_validate_storage_bin_exists(resolved, warehouse=row_wh, require_active=True)
+			if dim_field:
+				setattr(row, dim_field, resolved)
+		elif require_bin and is_stock:
+			frappe.throw(
+				_(
+					"Bin Location is required when receiving stock item '{0}' "
+					"(ISM Settings: Require Bin Location on Stock Receive is enabled)."
+				).format(code),
+				frappe.MandatoryError,
+			)
+		resolved_per_row.append(resolved)
+
+	return resolved_per_row
+
+
 @frappe.whitelist()
 def create_purchase_invoice(
 	purchase_order=None,
@@ -762,6 +867,7 @@ def create_purchase_invoice(
 	bill_no=None,
 	bill_date=None,
 	attach_advances=True,
+	bin_location=None,
 ):
 	"""Create and immediately submit a Purchase Invoice (from PO or standalone), optionally updating stock and attaching PO advances."""
 	purchase_order = optional_str(purchase_order, "Purchase Order")
@@ -771,6 +877,7 @@ def create_purchase_invoice(
 	bill_date_str = optional_str(bill_date, "Supplier Invoice Date")
 	should_update_stock = coerce_bool(update_stock, default=False)
 	should_attach_advances = coerce_bool(attach_advances, default=True)
+	uniform_bin = _normalize_bin_code(bin_location, "Bin Location", required=False)
 
 	if isinstance(parts_data, str):
 		parts_data = parse_json_arg(parts_data, label="parts_data")
@@ -786,6 +893,10 @@ def create_purchase_invoice(
 
 	frappe.has_permission("Purchase Invoice", "create", throw=True)
 	frappe.has_permission("Purchase Invoice", "submit", throw=True)
+
+	dim_meta = get_bin_dimension_meta()
+	dim_field = dim_meta.get("source_fieldname") if dim_meta.get("enabled") else None
+	per_item_bins: dict[str, str] = {}
 
 	po = None
 	if purchase_order:
@@ -841,6 +952,8 @@ def create_purchase_invoice(
 					optional_flt(row["qty"], f"Quantity for {code}", positive=True)
 				if row.get("rate") is not None and str(row.get("rate")).strip() != "":
 					optional_flt(row["rate"], f"Rate for {code}", non_negative=True)
+				if row.get("bin_location") is not None and str(row.get("bin_location")).strip() != "":
+					per_item_bins[code] = _normalize_bin_code(row.get("bin_location"), f"Bin Location for {code}", required=True)
 				requested[code] = row
 
 			filtered_rows = []
@@ -892,6 +1005,9 @@ def create_purchase_invoice(
 			normalized = dict(item)
 			normalized["item_code"] = code
 			normalized["qty"] = qty
+			row_bin = _normalize_bin_code(item.get("bin_location"), f"Bin Location for {code}", required=False)
+			if row_bin:
+				normalized["bin_location"] = row_bin
 			validated_items.append(normalized)
 			candidate_codes.append(code)
 
@@ -922,7 +1038,10 @@ def create_purchase_invoice(
 		pi.supplier = supplier
 		pi.posting_date = today()
 		for item in validated_items:
-			pi.append("items", _build_purchase_item_row(item, target_wh, include_schedule_date=False))
+			row_payload = _build_purchase_item_row(item, target_wh, include_schedule_date=False)
+			if item.get("bin_location"):
+				row_payload[dim_field or "bin_location"] = item["bin_location"]
+			pi.append("items", row_payload)
 
 		from ism.setup import get_or_create_default_purchase_tax_template
 
@@ -939,6 +1058,18 @@ def create_purchase_invoice(
 
 	pi.set_missing_values()
 	pi.calculate_taxes_and_totals()
+
+	resolved_bins: list[Optional[str]] = [None] * len(pi.get("items") or [])
+	if should_update_stock:
+		resolved_bins = _resolve_and_apply_receive_bin(
+			pi.get("items") or [],
+			default_bin=uniform_bin,
+			bin_allocations=per_item_bins or None,
+			dim_meta=dim_meta,
+		)
+	elif uniform_bin:
+		frappe.has_permission("Storage Bin", "read", throw=True)
+		_validate_storage_bin_exists(uniform_bin, require_active=True)
 
 	if should_attach_advances:
 		if po:
@@ -985,7 +1116,13 @@ def create_purchase_invoice(
 				"qty": flt(row.qty),
 				"rate": flt(row.rate),
 				"warehouse": row.warehouse,
+				"bin_location": (
+					getattr(row, dim_field, None)
+					if dim_field
+					else (resolved_bins[idx] if idx < len(resolved_bins) else None)
+				)
+				or None,
 			}
-			for row in (pi.get("items") or [])
+			for idx, row in enumerate(pi.get("items") or [])
 		],
 	}
