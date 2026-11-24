@@ -119,6 +119,7 @@ _ISM_SETTINGS_FALSY_DEFAULTS = (
 	("self_serve_max_packages_per_booking", 5),
 	("self_serve_booking_ip_rate_limit_per_hour", 15),
 	("self_serve_booking_phone_rate_limit_per_day", 3),
+	("max_concurrent_bookings_per_phone", 2),
 )
 
 _ISM_SETTINGS_NONE_DEFAULTS = (

@@ -162,6 +162,7 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		"customer_arrival_offset_minutes",
 		"reschedule_cutoff_hours",
 		"max_self_reschedules",
+		"max_concurrent_bookings_per_phone",
 		"self_serve_default_entry_type",
 		"self_serve_min_lead_time_minutes",
 		"self_serve_horizon_days",
@@ -1204,7 +1205,8 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		self.assertEqual(second_commit["booking_reference"], first_ref)
 		self.assertEqual(frappe.db.count("Schedule Entry", {"provisional_phone": phone_dup}), 1)
 
-		# Same-day duplicate booking request -> 409 DUPLICATE_BOOKING with zero leakage of existing SE/plate/time
+		# Same-day duplicate booking guard with max_concurrent_bookings_per_phone=1 -> 409 DUPLICATE_BOOKING (zero leakage)
+		self._set_ism_settings(max_concurrent_bookings_per_phone=1)
 		dup_res = request_booking_otp(
 			package_ids=[self.bookable_pkg.name],
 			target_date=str(self.base_date),
@@ -1224,6 +1226,57 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		self.assertNotIn(first_ref, dup_json)
 		self.assertNotIn("SECRETPLT", dup_json)
 		self.assertNotIn("7:45", dup_json)
+
+		# With default max_concurrent_bookings_per_phone=2: 2nd DIFFERENT vehicle under same phone succeeds, 3rd is blocked
+		self._set_ism_settings(max_concurrent_bookings_per_phone=2)
+		clear_comms_rate_limits()
+		otp_second = request_booking_otp(
+			package_ids=[self.bookable_pkg.name],
+			target_date=str(self.base_date),
+			customer_arrival_time="07:45",
+			customer_name="Robin Driver",
+			phone=phone_dup,
+			vehicle_model="Model 3",
+			vehicle_year=2024,
+			vehicle_color="Deep Blue",
+			license_plate="EVTEST2",
+			form_nonce=valid_nonce,
+		)
+		self.assertTrue(otp_second["success"], otp_second)
+		code_second = get_last_mock_otp(phone_dup)
+		second_car_commit = confirm_self_serve_booking(
+			challenge_id=otp_second["challenge_id"],
+			otp_code=code_second,
+			package_ids=[self.bookable_pkg.name],
+			target_date=str(self.base_date),
+			customer_arrival_time="07:45",
+			customer_name="Robin Driver",
+			phone=phone_dup,
+			vehicle_model="Model 3",
+			vehicle_year=2024,
+			vehicle_color="Deep Blue",
+			license_plate="EVTEST2",
+			form_nonce=valid_nonce,
+		)
+		self.assertTrue(second_car_commit["success"], second_car_commit)
+		self.assertEqual(frappe.db.count("Schedule Entry", {"provisional_phone": phone_dup}), 2)
+
+		# 3rd booking on the same date exceeds max_concurrent_bookings_per_phone=2 -> 409 DUPLICATE_BOOKING
+		third_res = request_booking_otp(
+			package_ids=[self.bookable_pkg.name],
+			target_date=str(self.base_date),
+			customer_arrival_time="09:45",
+			customer_name="Robin Driver",
+			phone=phone_dup,
+			vehicle_model="Model 3",
+			vehicle_year=2025,
+			vehicle_color="Ultra Red",
+			license_plate="EVTEST3",
+			form_nonce=valid_nonce,
+		)
+		self.assertFalse(third_res["success"])
+		self.assertEqual(third_res["error_code"], ERR_DUPLICATE_BOOKING)
+		self.assertEqual(frappe.local.response.get("http_status_code"), 409)
 		self._track_artifacts_for_phone(phone_dup)
 
 		# 8. Per-phone daily cap (both Redis and MariaDB authoritative enforcement)
@@ -1596,6 +1649,110 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		self.assertEqual(se.provisional_vehicle_color, "Stealth Grey")
 		self.assertEqual(se.provisional_vehicle_info, "2023 Stealth Grey Model 3")
 
+	def test_guest_booking_rejects_overlapping_same_vehicle_with_sanitized_409(self) -> None:
+		"""Guest /book rejects overlapping booking for an already-booked plate with sanitized 409 VEHICLE_CONFLICT."""
+		from ism.booking.contracts import ERR_VEHICLE_CONFLICT
+
+		target_date = str(add_days(self.base_date, 5))
+		phone_first = "+14165550141"
+		phone_second = "+14165550142"
+		frappe.local.request_ip = "203.0.113.41"
+		valid_nonce = self._fresh_valid_nonce()
+
+		existing_se = frappe.get_doc(
+			{
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": "Scheduled",
+				"scheduled_date": target_date,
+				"scheduled_time": "08:00:00",
+				"estimated_duration": 60,
+				"service_bay": self.bay1,
+				"provisional_customer_name": "First Owner",
+				"provisional_phone": phone_first,
+				"provisional_vehicle_model": "Model 3",
+				"provisional_vehicle_color": "Pearl White",
+				"provisional_license_plate": "OVL 409",
+			}
+		).insert(ignore_permissions=True)
+		self.track(existing_se)
+
+		frappe.set_user("Guest")
+		# Different phone number, SAME license plate ("ovl-409"), overlapping time 08:15 arrival (08:30 internal)
+		otp_res = request_booking_otp(
+			package_ids=[self.bookable_pkg.name],
+			target_date=target_date,
+			customer_arrival_time="08:15",
+			customer_name="Second Driver",
+			phone=phone_second,
+			vehicle_model="Model 3",
+			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="ovl-409",
+			form_nonce=valid_nonce,
+		)
+		self.assertFalse(otp_res["success"])
+		self.assertEqual(otp_res["error_code"], ERR_VEHICLE_CONFLICT)
+		self.assertEqual(frappe.local.response.get("http_status_code"), 409)
+		self._assert_zero_disclosure(otp_res, extra_forbidden_strings=[existing_se.name, self.bay1])
+
+		# Commit-time race: OTP requested for free 10:00 slot (09:45 arrival), then conflicting entry booked before confirm
+		ok_otp = request_booking_otp(
+			package_ids=[self.bookable_pkg.name],
+			target_date=target_date,
+			customer_arrival_time="09:45",
+			customer_name="Second Driver",
+			phone=phone_second,
+			vehicle_model="Model 3",
+			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="OVL 409",
+			form_nonce=valid_nonce,
+		)
+		self.assertTrue(ok_otp["success"], ok_otp)
+		challenge_id = ok_otp["challenge_id"]
+		code = get_last_mock_otp(phone_second)
+
+		frappe.set_user("Administrator")
+		race_se = frappe.get_doc(
+			{
+				"doctype": "Schedule Entry",
+				"entry_type": "Diagnostic",
+				"status": "Scheduled",
+				"scheduled_date": target_date,
+				"scheduled_time": "10:00:00",
+				"estimated_duration": 60,
+				"service_bay": self.bay1,
+				"provisional_customer_name": "First Owner",
+				"provisional_phone": phone_first,
+				"provisional_license_plate": "OVL 409",
+			}
+		).insert(ignore_permissions=True)
+		self.track(race_se)
+
+		frappe.set_user("Guest")
+		commit_res = confirm_self_serve_booking(
+			challenge_id=challenge_id,
+			otp_code=code,
+			package_ids=[self.bookable_pkg.name],
+			target_date=target_date,
+			customer_arrival_time="09:45",
+			customer_name="Second Driver",
+			phone=phone_second,
+			vehicle_model="Model 3",
+			vehicle_year=2023,
+			vehicle_color="Pearl White",
+			license_plate="OVL 409",
+			form_nonce=valid_nonce,
+		)
+		self._track_artifacts_for_phone(phone_second)
+		self.assertFalse(commit_res["success"])
+		self.assertEqual(commit_res["error_code"], ERR_VEHICLE_CONFLICT)
+		self.assertEqual(frappe.local.response.get("http_status_code"), 409)
+		self.assertTrue(commit_res.get("otp_verified"))
+		self.assertEqual(commit_res.get("challenge_id"), challenge_id)
+		self._assert_zero_disclosure(commit_res, extra_forbidden_strings=[race_se.name, self.bay1])
+
 
 class TestBookingHostedRoute(ISMTestCase):
 	"""Wave 3 hosted /book page controller, security headers, boot JSON, and asset hygiene tests."""
@@ -1762,4 +1919,5 @@ class TestBookingHostedRoute(ISMTestCase):
 		app_js = (ism_root / "public" / "book" / "app.js").read_text(encoding="utf-8")
 		self.assertIn("License Plate (Optional)", app_js)
 		self.assertNotIn("License plate is required.", app_js)
+		self.assertIn("VEHICLE_CONFLICT", app_js)
 

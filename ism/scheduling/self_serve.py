@@ -35,6 +35,7 @@ from ism.scheduling.entry_queries import (
 	build_holiday_checker,
 	entry_datetimes,
 	fetch_leaves_by_employee,
+	find_conflicting_vehicle_entries,
 	intervals_overlap,
 	is_employee_on_leave_for_date,
 	span_datetimes,
@@ -209,6 +210,7 @@ def get_self_serve_policy() -> Dict[str, Any]:
 		"customer_arrival_offset_minutes": int(settings.get("customer_arrival_offset_minutes", 15)),
 		"reschedule_cutoff_hours": int(settings.get("reschedule_cutoff_hours", 24)),
 		"max_self_reschedules": int(settings.get("max_self_reschedules", 2)),
+		"max_concurrent_bookings_per_phone": int(settings.get("max_concurrent_bookings_per_phone", 2)),
 		"self_serve_default_entry_type": settings.get("self_serve_default_entry_type") or "Diagnostic",
 		"self_serve_min_lead_time_minutes": int(settings.get("self_serve_min_lead_time_minutes", 120)),
 		"self_serve_horizon_days": int(settings.get("self_serve_horizon_days", 30)),
@@ -364,6 +366,7 @@ def find_self_serve_slots(
 	vehicle_year: Optional[int] = None,
 	vehicle_generation: Optional[str] = None,
 	exclude_entry: Optional[str] = None,
+	vehicle_identity: Optional[Any] = None,
 	max_slots_per_day: Optional[int] = None,
 	now_dt: Optional[datetime] = None,
 ) -> Dict[str, Any]:
@@ -420,6 +423,7 @@ def find_self_serve_slots(
 		required_tags=resolved_tags,
 		skip_holidays=True,
 		exclude_entry=exclude_entry,
+		vehicle_identity=vehicle_identity,
 	)
 
 	days_out: List[Dict[str, Any]] = []
@@ -815,6 +819,41 @@ def _check_technician_capacity_under_lock(
 	return current_assigned_tech
 
 
+def _check_vehicle_availability_under_lock(
+	target_entry: Any,
+	iso_date: str,
+	internal_start_time: str,
+	duration_minutes: int,
+	*,
+	exclude_entry: Optional[str] = None,
+	holiday_fn: Optional[Callable[[Union[str, date, datetime]], bool]] = None,
+) -> None:
+	"""Enforce no overlapping active appointment for the same vehicle or phone under active locks."""
+	conflicts = find_conflicting_vehicle_entries(
+		target_entry=target_entry,
+		scheduled_date=iso_date,
+		scheduled_time=internal_start_time,
+		duration_minutes=duration_minutes,
+		exclude_entry=exclude_entry,
+		is_holiday_fn=holiday_fn,
+		use_current_read=True,
+	)
+	if not conflicts:
+		return
+	match_kind = conflicts[0].get("_conflict_match_kind") or "vehicle"
+	if match_kind == "phone":
+		msg = _(
+			"You have reached the maximum number of overlapping appointments allowed for this phone number. "
+			"Please choose a different time."
+		)
+	else:
+		msg = _(
+			"This vehicle already has an overlapping appointment scheduled during the selected time. "
+			"Please choose a different time."
+		)
+	_throw_self_serve_error(msg, "vehicle_conflict")
+
+
 def _release_savepoint_safe(savepoint_name: str) -> None:
 	if hasattr(frappe.db, "release_savepoint"):
 		try:
@@ -988,6 +1027,14 @@ def reschedule_self_serve_appointment(
 			duration,
 			settings=settings,
 			current_assigned_tech=se.assigned_technician,
+			exclude_entry=se.name,
+			holiday_fn=holiday_fn,
+		)
+		_check_vehicle_availability_under_lock(
+			se,
+			iso_date,
+			internal_start_time,
+			duration,
 			exclude_entry=se.name,
 			holiday_fn=holiday_fn,
 		)
@@ -1311,6 +1358,25 @@ def create_provisional_booking(
 			internal_start_time,
 			duration,
 			settings=settings,
+			holiday_fn=holiday_fn,
+		)
+		_check_vehicle_availability_under_lock(
+			{
+				"customer": customer,
+				"repair_vehicle": repair_vehicle,
+				"provisional_customer_name": intake["customer_name"],
+				"provisional_phone": intake["phone"],
+				"provisional_email": intake["email"],
+				"provisional_vehicle_model": intake["vehicle_model"],
+				"provisional_vehicle_year": intake["vehicle_year"],
+				"provisional_vehicle_color": intake["vehicle_color"],
+				"provisional_license_plate": intake["license_plate"],
+				"provisional_vin_or_plate": intake["vin_or_plate"],
+				"provisional_vehicle_info": intake["provisional_vehicle_info"],
+			},
+			iso_date,
+			internal_start_time,
+			duration,
 			holiday_fn=holiday_fn,
 		)
 

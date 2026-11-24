@@ -6,10 +6,16 @@ from datetime import timedelta
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint
+from frappe.utils import add_days, cint, getdate
 
 from ism.ism.naming import generate_safe_series_name
 from ism.scheduling.capacity import NON_BLOCKING_ENTRY_STATUSES
+from ism.scheduling.entry_queries import (
+	build_holiday_checker,
+	extract_vehicle_identity,
+	find_conflicting_vehicle_entries,
+	lock_vehicle_rows_for_identity,
+)
 from ism.scheduling.time_utils import (
 	calculate_working_span,
 	effective_end_time,
@@ -265,12 +271,15 @@ class ScheduleEntry(Document):
 
 	def validate(self):
 		self.flags.scheduling_warnings = []
+		self._normalize_provisional_fields()
 		self._normalize_reschedule_count()
+		self.populate_from_repair_order()
 		self.update_working_span()
 		self.validate_estimated_duration()
 		self.validate_repair_order_requirement()
 		self.validate_bay_availability()
 		self.validate_technician_pool()
+		self.validate_vehicle_availability()
 		self.validate_technician_assignment()
 
 	def validate_estimated_duration(self):
@@ -416,6 +425,77 @@ class ScheduleEntry(Document):
 				),
 				frappe.ValidationError,
 			)
+
+	def validate_vehicle_availability(self):
+		"""Prevent the same vehicle or phone number from being double-booked in overlapping windows."""
+		if (
+			not self.scheduled_date
+			or not self.scheduled_time
+			or self.status in NON_BLOCKING_ENTRY_STATUSES
+		):
+			return
+
+		identity = extract_vehicle_identity(self)
+		if not identity.get("has_conflict_identity"):
+			return
+
+		# Canonical Lock Order Step 4 (after Schedule Entry -> Service Bay -> Employee):
+		# Lock matching Repair Vehicle row(s) FOR UPDATE to prevent concurrent cross-bay double-booking.
+		lock_vehicle_rows_for_identity(identity)
+
+		settings = get_shop_settings()
+		holiday_fn = build_holiday_checker(
+			settings.get("holiday_list"),
+			add_days(getdate(self.scheduled_date), -30),
+		)
+
+		conflicts = find_conflicting_vehicle_entries(
+			self,
+			scheduled_date=self.scheduled_date,
+			scheduled_time=self.scheduled_time,
+			duration_minutes=self.estimated_duration or 60,
+			exclude_entry=self.name,
+			is_holiday_fn=holiday_fn,
+			use_current_read=True,
+		)
+		if not conflicts:
+			return
+
+		c0 = conflicts[0]
+		match_kind = c0.get("_conflict_match_kind") or "vehicle"
+		s_norm = normalize_time(self.scheduled_time) or str(self.scheduled_time)
+		s_time_short = s_norm[:5]
+		c_date = self.completion_date or self.scheduled_date
+		c_norm = normalize_time(self.completion_time) if self.completion_time else ""
+		c_time_short = (c_norm or "")[:5]
+		bay_suffix = f" ({c0['service_bay']})" if c0.get("service_bay") else ""
+
+		if match_kind == "phone" and not self.repair_vehicle:
+			phone_label = identity.get("provisional_phone") or self.provisional_phone or _("This phone number")
+			phone_limit = max(1, cint(settings.get("max_concurrent_bookings_per_phone") or 2))
+			msg = _(
+				"Phone number '{0}' has reached the maximum of {1} concurrent overlapping appointment(s) (conflicts with '{2}'{3}) during the requested time window ({4} {5} to {6} {7})."
+			).format(
+				phone_label,
+				phone_limit,
+				c0["name"],
+				bay_suffix,
+				self.scheduled_date,
+				s_time_short,
+				c_date,
+				c_time_short,
+			)
+		else:
+			veh_label = self.get_display_vehicle() or self.repair_vehicle or self.provisional_phone or _("Vehicle")
+			msg = _(
+				"Vehicle '{0}' is already booked in '{1}'{2} during the requested time window ({3} {4} to {5} {6})."
+			).format(veh_label, c0["name"], bay_suffix, self.scheduled_date, s_time_short, c_date, c_time_short)
+
+		try:
+			frappe.throw(msg, frappe.ValidationError)
+		except frappe.ValidationError as exc:
+			exc.reason_code = "vehicle_conflict"
+			raise
 
 	def validate_technician_assignment(self):
 		"""Collect non-blocking soft warnings if assigned technician has leave or overlap."""

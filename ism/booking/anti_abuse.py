@@ -289,6 +289,7 @@ def check_phone_daily_limit_and_duplicate(
 			http_status=429,
 		)
 
+	max_same_day_active = max(1, cint(getattr(cfg, "max_concurrent_bookings_per_phone", 2) or 2))
 	existing_active = frappe.get_all(
 		"Schedule Entry",
 		filters={
@@ -297,15 +298,20 @@ def check_phone_daily_limit_and_duplicate(
 			"status": ["in", ["Scheduled", "Confirmed"]],
 		},
 		fields=["name"],
-		limit=1,
+		limit=max_same_day_active,
 	)
-	if existing_active:
+	if len(existing_active) >= max_same_day_active:
 		return BookingAntiAbuseResult(
 			allowed=False,
 			error_code=ERR_DUPLICATE_BOOKING,
 			error=(
 				"You already have an active appointment scheduled on this date. "
 				"Please visit the Customer Portal to view or reschedule it."
+				if max_same_day_active == 1
+				else (
+					f"You already have {max_same_day_active} active appointments scheduled on this date. "
+					"Please visit the Customer Portal to view or reschedule them."
+				)
 			),
 			http_status=409,
 		)

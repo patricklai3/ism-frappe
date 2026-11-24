@@ -283,6 +283,15 @@ class ISMSettings(Document):
 			if phone_limit < 1 or phone_limit > 20:
 				frappe.throw(_("Self-Serve Booking Phone Rate Limit must be between 1 and 20 per day."))
 
+		if getattr(self, "max_concurrent_bookings_per_phone", None) is not None and str(
+			self.max_concurrent_bookings_per_phone
+		).strip() != "":
+			concurrent_limit = cint(self.max_concurrent_bookings_per_phone)
+			if concurrent_limit < 1 or concurrent_limit > 10:
+				frappe.throw(
+					_("Max Concurrent Appointments Per Phone must be between 1 and 10.")
+				)
+
 		if (
 			cint(self.enable_self_serve_booking) == 1
 			and not (frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch)

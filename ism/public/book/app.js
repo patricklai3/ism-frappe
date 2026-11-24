@@ -346,6 +346,10 @@ function initBookingApp() {
 				await loadSlots({ append: false });
 				return;
 			}
+			if (err instanceof BookingApiError && err.errorCode === "VEHICLE_CONFLICT") {
+				store.setError(err.message, { code: err.errorCode, showPortalLink: true });
+				return;
+			}
 			handleApiError(err);
 		} finally {
 			store.setLoading("otp", false);
@@ -411,6 +415,16 @@ function initBookingApp() {
 					store.setError(`${err.message}${waitNote}`, { code: err.errorCode });
 					return;
 				}
+				if (err.errorCode === "VEHICLE_CONFLICT") {
+					if (err.otpVerified) {
+						store.markOtpVerifiedForSlotRetry(err.challengeId);
+						store.setError(err.message, { code: err.errorCode, showPortalLink: true });
+						await loadSlots({ append: false });
+						return;
+					}
+					store.setError(err.message, { code: err.errorCode, showPortalLink: true });
+					return;
+				}
 				if (err.errorCode === "DUPLICATE_BOOKING") {
 					store.setError(err.message, { code: err.errorCode, showPortalLink: true });
 					return;
@@ -424,7 +438,7 @@ function initBookingApp() {
 
 	function handleApiError(err) {
 		if (err instanceof BookingApiError) {
-			if (err.errorCode === "DUPLICATE_BOOKING") {
+			if (err.errorCode === "DUPLICATE_BOOKING" || err.errorCode === "VEHICLE_CONFLICT") {
 				store.setError(err.message, { code: err.errorCode, showPortalLink: true });
 				return;
 			}

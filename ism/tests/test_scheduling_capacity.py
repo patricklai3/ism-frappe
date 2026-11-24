@@ -106,6 +106,14 @@ class TestSchedulingCapacity(ISMTestCase):
 	def test_ro1(self, value):
 		self._test_ro1 = value
 
+	def _create_distinct_ro(self):
+		veh = self.create_test_vehicle(customer=self.customer)
+		return self.create_test_repair_order(
+			customer=self.customer,
+			vehicle=veh.name,
+			odometer_in=45000,
+		)
+
 	def tearDown(self):
 		super().tearDown()
 
@@ -291,9 +299,10 @@ class TestSchedulingCapacity(ISMTestCase):
 		"""F8: Offline/inactive bay is never matched regardless of equipment."""
 		self._require_sched_api()
 		target_date = today()
-		# Occupy all active bays
+		# Occupy all active bays with distinct vehicles
 		for bay_name in self.active_bays:
-			self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=bay_name))
+			ro = self._create_distinct_ro()
+			self.track(self.create_test_schedule_entry(repair_order=ro.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=bay_name))
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "08:00:00", 60)
 
@@ -329,7 +338,8 @@ class TestSchedulingCapacity(ISMTestCase):
 		self._require_doctype("Schedule Entry")
 		target_date = today()
 		for bay_name in self.active_bays:
-			self.track(self.create_test_schedule_entry(repair_order=self.test_ro1.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=bay_name))
+			ro = self._create_distinct_ro()
+			self.track(self.create_test_schedule_entry(repair_order=ro.name, scheduled_date=target_date, scheduled_time="08:00:00", estimated_duration=120, service_bay=bay_name))
 		with self.assertRaises(frappe.ValidationError):
 			auto_assign_bay(target_date, "08:30:00", 60)
 
@@ -345,9 +355,10 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.assertTrue(on_duty)
 		for idx, tech in enumerate(on_duty):
 			bay = self.bay1 if idx == 0 else None
+			ro = self._create_distinct_ro()
 			self.track(
 				self.create_test_schedule_entry(
-					repair_order=self.test_ro1.name,
+					repair_order=ro.name,
 					scheduled_date=target_date,
 					scheduled_time="09:00:00",
 					estimated_duration=60,
@@ -627,8 +638,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.assertTrue(on_duty)
 		for idx, tech in enumerate(on_duty):
 			bay = self.bay1 if idx == 0 else (self.bay2 if idx == 1 else None)
+			ro = self._create_distinct_ro()
 			se = self.create_test_schedule_entry(
-				repair_order=self.test_ro1.name,
+				repair_order=ro.name,
 				scheduled_date=target_date,
 				scheduled_time="09:00:00",
 				estimated_duration=60,
@@ -859,8 +871,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.assertTrue(on_duty)
 		for idx, tech in enumerate(on_duty):
 			bay = self.bay1 if idx == 0 else None
+			ro = self._create_distinct_ro()
 			self.track(self.create_test_schedule_entry(
-				repair_order=self.test_ro1.name,
+				repair_order=ro.name,
 				scheduled_date=target_date,
 				scheduled_time="10:00:00",
 				estimated_duration=60,
@@ -1070,8 +1083,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.assertIn("calendar", conflict_res.get("urls", {}))
 		self.assertIn("alternative_slots", conflict_res)
 
+		ro2 = self._create_distinct_ro()
 		res = allocate_schedule_entry(
-			repair_order=self.test_ro1.name,
+			repair_order=ro2.name,
 			scheduled_date=target_date,
 			scheduled_time="08:30:00",
 			estimated_duration=60,
@@ -1358,8 +1372,9 @@ class TestSchedulingCapacity(ISMTestCase):
 		self.track("Schedule Entry", spanning["name"])
 		self.assertEqual(spanning.get("completion_time")[:5], "13:30")
 
+		ro2 = self._create_distinct_ro()
 		post_break = allocate_schedule_entry(
-			repair_order=self.test_ro1.name,
+			repair_order=ro2.name,
 			scheduled_date=target_date,
 			scheduled_time="12:30:00",
 			estimated_duration=60,
@@ -1367,3 +1382,115 @@ class TestSchedulingCapacity(ISMTestCase):
 		)
 		self.assertTrue(post_break.get("name"))
 		self.track("Schedule Entry", post_break["name"])
+
+	def test_vehicle_overlap_conflict_feedback_and_slot_filtering(self):
+		"""Same vehicle cannot be booked across two bays at overlapping times; slots and alternatives exclude busy window."""
+		from ism.api.agent_scheduling import find_available_slots
+		from ism.api.scheduling import check_vehicle_availability
+
+		self._require_sched_api()
+		self._require_doctype("Schedule Entry")
+		target_date = add_days(today(), 6)
+
+		se = self.create_test_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:00:00",
+			estimated_duration=60,
+			service_bay=self.bay1,
+		)
+		self.track(se)
+
+		self.assertFalse(
+			check_vehicle_availability(
+				date=target_date,
+				start_time="08:30:00",
+				duration_minutes=45,
+				repair_order=self.test_ro1.name,
+			)
+		)
+		self.assertTrue(
+			check_vehicle_availability(
+				date=target_date,
+				start_time="09:00:00",
+				duration_minutes=60,
+				repair_order=self.test_ro1.name,
+			)
+		)
+		self.assertTrue(
+			check_vehicle_availability(
+				date=target_date,
+				start_time="08:30:00",
+				duration_minutes=45,
+				repair_order=self.test_ro1.name,
+				exclude_entry=se.name,
+			)
+		)
+
+		# Attempting to book same car on a DIFFERENT free bay returns structured vehicle_conflict feedback
+		conflict_res = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="08:30:00",
+			estimated_duration=45,
+			service_bay=self.bay2,
+		)
+		self.assertEqual(conflict_res.get("status"), "conflict")
+		self.assertTrue(conflict_res.get("conflict"))
+		self.assertEqual(conflict_res.get("conflict_type"), "vehicle_conflict")
+		self.assertTrue(conflict_res.get("conflicting_entries"))
+		self.assertEqual(conflict_res["conflicting_entries"][0]["name"], se.name)
+		self.assertIn("conflicting_entry", conflict_res.get("urls", {}))
+
+		# Suggested alternatives on target_date must NOT overlap [08:00, 09:00)
+		same_day_alts = [
+			a["start_time"]
+			for a in (conflict_res.get("alternative_slots") or [])
+			if a.get("date") == target_date
+		]
+		self.assertTrue(same_day_alts)
+		for bad_t in ("08:00", "08:30"):
+			self.assertNotIn(bad_t, same_day_alts)
+		self.assertIn("09:00", same_day_alts)
+
+		# get_available_slots with repair_order + include_all=1 flags overlapping slots as Vehicle Busy
+		all_slots = get_available_slots(
+			date=target_date,
+			duration_minutes=60,
+			service_bay=self.bay2,
+			include_all=1,
+			repair_order=self.test_ro1.name,
+		)
+		slot_map = {s["start_time"]: s for s in all_slots}
+		self.assertFalse(slot_map["08:00"]["is_available"])
+		self.assertFalse(slot_map["08:00"]["vehicle_available"])
+		self.assertEqual(slot_map["08:00"]["badge_label"], "Vehicle Busy")
+		self.assertEqual(slot_map["08:00"]["conflict_entry"], se.name)
+		self.assertFalse(slot_map["08:30"]["is_available"])
+		self.assertTrue(slot_map["09:00"]["is_available"])
+		self.assertTrue(slot_map["09:00"]["vehicle_available"])
+
+		# Agent find_available_slots(repair_order=...) omits overlapping slots for that car
+		agent_slots_res = find_available_slots(
+			repair_order=self.test_ro1.name,
+			duration_minutes=60,
+			start_date=target_date,
+			days_ahead=1,
+			service_bay=self.bay2,
+			include_past=True,
+		)
+		agent_times = [s["start_time"] for s in agent_slots_res["data"]["slots"]]
+		self.assertNotIn("08:00", agent_times)
+		self.assertNotIn("08:30", agent_times)
+		self.assertIn("09:00", agent_times)
+
+		# Adjacent back-to-back booking on Bay 2 at 09:00 succeeds
+		adj = allocate_schedule_entry(
+			repair_order=self.test_ro1.name,
+			scheduled_date=target_date,
+			scheduled_time="09:00:00",
+			estimated_duration=60,
+			service_bay=self.bay2,
+		)
+		self.assertTrue(adj.get("name"))
+		self.track("Schedule Entry", adj["name"])
