@@ -215,6 +215,12 @@ function renderVisitHub(root, hub, { boot, state }) {
 				<div class="portal-header__actions" id="portal-header-auth-controls"></div>
 			</header>
 
+			${
+				shop.demo_mode || boot.demo_mode
+					? `<div class="portal-alert portal-alert--info" role="status"><strong>Demo Mode Active</strong> — SMS verification and Repair Order parts-stock gates are bypassed.</div>`
+					: ""
+			}
+
 			${switcherHtml}
 
 			${

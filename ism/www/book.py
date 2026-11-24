@@ -68,6 +68,7 @@ def _fallback_disabled_boot_config() -> dict[str, Any]:
 	"""Return a safe, zero-PII disabled boot payload when config loading fails."""
 	return {
 		"enabled": False,
+		"demo_mode": False,
 		"disabled_reason": ERR_BOOKING_DISABLED,
 		"title": DEFAULT_BOOKING_TITLE,
 		"intro": "",

@@ -102,6 +102,7 @@ def get_context(context):
 
 	portal_boot = {
 		"authenticated": authenticated,
+		"demo_mode": bool(branding.get("demo_mode")),
 		"shop": branding,
 		"token_error": token_error,
 		"should_strip_query_token": should_strip_query_token,

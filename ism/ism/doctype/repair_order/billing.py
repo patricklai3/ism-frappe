@@ -13,6 +13,7 @@ from frappe.utils import cint, flt, now_datetime, nowdate, today
 from ism.api.parts_stock import _find_company_warehouse, _get_stock_settings_default_warehouse
 from ism.ism.doctype.repair_order.fulfillment import complete_linked_schedule_entries
 from ism.ism.doctype.repair_order.pricing import get_or_create_default_tax_template
+from ism.utils.demo_mode import is_demo_mode
 
 _REOPEN_FROM_STATUSES = ("Billed / Paid", "Closed / Released")
 _LOCKED_INVOICE_STATUSES = ("Cancelled", "Closed / Released", "Billed / Paid")
@@ -497,8 +498,11 @@ def _recompute_ro_payment_state(
 	_persist_ro_payment_fields(ro_name, updates)
 
 
-def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str, Any]) -> None:
-	"""Verify Bin actual_qty covers all Approved stock parts before Sales Invoice creation."""
+def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str, Any]) -> bool:
+	"""Verify Bin actual_qty covers all Approved stock parts before Sales Invoice creation.
+
+	Returns True if deficits were bypassed under Customer Journey Demo Mode, else False.
+	"""
 	required_by_key: Dict[tuple[str, str], float] = {}
 	for idx, _service in enumerate(approved_services):
 		for p in ctx["parsed_parts_by_service"].get(idx, []):
@@ -519,7 +523,7 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 				required_by_key[key] = flt(required_by_key.get(key, 0.0) + qty, 6)
 
 	if not required_by_key:
-		return
+		return False
 
 	req_items = list({k[0] for k in required_by_key})
 	req_whs = list({k[1] for k in required_by_key})
@@ -542,12 +546,15 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 			)
 
 	if deficits:
+		if is_demo_mode():
+			return True
 		frappe.throw(
 			_("Insufficient warehouse stock for Repair Order {0}: {1}").format(
 				ro.name, "; ".join(deficits)
 			),
 			frappe.ValidationError,
 		)
+	return False
 
 
 def _apply_ro_advances_to_invoice(si, ro_name: str, customer: str) -> float:
@@ -770,7 +777,7 @@ def process_ro_payment_and_release(
 		)
 
 	ctx = _resolve_billing_context(ro, approved_services)
-	_validate_pre_checkout_stock(ro, approved_services, ctx)
+	demo_stock_bypassed = _validate_pre_checkout_stock(ro, approved_services, ctx)
 
 	explicit_zero_tax = (
 		ro.tax_rate is not None and str(ro.tax_rate).strip() != "" and flt(ro.tax_rate) == 0.0
@@ -789,7 +796,7 @@ def process_ro_payment_and_release(
 	si.company = ro.company
 	si.posting_date = today()
 	si.currency = ro.currency or "CAD"
-	si.update_stock = 1
+	si.update_stock = 0 if demo_stock_bypassed else 1
 	if ctx["default_warehouse"] and frappe.db.exists(
 		"Warehouse",
 		{"name": ctx["default_warehouse"], "company": ro.company, "is_group": 0, "disabled": 0},

@@ -47,6 +47,11 @@
 			</div>
 		</section>
 		{% else %}
+		{% if boot_config.demo_mode %}
+		<div class="ism-demo-banner" role="status">
+			<strong>Demo Mode Active</strong> — SMS verification, missing service packages, and bay/tech capacity limits are bypassed so you can walk through the full customer journey.
+		</div>
+		{% endif %}
 		{% if boot_config.intro %}
 		<p class="ism-book-intro">{{ boot_config.intro }}</p>
 		{% endif %}

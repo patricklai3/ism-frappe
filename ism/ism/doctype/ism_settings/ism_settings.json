@@ -84,6 +84,7 @@
   "enable_waiter_preference",
   "sb_self_serve_booking",
   "enable_self_serve_booking",
+  "customer_journey_demo_mode",
   "self_serve_booking_title",
   "self_serve_booking_intro",
   "self_serve_max_packages_per_booking",
@@ -590,6 +591,13 @@
    "fieldname": "enable_self_serve_booking",
    "fieldtype": "Check",
    "label": "Enable Self-Serve Booking"
+  },
+  {
+   "default": "0",
+   "description": "Testing/walkthrough mode ONLY (never enable in production). Unblocks /book and /portal without SMS credentials, serves fallback demo packages and open slots if none exist, and bypasses Repair Order parts-stock holds.",
+   "fieldname": "customer_journey_demo_mode",
+   "fieldtype": "Check",
+   "label": "Customer Journey Demo Mode"
   },
   {
    "default": "Book Your Service Appointment",

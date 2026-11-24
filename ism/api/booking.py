@@ -11,6 +11,7 @@ from ism.booking.anti_abuse import validate_honeypot_and_nonce
 from ism.booking.contracts import (
 	ERR_BOOKING_DISABLED,
 	ERR_SMS_UNCONFIGURED,
+	MIN_FORM_FILL_SECONDS,
 	VEHICLE_MIN_YEAR,
 	get_booking_settings,
 	is_booking_enabled,
@@ -139,7 +140,7 @@ def _preflight_booking_enabled(*, require_sms: bool = False) -> dict[str, Any] |
 				"http_status": 503,
 			}
 		)
-	if require_sms and get_sms_unconfigured_reason() is not None:
+	if require_sms and not booking_settings.demo_mode and get_sms_unconfigured_reason() is not None:
 		return _finalize_response(
 			{
 				"success": False,
@@ -162,6 +163,7 @@ def _preflight_honeypot(website_url: Any, form_nonce: Any) -> dict[str, Any] | N
 		honeypot_value=hp_val,
 		form_nonce=nonce_val,
 		settings=booking_settings,
+		min_elapsed_seconds=0 if booking_settings.demo_mode else MIN_FORM_FILL_SECONDS,
 	)
 	if not abuse_res.allowed:
 		return _finalize_response(

@@ -134,6 +134,7 @@ _ISM_SETTINGS_NONE_DEFAULTS = (
 	("board_ai_auto_process", 0),
 	("enable_customer_portal", 1),
 	("enable_self_serve_booking", 0),
+	("customer_journey_demo_mode", 0),
 	("self_serve_require_email", 0),
 	("self_serve_honeypot_enabled", 1),
 )

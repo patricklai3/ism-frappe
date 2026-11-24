@@ -7,6 +7,8 @@ from typing import Any
 import frappe
 from frappe.utils import cint
 
+from ism.utils.demo_mode import is_demo_mode
+
 BOOKING_ROUTE: str = "/book"
 PORTAL_ROUTE: str = "/portal"
 BOOKING_OTP_PURPOSE: str = "booking_verify"
@@ -101,6 +103,7 @@ class BookingConfigSnapshot:
 	ip_rate_limit_per_hour: int
 	phone_rate_limit_per_day: int
 	honeypot_enabled: bool
+	demo_mode: bool = False
 
 	def to_dict(self) -> dict[str, Any]:
 		return asdict(self)
@@ -181,13 +184,14 @@ def get_booking_settings(settings: Any = None) -> BookingConfigSnapshot:
 			maximum=20,
 		),
 		honeypot_enabled=honeypot_enabled,
+		demo_mode=is_demo_mode(cfg),
 	)
 
 
 def is_booking_enabled(settings: Any = None) -> tuple[bool, str | None]:
-	"""Return (True, None) only when enable_self_serve_booking == 1; else (False, BOOKING_DISABLED)."""
+	"""Return (True, None) when enable_self_serve_booking == 1 or demo_mode is active; else (False, BOOKING_DISABLED)."""
 	cfg = settings if isinstance(settings, BookingConfigSnapshot) else get_booking_settings(settings)
-	if cfg.enable_self_serve_booking:
+	if cfg.enable_self_serve_booking or cfg.demo_mode:
 		return True, None
 	return False, ERR_BOOKING_DISABLED
 

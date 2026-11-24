@@ -127,6 +127,7 @@ function buildSmsOtpFlow(container, { shop, title, subtitle, tokenError, upgrade
 							autocomplete="one-time-code"
 							maxlength="${codeLength}"
 							placeholder="${"•".repeat(codeLength)}"
+							value="${challenge?.demo_mode ? escapeHtml(challenge.demo_code || "000000") : ""}"
 							required
 						/>
 					</div>
@@ -245,6 +246,11 @@ export function renderAuthGate(container, { shop, tokenError, onAuthenticated })
 					</div>
 				</div>
 			</header>
+			${
+				shop?.demo_mode
+					? `<div class="portal-alert portal-alert--info" role="status"><strong>Demo Mode Active</strong> — Enter any valid phone number; SMS OTP is bypassed (code: <code>000000</code>).</div>`
+					: ""
+			}
 			<div id="portal-auth-gate-slot"></div>
 		</div>
 	`;

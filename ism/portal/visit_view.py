@@ -599,6 +599,7 @@ def build_portal_hub_payload(
 		},
 		"shop": {
 			"portal_enabled": branding["portal_enabled"],
+			"demo_mode": bool(branding.get("demo_mode")),
 			"company_name": branding["company_name"],
 			"support_phone": branding["support_phone"],
 			"pickup_hours_text": pickup_hours,

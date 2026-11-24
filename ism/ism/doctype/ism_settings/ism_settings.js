@@ -24,6 +24,15 @@ function get_sms_config_gap(doc) {
 
 function update_self_serve_booking_sms_notice(frm) {
 	frm.set_intro(null);
+	if (cint(frm.doc.customer_journey_demo_mode)) {
+		frm.set_intro(
+			__(
+				"Customer Journey Demo Mode is active — /book, /portal, and Repair Orders bypass SMS, missing packages/capacity, and parts stock blocks. Disable before production use."
+			),
+			"blue"
+		);
+		return;
+	}
 	if (!cint(frm.doc.enable_self_serve_booking)) {
 		return;
 	}
@@ -44,6 +53,9 @@ frappe.ui.form.on("ISM Settings", {
 		update_self_serve_booking_sms_notice(frm);
 	},
 	enable_self_serve_booking(frm) {
+		update_self_serve_booking_sms_notice(frm);
+	},
+	customer_journey_demo_mode(frm) {
 		update_self_serve_booking_sms_notice(frm);
 	},
 	sms_gateway_provider(frm) {

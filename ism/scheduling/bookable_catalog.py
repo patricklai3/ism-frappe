@@ -12,6 +12,7 @@ from frappe.utils import cint, flt
 
 from ism.scheduling.capacity import parse_required_tags
 from ism.scheduling.estimation_light import estimate_total_duration
+from ism.utils.demo_mode import compute_demo_package_entry, is_demo_mode, is_demo_package_id
 from ism.utils.tesla_manual import (
 	is_in_generation_range,
 	parse_vehicle_year_month,
@@ -537,17 +538,24 @@ def compute_packages_booking_requirements(
 			)
 		)
 
-	rows = frappe.get_all(
-		"Service Package",
-		filters={"name": ["in", ids]},
-		fields=_CATALOG_QUERY_FIELDS,
-		ignore_permissions=True,
+	demo_active = is_demo_mode()
+	real_ids = [pkg_id for pkg_id in ids if not (demo_active and is_demo_package_id(pkg_id))]
+
+	rows = (
+		frappe.get_all(
+			"Service Package",
+			filters={"name": ["in", real_ids]},
+			fields=_CATALOG_QUERY_FIELDS,
+			ignore_permissions=True,
+		)
+		if real_ids
+		else []
 	)
 	pkg_by_name = {row["name"]: row for row in rows}
 
 	settings = _get_catalog_settings()
-	subtotals = _get_default_items_subtotals(ids)
-	compat_map = _get_generation_compatibility_map(ids)
+	subtotals = _get_default_items_subtotals(real_ids)
+	compat_map = _get_generation_compatibility_map(real_ids)
 
 	override_minutes = 0
 	frt_minutes_list: List[float] = []
@@ -556,6 +564,13 @@ def compute_packages_booking_requirements(
 	snapshot: List[Dict[str, Any]] = []
 
 	for pkg_id in ids:
+		if demo_active and is_demo_package_id(pkg_id):
+			demo_entry = compute_demo_package_entry(pkg_id)
+			cards.append(demo_entry["card"])
+			snapshot.append(demo_entry["snapshot"])
+			override_minutes += cint(demo_entry["duration_minutes"])
+			continue
+
 		pkg = pkg_by_name.get(pkg_id)
 		if not pkg:
 			frappe.throw(_("Service Package '{0}' was not found.").format(pkg_id))

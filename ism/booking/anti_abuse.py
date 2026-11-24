@@ -188,6 +188,7 @@ def validate_honeypot_and_nonce(
 	form_nonce: str | None = None,
 	settings: BookingConfigSnapshot | None = None,
 	now_ts: int | None = None,
+	min_elapsed_seconds: int = MIN_FORM_FILL_SECONDS,
 ) -> BookingAntiAbuseResult:
 	"""Enforce decoy honeypot trap and signed timing nonce when honeypot protection is enabled."""
 	cfg = settings if settings is not None else get_booking_settings()
@@ -202,7 +203,11 @@ def validate_honeypot_and_nonce(
 			http_status=400,
 		)
 
-	return verify_booking_form_nonce(form_nonce, now_ts=now_ts)
+	return verify_booking_form_nonce(
+		form_nonce,
+		now_ts=now_ts,
+		min_elapsed_seconds=min_elapsed_seconds,
+	)
 
 
 def enforce_booking_ip_rate_limit(
