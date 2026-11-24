@@ -1008,7 +1008,7 @@ def process_ro_payment_and_release(
 			part_uom = p.get("uom") or getattr(item_doc, "stock_uom", "Nos")
 			part_desc = f"{part_name} {compliance_tag}"
 
-			if item_code in ctx["stock_items"] and bin_dim_enabled and bin_dim_field and qty > 0:
+			if not demo_stock_bypassed and item_code in ctx["stock_items"] and bin_dim_enabled and bin_dim_field and qty > 0:
 				wh_bucket = working_bin_stock_by_wh.setdefault(resolved_wh, {})
 				working_info = wh_bucket.get(item_code)
 				if working_info is None:

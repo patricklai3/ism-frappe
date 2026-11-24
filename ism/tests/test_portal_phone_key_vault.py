@@ -119,6 +119,7 @@ class TestPortalPhoneKeyVault(ISMTestCase):
 		customer: str | None = None,
 		vehicle: str | None = None,
 		provisional_model: str | None = None,
+		scheduled_time: str = "09:00:00",
 	):
 		bay = frappe.get_doc({
 			"doctype": "Service Bay",
@@ -135,7 +136,7 @@ class TestPortalPhoneKeyVault(ISMTestCase):
 			"service_bay": bay.name,
 			"customer": customer or self.customer.name,
 			"scheduled_date": add_days(nowdate(), 2),
-			"scheduled_time": "09:00:00",
+			"scheduled_time": scheduled_time,
 			"estimated_duration": 60,
 		}
 		if vehicle:
@@ -439,7 +440,11 @@ class TestPortalPhoneKeyVault(ISMTestCase):
 		self._track_action_items("Repair Order", ro.name)
 
 		# Separate appointment cancelled without RO -> purged
-		se_cancel = self._create_schedule_entry(status="Scheduled", provisional_model="Model 3")
+		se_cancel = self._create_schedule_entry(
+			status="Scheduled",
+			provisional_model="Model 3",
+			scheduled_time="11:00:00",
+		)
 		phone_key_vault.submit_schedule_entry_phone_key(
 			se_cancel.name, "https://ts.la/add-driver/se-cancel-888"
 		)

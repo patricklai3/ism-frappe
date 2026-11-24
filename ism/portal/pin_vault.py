@@ -1209,15 +1209,15 @@ def on_schedule_entry_update_sync_pin(doc: Any, method: str | None = None) -> No
 	if not doc or not getattr(doc, "name", None):
 		return
 
-	from ism.portal.phone_key_vault import (
-		purge_schedule_entry_phone_key,
-		transfer_schedule_entry_phone_key_to_ro,
-	)
-
 	linked_ro = (getattr(doc, "repair_order", None) or "").strip()
 	if linked_ro:
 		transfer_schedule_entry_pin_to_ro(doc.name, linked_ro)
-		transfer_schedule_entry_phone_key_to_ro(doc.name, linked_ro)
+		try:
+			from ism.portal.phone_key_vault import transfer_schedule_entry_phone_key_to_ro
+		except ImportError:
+			transfer_schedule_entry_phone_key_to_ro = None
+		if transfer_schedule_entry_phone_key_to_ro:
+			transfer_schedule_entry_phone_key_to_ro(doc.name, linked_ro)
 		doc.pin_to_drive_encrypted = None
 		doc.tesla_phone_key_encrypted = None
 		return
@@ -1236,7 +1236,16 @@ def on_schedule_entry_update_sync_pin(doc: Any, method: str | None = None) -> No
 			"pin_to_drive_purged_at",
 		)
 
-	pk_purged = purge_schedule_entry_phone_key(doc.name, reason=status, released=False)
+	try:
+		from ism.portal.phone_key_vault import purge_schedule_entry_phone_key
+	except ImportError:
+		purge_schedule_entry_phone_key = None
+
+	pk_purged = (
+		purge_schedule_entry_phone_key(doc.name, reason=status, released=False)
+		if purge_schedule_entry_phone_key
+		else False
+	)
 	doc.tesla_phone_key_encrypted = None
 	if pk_purged:
 		pk_meta = (
