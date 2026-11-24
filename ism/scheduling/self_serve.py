@@ -369,6 +369,7 @@ def find_self_serve_slots(
 	days_ahead: int = 7,
 	vehicle_model: Optional[str] = None,
 	vehicle_year: Optional[int] = None,
+	vehicle_generation: Optional[str] = None,
 	exclude_entry: Optional[str] = None,
 	max_slots_per_day: Optional[int] = None,
 	now_dt: Optional[datetime] = None,
@@ -387,6 +388,7 @@ def find_self_serve_slots(
 			package_ids,
 			vehicle_model=vehicle_model,
 			vehicle_year=vehicle_year,
+			vehicle_generation=vehicle_generation,
 		)
 		resolved_duration = int(reqs["duration_minutes"])
 		resolved_tags = list(reqs["required_tags"])
@@ -1066,6 +1068,7 @@ def normalize_provisional_intake(
 	vehicle_color: Optional[str] = None,
 	license_plate: Optional[str] = None,
 	vin: Optional[str] = None,
+	vehicle_generation: Optional[str] = None,
 	vin_or_plate: Optional[str] = None,
 	notes: Optional[str] = None,
 	waiter_preference: Optional[str] = None,
@@ -1113,6 +1116,12 @@ def normalize_provisional_intake(
 		frappe.throw(_("Vehicle color is required."), frappe.ValidationError)
 	if len(clean_color) > 60:
 		frappe.throw(_("Vehicle color cannot exceed 60 characters."), frappe.ValidationError)
+
+	clean_generation: Optional[str] = None
+	if vehicle_generation is not None and str(vehicle_generation).strip() != "":
+		if not isinstance(vehicle_generation, str):
+			frappe.throw(_("Invalid vehicle generation."), frappe.ValidationError)
+		clean_generation = re.sub(r"\s+", " ", vehicle_generation.strip())[:140]
 
 	clean_raw_vin_or_plate: Optional[str] = None
 	if vin_or_plate is not None and str(vin_or_plate).strip() != "":
@@ -1201,6 +1210,7 @@ def normalize_provisional_intake(
 		"vehicle_color": clean_color,
 		"license_plate": clean_plate,
 		"vin": clean_vin,
+		"vehicle_generation": clean_generation,
 		"vin_or_plate": clean_vin_or_plate,
 		"provisional_vehicle_info": provisional_vehicle_info,
 		"vehicle_info": vehicle_info,
@@ -1222,6 +1232,7 @@ def create_provisional_booking(
 	vehicle_color: Optional[str] = None,
 	license_plate: Optional[str] = None,
 	vin: Optional[str] = None,
+	vehicle_generation: Optional[str] = None,
 	vin_or_plate: Optional[str] = None,
 	notes: Optional[str] = None,
 	waiter_preference: Optional[str] = None,
@@ -1247,6 +1258,7 @@ def create_provisional_booking(
 		vehicle_color=vehicle_color,
 		license_plate=license_plate,
 		vin=vin,
+		vehicle_generation=vehicle_generation,
 		vin_or_plate=vin_or_plate,
 		notes=notes,
 		waiter_preference=waiter_preference,
@@ -1256,6 +1268,7 @@ def create_provisional_booking(
 		package_ids,
 		vehicle_model=intake["vehicle_model"],
 		vehicle_year=intake["vehicle_year"],
+		vehicle_generation=intake["vehicle_generation"],
 	)
 
 	now_val = _resolve_now(now_dt)
@@ -1328,6 +1341,7 @@ def create_provisional_booking(
 			"provisional_vehicle_year": intake["vehicle_year"],
 			"provisional_vehicle_color": intake["vehicle_color"],
 			"provisional_license_plate": intake["license_plate"],
+			"provisional_vehicle_generation": intake["vehicle_generation"],
 			"provisional_vin_or_plate": intake["vin_or_plate"],
 			"provisional_vehicle_info": intake["provisional_vehicle_info"],
 			"items_summary": reqs["items_summary"],

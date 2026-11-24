@@ -431,11 +431,16 @@ def resolve_shop_action_item(
 
 
 @frappe.whitelist()
-def decode_vehicle_vin(vin: str, include_summary: Any = False) -> Dict[str, Any]:
+def decode_vehicle_vin(
+	vin: str,
+	manufactured_month: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
 	"""Decode a 17-character Tesla VIN offline and return specs and manual URL."""
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
 	vin = optional_str(vin, "VIN") or ""
-	decoded = _decode_vehicle_vin_impl(vin=vin)
+	month_str = optional_str(manufactured_month, "Manufactured Month")
+	decoded = _decode_vehicle_vin_impl(vin=vin, manufactured_month=month_str)
 	has_error = bool(decoded.get("error"))
 	urls: Dict[str, str] = {}
 	if decoded.get("recommended_manual_url"):
@@ -467,21 +472,23 @@ def search_vehicles(
 	query: Optional[str] = None,
 	customer: Optional[str] = None,
 	model: Optional[str] = None,
+	generation: Optional[str] = None,
 	limit: int = 20,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Search Repair Vehicles by VIN, license plate, model, or linked customer."""
+	"""Search Repair Vehicles by VIN, license plate, model, generation, or linked customer."""
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
 	query = optional_str(query, "Query")
 	customer = optional_str(customer, "Customer")
 	model = optional_str(model, "Model")
+	generation = optional_str(generation, "Generation")
 	safe_limit = optional_int(limit, "Limit", min_val=1, max_val=100, default=20)
 	if customer:
 		frappe.has_permission("Customer", "read", throw=True)
 		if frappe.db.exists("Customer", customer):
 			frappe.has_permission("Customer", "read", doc=customer, throw=True)
 	vehicles = _search_vehicles_impl(
-		query=query, customer=customer, model=model, limit=safe_limit
+		query=query, customer=customer, model=model, generation=generation, limit=safe_limit
 	) or []
 	return build_agent_envelope(
 		success=True,
@@ -494,7 +501,8 @@ def search_vehicles(
 			+ (
 				"\n".join(
 					f"- {v.get('display_title') or ' '.join(str(p) for p in (v.get('model_year'), v.get('color'), v.get('model')) if p) or v.get('name')} "
-					f"| Plate: `{v.get('license_plate') or '-'}` "
+					+ (f"[{v['vehicle_generation']}] " if v.get("vehicle_generation") else "")
+					+ f"| Plate: `{v.get('license_plate') or '-'}` "
 					f"| Owner: `{v.get('customer_name') or v.get('customer') or '-'}`"
 					for v in vehicles[:15]
 				)

@@ -23,6 +23,7 @@ PUBLIC_CARD_KEYS = {
 	"title",
 	"summary",
 	"applicable_model",
+	"applicable_generation",
 	"is_mobile_capable",
 	"sort_order",
 	"price_display_mode",
@@ -362,4 +363,60 @@ class TestBookableCatalog(ISMTestCase):
 		for bad_input in ({}, False, 0, 1.5, [], None, "", "[]", "{}", [123]):
 			with self.assertRaises(frappe.ValidationError):
 				compute_packages_booking_requirements(bad_input)
+
+	def test_multi_generation_bounds_and_explicit_generation_filtering(self):
+		# Multi-gen strings preserve full date span via resolve_generation_entries
+		self.assertEqual(
+			parse_generation_year_bounds("Model S Feb 2012 - Mar 2016, Model S Apr 2016 - Jan 2021"),
+			(2012, 2021),
+		)
+		self.assertEqual(
+			parse_generation_year_bounds("Model S Feb 2021 - May 2025, Model S June 2025"),
+			(2021, None),
+		)
+
+		pkg_classic = self._create_package(
+			"MS_Classic_Gen",
+			applicable_model="Model S",
+			applicable_year_from=0,
+			applicable_year_to=0,
+			applicable_generation="Model S Apr 2016 - Jan 2021",
+		)
+		pkg_palladium = self._create_package(
+			"MS_Palladium_Gen",
+			applicable_model="Model S",
+			applicable_year_from=0,
+			applicable_year_to=0,
+			applicable_generation="Model S Feb 2021 - May 2025",
+		)
+		pkg_universal = self._create_package(
+			"All_Models_Gen",
+			applicable_model="All Models",
+			applicable_year_from=0,
+			applicable_year_to=0,
+			applicable_generation="",
+		)
+
+		# Both share 2021, but explicit generation splits them cleanly
+		classic_cards = {
+			c["package_id"]: c
+			for c in list_bookable_packages(
+				vehicle_model="Model S",
+				vehicle_year=2021,
+				vehicle_generation="Model S Apr 2016 - Jan 2021",
+			)
+		}
+		self.assertIn(pkg_classic.name, classic_cards)
+		self.assertNotIn(pkg_palladium.name, classic_cards)
+		self.assertIn(pkg_universal.name, classic_cards)
+		self.assertEqual(classic_cards[pkg_classic.name]["applicable_generation"], "Model S Apr 2016 - Jan 2021")
+
+		with self.assertRaises(frappe.ValidationError):
+			compute_packages_booking_requirements(
+				[pkg_palladium.name],
+				vehicle_model="Model S",
+				vehicle_year=2021,
+				vehicle_generation="Model S Apr 2016 - Jan 2021",
+			)
+
 

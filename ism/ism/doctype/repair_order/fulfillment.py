@@ -382,6 +382,7 @@ def query_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters,
 		| (v.color.like(txt_pattern))
 		| (v.vin.like(txt_pattern))
 		| (v.model.like(txt_pattern))
+		| (v.vehicle_generation.like(txt_pattern))
 	)
 	engine = Engine()
 	engine.get_query("Repair Vehicle", db_query_compat=True)
@@ -393,14 +394,14 @@ def query_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters,
 			frappe.qb.from_(v)
 			.left_join(vc)
 			.on(vc.parent == v.name)
-			.select(v.name, v.display_title, v.license_plate, v.color, v.manufacturer, v.model, v.model_year)
+			.select(v.name, v.display_title, v.license_plate, v.color, v.manufacturer, v.model, v.model_year, v.vehicle_generation)
 			.distinct()
 			.where(((v.customer == customer) | (vc.customer == customer)) & search_cond)
 		)
 	else:
 		query = (
 			frappe.qb.from_(v)
-			.select(v.name, v.display_title, v.license_plate, v.color, v.manufacturer, v.model, v.model_year)
+			.select(v.name, v.display_title, v.license_plate, v.color, v.manufacturer, v.model, v.model_year, v.vehicle_generation)
 			.where(search_cond)
 		)
 

@@ -178,11 +178,24 @@ def setup_procurement_custom_fields(force_update=False):
 
 
 def backfill_service_package_models():
-	"""Backfill applicable_model and applicable_generation on existing Service Packages and Service rows."""
-	from ism.utils.tesla_manual import parse_tesla_manual_url
+	"""Backfill applicable_model, applicable_generation, and generation_compatibility rows."""
+	from ism.utils.tesla_manual import parse_tesla_manual_url, resolve_generation_entries
 
 	if not frappe.db.has_column("Service Package", "applicable_model"):
 		return 0
+
+	has_compat_table = frappe.db.exists("DocType", "Service Package Generation") and frappe.db.table_exists(
+		"Service Package Generation"
+	)
+	existing_compat_parents = set()
+	if has_compat_table:
+		existing_compat_parents = set(
+			frappe.get_all(
+				"Service Package Generation",
+				filters={"parenttype": "Service Package"},
+				pluck="parent",
+			)
+		)
 
 	count = 0
 	packages = frappe.get_all(
@@ -190,20 +203,49 @@ def backfill_service_package_models():
 		fields=["name", "tesla_manual_url", "applicable_model", "applicable_generation"],
 	)
 	for p in packages:
-		if not p.applicable_model and p.tesla_manual_url:
-			url_meta = parse_tesla_manual_url(p.tesla_manual_url)
-			model = url_meta.get("applicable_model")
-			gen = url_meta.get("matched_generation")
-			if model:
-				frappe.db.set_value(
-					"Service Package",
-					p.name,
+		url_meta = parse_tesla_manual_url(p.tesla_manual_url) if p.tesla_manual_url else {}
+		cur_model = (p.applicable_model or "").strip()
+		cur_gen = (p.applicable_generation or "").strip()
+		new_model = cur_model or (url_meta.get("applicable_model") or "")
+		new_gen = cur_gen
+		url_full_gen = (url_meta.get("applicable_generation") or url_meta.get("matched_generation") or "").strip()
+		url_first_gen = (url_meta.get("matched_generation") or "").strip()
+
+		if not new_gen and url_full_gen:
+			new_gen = url_full_gen
+		elif new_gen and url_full_gen and new_gen == url_first_gen and url_full_gen != url_first_gen:
+			new_gen = url_full_gen
+
+		updates = {}
+		if new_model and new_model != cur_model:
+			updates["applicable_model"] = new_model
+		if new_gen and new_gen != cur_gen:
+			updates["applicable_generation"] = new_gen
+		if updates:
+			frappe.db.set_value("Service Package", p.name, updates, update_modified=False)
+			count += 1
+
+		if has_compat_table and p.name not in existing_compat_parents and (new_gen or p.tesla_manual_url):
+			entries = resolve_generation_entries(new_gen, model=new_model, manual_url=p.tesla_manual_url)
+			for idx, entry in enumerate(entries, start=1):
+				frappe.get_doc(
 					{
-						"applicable_model": model,
-						"applicable_generation": gen or "",
-					},
-					update_modified=False,
-				)
+						"doctype": "Service Package Generation",
+						"parent": p.name,
+						"parenttype": "Service Package",
+						"parentfield": "generation_compatibility",
+						"idx": idx,
+						"applicable_model": entry["applicable_model"],
+						"generation_name": entry["generation_name"],
+						"date_range": entry.get("date_range") or "",
+						"year_from": entry.get("year_from"),
+						"month_from": entry.get("month_from"),
+						"year_to": entry.get("year_to"),
+						"month_to": entry.get("month_to"),
+						"manual_base_url": entry.get("manual_base_url") or "",
+					}
+				).db_insert()
+			if entries and not updates:
 				count += 1
 
 	if frappe.db.has_column("Repair Order Service", "applicable_model"):
@@ -216,5 +258,48 @@ def backfill_service_package_models():
 			AND (sp.applicable_model IS NOT NULL AND sp.applicable_model != '')
 			"""
 		)
+
+	if frappe.db.has_column("Repair Order Service", "applicable_generation") and frappe.db.has_column(
+		"Service Package", "applicable_generation"
+	):
+		frappe.db.sql(
+			"""
+			UPDATE `tabRepair Order Service` ros
+			JOIN `tabService Package` sp ON ros.service_package = sp.name
+			SET ros.applicable_generation = sp.applicable_generation
+			WHERE (ros.applicable_generation IS NULL OR ros.applicable_generation = '')
+			AND (sp.applicable_generation IS NOT NULL AND sp.applicable_generation != '')
+			"""
+		)
+
+	return count
+
+
+def backfill_repair_vehicle_generations():
+	"""Backfill vehicle_generation and recommended_manual_url on existing Repair Vehicle records."""
+	from ism.utils.tesla_manual import get_tesla_manual_details_for_vehicle
+
+	if not frappe.db.has_column("Repair Vehicle", "vehicle_generation"):
+		return 0
+
+	has_url_col = frappe.db.has_column("Repair Vehicle", "recommended_manual_url")
+	fields = ["name", "model", "model_year", "manufactured_month", "drive_unit", "vehicle_generation"]
+	if has_url_col:
+		fields.append("recommended_manual_url")
+
+	legacy_broken_url = "https://service.tesla.com/docs/ModelX/Palladium/ServiceManual/en-us/"
+	count = 0
+	for veh in frappe.get_all("Repair Vehicle", fields=fields):
+		details = get_tesla_manual_details_for_vehicle(veh)
+		updates = {}
+		if not (veh.get("vehicle_generation") or "").strip() and details.get("vehicle_generation"):
+			updates["vehicle_generation"] = details["vehicle_generation"]
+		if has_url_col:
+			cur_url = (veh.get("recommended_manual_url") or "").strip()
+			if (not cur_url or cur_url == legacy_broken_url) and details.get("recommended_manual_url"):
+				updates["recommended_manual_url"] = details["recommended_manual_url"]
+		if updates:
+			frappe.db.set_value("Repair Vehicle", veh["name"], updates, update_modified=False)
+			count += 1
 
 	return count

@@ -122,6 +122,9 @@ class ScheduleEntry(Document):
 			)
 		if self.provisional_vehicle_info:
 			return self.provisional_vehicle_info
+		gen = (getattr(self, "provisional_vehicle_generation", None) or "").strip()
+		if gen:
+			return gen
 		return ""
 
 	def _normalize_provisional_fields(self):
@@ -134,6 +137,7 @@ class ScheduleEntry(Document):
 			"provisional_email",
 			"provisional_vehicle_info",
 			"provisional_vehicle_model",
+			"provisional_vehicle_generation",
 			"provisional_vin_or_plate",
 		):
 			val = getattr(self, fieldname, None)

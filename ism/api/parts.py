@@ -262,9 +262,23 @@ def link_part_to_service_packages(
 
 
 @frappe.whitelist()
-def search_service_packages(query="", limit=25):
-	"""Search for Service Packages by title, correction code, model, or category."""
-	return _search_service_packages_impl(query=query, limit=limit)
+def search_service_packages(
+	query="",
+	limit=25,
+	applicable_model=None,
+	applicable_generation=None,
+	vehicle_year=None,
+	vehicle=None,
+):
+	"""Search for Service Packages by title, correction code, model, generation, or vehicle."""
+	return _search_service_packages_impl(
+		query=query,
+		limit=limit,
+		applicable_model=applicable_model,
+		applicable_generation=applicable_generation,
+		vehicle_year=vehicle_year,
+		vehicle=vehicle,
+	)
 
 
 @frappe.whitelist()

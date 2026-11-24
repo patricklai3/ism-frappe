@@ -4,6 +4,7 @@
 from ism.setup_tasks.fields import (
 	LEGACY_FIELDS_TO_REMOVE,
 	_ensure_custom_fields_present,
+	backfill_repair_vehicle_generations,
 	backfill_service_package_models,
 	cleanup_legacy_custom_fields,
 	ensure_doctype_creation_enabled,
@@ -38,6 +39,7 @@ __all__ = [
 	"_company_has_default_hst_setup",
 	"_ensure_custom_fields_present",
 	"_ensure_default_tax_rule",
+	"backfill_repair_vehicle_generations",
 	"backfill_service_package_models",
 	"cleanup_legacy_custom_fields",
 	"create_standard_inspection_template",

@@ -66,6 +66,7 @@ from ism.scheduling.self_serve import (
 	normalize_provisional_intake,
 )
 from ism.scheduling.time_utils import normalize_date
+from ism.utils.tesla_manual import get_generation_catalog
 
 _COMMIT_SAVEPOINT_NAME: str = "p5_booking_commit"
 _DEFAULT_CURRENCY: str = "CAD"
@@ -561,6 +562,7 @@ def get_booking_boot_config(
 			"currency": _DEFAULT_CURRENCY,
 		},
 		"vehicle_models": list(ALLOWED_VEHICLE_MODELS),
+		"vehicle_generations": get_generation_catalog(),
 		"vehicle_year_min": VEHICLE_MIN_YEAR,
 		"vehicle_year_max": now_datetime().year + 1,
 		"honeypot_enabled": booking_settings.honeypot_enabled,
@@ -574,6 +576,7 @@ def get_public_booking_packages(
 	*,
 	vehicle_model: str | None = None,
 	vehicle_year: int | None = None,
+	vehicle_generation: str | None = None,
 	search: str | None = None,
 	client_ip: str | None = None,
 ) -> dict[str, Any]:
@@ -606,6 +609,7 @@ def get_public_booking_packages(
 		packages = list_bookable_packages(
 			vehicle_model=vehicle_model,
 			vehicle_year=vehicle_year,
+			vehicle_generation=vehicle_generation,
 			search=search,
 		)
 	except frappe.ValidationError as exc:
@@ -631,6 +635,7 @@ def get_public_booking_slots(
 	days_ahead: int = 14,
 	vehicle_model: str | None = None,
 	vehicle_year: int | None = None,
+	vehicle_generation: str | None = None,
 	max_slots_per_day: int | None = None,
 	client_ip: str | None = None,
 	now_dt: datetime | None = None,
@@ -692,6 +697,7 @@ def get_public_booking_slots(
 			days_ahead=days_ahead,
 			vehicle_model=vehicle_model,
 			vehicle_year=vehicle_year,
+			vehicle_generation=vehicle_generation,
 			max_slots_per_day=max_slots_per_day,
 			now_dt=now_dt,
 		)
@@ -719,6 +725,7 @@ def initiate_booking_otp(
 	vehicle_color: str | None = None,
 	license_plate: str | None = None,
 	vin: str | None = None,
+	vehicle_generation: str | None = None,
 	vin_or_plate: str | None = None,
 	notes: str | None = None,
 	waiter_preference: str | None = None,
@@ -796,6 +803,7 @@ def initiate_booking_otp(
 			vehicle_color=vehicle_color,
 			license_plate=license_plate,
 			vin=vin,
+			vehicle_generation=vehicle_generation,
 			vin_or_plate=vin_or_plate,
 			notes=notes,
 			waiter_preference=waiter_preference,
@@ -821,6 +829,7 @@ def initiate_booking_otp(
 			deduped_ids,
 			vehicle_model=normalized["vehicle_model"],
 			vehicle_year=normalized["vehicle_year"],
+			vehicle_generation=normalized["vehicle_generation"],
 		)
 	except frappe.ValidationError as exc:
 		_clear_thrown_messages(prior_len)
@@ -872,6 +881,7 @@ def initiate_booking_otp(
 			days_ahead=1,
 			vehicle_model=normalized["vehicle_model"],
 			vehicle_year=normalized["vehicle_year"],
+			vehicle_generation=normalized["vehicle_generation"],
 			now_dt=now_dt,
 		)
 	except frappe.ValidationError as exc:
@@ -941,6 +951,7 @@ def verify_and_commit_booking(
 	vehicle_color: str | None = None,
 	license_plate: str | None = None,
 	vin: str | None = None,
+	vehicle_generation: str | None = None,
 	vin_or_plate: str | None = None,
 	notes: str | None = None,
 	waiter_preference: str | None = None,
@@ -1028,6 +1039,7 @@ def verify_and_commit_booking(
 			vehicle_color=vehicle_color,
 			license_plate=license_plate,
 			vin=vin,
+			vehicle_generation=vehicle_generation,
 			vin_or_plate=vin_or_plate,
 			notes=notes,
 			waiter_preference=waiter_preference,
@@ -1134,6 +1146,7 @@ def verify_and_commit_booking(
 					vehicle_color=normalized["vehicle_color"],
 					license_plate=normalized["license_plate"],
 					vin=normalized["vin"],
+					vehicle_generation=normalized["vehicle_generation"],
 					vin_or_plate=normalized["vin_or_plate"],
 					notes=normalized["notes"],
 					waiter_preference=normalized["waiter_preference"],

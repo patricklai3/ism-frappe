@@ -37,7 +37,11 @@ from ism.api.parts_procurement import (
 	ensure_supplier_and_link_to_item,
 )
 from ism.api.parts_stock import _get_ro_parts_stock_internal
-from ism.api.tesla import import_tesla_procedure as _import_tesla_ro_procedure
+from ism.api.tesla import (
+	_find_existing_service_package_name,
+	import_tesla_procedure as _import_tesla_ro_procedure,
+)
+from ism.utils.tesla_manual import parse_tesla_manual_url
 
 
 def _attach_package_parts(pkg: Any, parts: List[Any]) -> None:
@@ -351,6 +355,7 @@ def import_tesla_procedure(
 	correction_code: Optional[str] = None,
 	labor_hours: float = 1.0,
 	model: str = "Model 3",
+	applicable_generation: Optional[str] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	repair_order: Optional[str] = None,
 	url: Optional[str] = None,
@@ -368,10 +373,13 @@ def import_tesla_procedure(
 	repair_order = optional_str(repair_order, "Repair Order")
 	procedure_title = optional_str(procedure_title, "Procedure Title")
 	correction_code = optional_str(correction_code, "Correction Code")
+	applicable_generation = optional_str(applicable_generation, "Applicable Generation")
 	url = optional_str(url, "URL")
 	side = optional_str(side, "Side")
 	advisor_notes = optional_str(advisor_notes, "Advisor Notes")
-	model = optional_str(model, "Model") or "Model 3"
+	explicit_model = optional_str(model, "Model")
+	url_meta = parse_tesla_manual_url(url) if url else {}
+	resolved_model = explicit_model or url_meta.get("applicable_model") or "Model 3"
 	on_conflict = optional_str(on_conflict, "On Conflict") or "skip"
 	labor_hours_val = optional_flt(labor_hours, "Labor Hours", non_negative=True, default=1.0)
 	parsed_data = parse_json_arg(data, None, label="data") if isinstance(data, str) else data
@@ -387,9 +395,13 @@ def import_tesla_procedure(
 				"title": procedure_title or correction_code,
 				"correction_code": correction_code or "",
 				"frt": flt(labor_hours_val),
-				"applicable_model": model,
+				"applicable_model": resolved_model,
+				"applicable_generation": applicable_generation or "",
 				"parts": parsed_parts,
 			}
+		elif isinstance(parsed_data, dict) and applicable_generation and not parsed_data.get("applicable_generation"):
+			parsed_data = dict(parsed_data)
+			parsed_data["applicable_generation"] = applicable_generation
 		ro_res = _import_tesla_ro_procedure(
 			repair_order=repair_order,
 			url=url,
@@ -433,6 +445,8 @@ def import_tesla_procedure(
 	if not procedure_title and not parsed_data and url:
 		parsed_data = agent_mod.fetch_and_parse_tesla_procedure(url)
 
+	manual_url = url or ""
+	doc_guid = url_meta.get("doc_guid") or ""
 	if isinstance(parsed_data, dict):
 		procedure_title = procedure_title or optional_str(
 			parsed_data.get("title")
@@ -443,19 +457,33 @@ def import_tesla_procedure(
 		correction_code = correction_code or optional_str(parsed_data.get("correction_code"), "Correction Code")
 		if parsed_data.get("frt") is not None and flt(labor_hours_val) == 1.0:
 			labor_hours_val = flt(parsed_data.get("frt"))
-		model = parsed_data.get("applicable_model") or parsed_data.get("model") or model
+		resolved_model = parsed_data.get("applicable_model") or parsed_data.get("model") or resolved_model
+		applicable_generation = applicable_generation or optional_str(
+			parsed_data.get("applicable_generation") or parsed_data.get("matched_generation"),
+			"Applicable Generation",
+		)
+		manual_url = manual_url or optional_str(parsed_data.get("tesla_manual_url") or parsed_data.get("url"), "URL") or ""
+		doc_guid = doc_guid or optional_str(parsed_data.get("doc_guid"), "Doc GUID") or ""
 		if parts is None and parsed_data.get("parts") is not None:
 			parts = parsed_data.get("parts")
+
+	if not applicable_generation and url_meta:
+		applicable_generation = url_meta.get("applicable_generation") or url_meta.get("matched_generation") or ""
+	if manual_url and not doc_guid:
+		doc_guid = parse_tesla_manual_url(manual_url).get("doc_guid") or ""
 
 	if not procedure_title:
 		frappe.throw(_("procedure_title is required when importing a Service Package."), frappe.MandatoryError)
 
 	parsed_parts = _coerce_procedure_parts_arg(parts)
 
-	existing_name = (
-		(correction_code and frappe.db.get_value("Service Package", {"correction_code": correction_code}, "name"))
-		or frappe.db.get_value("Service Package", {"package_name": procedure_title}, "name")
-		or frappe.db.get_value("Service Package", {"name": procedure_title}, "name")
+	existing_name = _find_existing_service_package_name(
+		correction_code or "",
+		procedure_title,
+		applicable_model=resolved_model,
+		applicable_generation=applicable_generation or "",
+		doc_guid=doc_guid,
+		tesla_manual_url=manual_url,
 	)
 
 	if existing_name:
@@ -467,7 +495,13 @@ def import_tesla_procedure(
 		pkg.package_name = procedure_title
 		pkg.check_permission("create")
 
-	pkg.applicable_model = model
+	pkg.applicable_model = resolved_model
+	if applicable_generation is not None:
+		pkg.applicable_generation = applicable_generation or ""
+	if manual_url:
+		pkg.tesla_manual_url = manual_url
+	if doc_guid:
+		pkg.doc_guid = doc_guid
 	pkg.correction_code = correction_code or ""
 	pkg.standard_labor_hours = flt(labor_hours_val)
 
@@ -485,7 +519,7 @@ def import_tesla_procedure(
 		include_summary=include_summary,
 		summary_builder=lambda: (
 			f"### Tesla Procedure Ingested: `{pkg.name}`\n"
-			f"**Correction Code**: `{correction_code or 'N/A'}` | **Model**: `{model}`\n"
+			f"**Correction Code**: `{correction_code or 'N/A'}` | **Model**: `{resolved_model}` | **Generation**: `{pkg.applicable_generation or 'All'}`\n"
 			f"**Flat Rate Time**: `{flt(labor_hours_val):.2f} hours` | **Parts**: `{len(pkg.items or [])}`\n"
 			f"[Inspect Service Package]({desk_url})"
 		),

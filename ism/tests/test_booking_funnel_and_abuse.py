@@ -1505,6 +1505,38 @@ class TestBookingFunnelAndAbuse(ISMTestCase):
 		self.assertTrue(slot_res["success"])
 		self.assertGreaterEqual(slot_res["total_slots"], 1)
 
+	def test_booking_boot_config_includes_vehicle_generations_and_filters_by_generation(self):
+		boot = get_booking_config()
+		self.assertTrue(boot["enabled"])
+		self.assertIn("Model S", boot["vehicle_generations"])
+		self.assertEqual(
+			[g["generation_name"] for g in boot["vehicle_generations"]["Model Y"]],
+			["Model Y Jan 2020 - Jan 2025", "Model Y Feb 2025"],
+		)
+
+		p_old_y = self._create_bookable_package(
+			"MY_Old_Only",
+			customer_title="Legacy Model Y Inspection",
+			applicable_model="Model Y",
+			applicable_generation="Model Y Jan 2020 - Jan 2025",
+		)
+		p_juniper_y = self._create_bookable_package(
+			"MY_Juniper_Only",
+			customer_title="Juniper Model Y Inspection",
+			applicable_model="Model Y",
+			applicable_generation="Model Y Feb 2025",
+		)
+
+		frappe.set_user("Guest")
+		res = get_booking_packages(
+			vehicle_model="Model Y",
+			vehicle_year=2025,
+			vehicle_generation="Model Y Feb 2025",
+		)
+		ids = {p["package_id"] for p in res["packages"]}
+		self.assertIn(p_juniper_y.name, ids)
+		self.assertNotIn(p_old_y.name, ids)
+
 
 class TestBookingHostedRoute(ISMTestCase):
 	"""Wave 3 hosted /book page controller, security headers, boot JSON, and asset hygiene tests."""

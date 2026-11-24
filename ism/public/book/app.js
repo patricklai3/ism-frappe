@@ -147,6 +147,20 @@ function initBookingApp() {
 	];
 	let step1Attempted = false;
 
+	function matchingGenerationsForVehicle(model, year) {
+		const map = (bootConfig && bootConfig.vehicle_generations) || {};
+		const list = model && Array.isArray(map[model]) ? map[model] : [];
+		if (!list.length) return [];
+		if (!year) return list;
+		return list.filter((entry) => {
+			const yf = entry.year_from ? Number(entry.year_from) : null;
+			const yt = entry.year_to ? Number(entry.year_to) : null;
+			if (yf && year < yf) return false;
+			if (yt && year > yt) return false;
+			return true;
+		});
+	}
+
 	function vehicleSummaryText(state) {
 		if (window.ISMVehicleDisplay) {
 			return window.ISMVehicleDisplay.formatText(state.vehicle, { fallback: "" });
@@ -235,6 +249,7 @@ function initBookingApp() {
 			const res = await fetchPackages({
 				vehicle_model: state.vehicle.model,
 				vehicle_year: state.vehicle.year,
+				vehicle_generation: state.vehicle.generation || undefined,
 			});
 			store.setPackagesCatalog(res.packages || []);
 			store.setStep(2);
@@ -261,6 +276,7 @@ function initBookingApp() {
 				days_ahead: 14,
 				vehicle_model: state.vehicle.model,
 				vehicle_year: state.vehicle.year,
+				vehicle_generation: state.vehicle.generation || undefined,
 			});
 			store.setSlotsResult(res, { append });
 			if (!append) {
@@ -289,6 +305,7 @@ function initBookingApp() {
 			vehicle_color: color || undefined,
 			license_plate: licensePlate || undefined,
 			vin: vin || undefined,
+			vehicle_generation: state.vehicle.generation || undefined,
 			vin_or_plate: vin || licensePlate || undefined,
 			notes: state.customer.notes.trim() || undefined,
 			waiter_preference: policy.enable_waiter_preference
@@ -653,6 +670,56 @@ function initBookingApp() {
 						: null
 				)
 			),
+			(() => {
+				const genMatches = matchingGenerationsForVehicle(state.vehicle.model, state.vehicle.year);
+				if (!genMatches.length) return null;
+				if (genMatches.length === 1 && state.vehicle.year) {
+					return el(
+						"div",
+						{ className: "ism-field" },
+						el("span", {
+							className: "ism-price-pill",
+							textContent: `Generation: ${genMatches[0].short_label || genMatches[0].generation_name}`,
+						})
+					);
+				}
+				const genOptions = [
+					el("option", {
+						value: "",
+						textContent: state.vehicle.year
+							? "Select vehicle generation (split model year — optional)"
+							: "All generations (optional)",
+					}),
+				];
+				genMatches.forEach((entry) => {
+					genOptions.push(
+						el("option", {
+							value: entry.generation_name,
+							selected: state.vehicle.generation === entry.generation_name ? "selected" : null,
+							textContent: entry.short_label || entry.generation_name,
+						})
+					);
+				});
+				return el(
+					"div",
+					{ className: "ism-field" },
+					el("label", {
+						className: "ism-field__label",
+						for: "ism-vehicle-generation",
+						textContent: "Vehicle Generation",
+					}),
+					el(
+						"select",
+						{
+							id: "ism-vehicle-generation",
+							className: "ism-select",
+							value: state.vehicle.generation || "",
+							onChange: (e) => store.setVehicleGeneration(e.target.value),
+						},
+						genOptions
+					)
+				);
+			})(),
 			el(
 				"div",
 				{ className: "ism-field-grid" },
@@ -750,6 +817,12 @@ function initBookingApp() {
 							"div",
 							{ className: "ism-package-card__body" },
 							el("div", { className: "ism-package-card__title", textContent: pkg.title || "" }),
+							pkg.applicable_generation
+								? el("div", {
+										className: "ism-package-card__summary",
+										textContent: `Generation: ${pkg.applicable_generation}`,
+									})
+								: null,
 							pkg.summary
 								? el("div", { className: "ism-package-card__summary", textContent: pkg.summary })
 								: null

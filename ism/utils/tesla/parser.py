@@ -320,6 +320,7 @@ def normalize_tesla_procedure(raw_data=None, url="", html_content="", fetch_mani
 		payload.get("applicable_generation")
 		or payload.get("matched_generation")
 		or html_parsed.get("applicable_generation")
+		or url_meta.get("applicable_generation")
 		or url_meta.get("matched_generation")
 		or ""
 	).strip()
@@ -379,6 +380,13 @@ def normalize_tesla_procedure(raw_data=None, url="", html_content="", fetch_mani
 		"subcategory": subcategory,
 		"applicable_model": model,
 		"applicable_generation": generation,
+		"generations": payload.get("generations") or html_parsed.get("generations") or url_meta.get("generations") or [],
+		"generation_entries": (
+			payload.get("generation_entries")
+			or html_parsed.get("generation_entries")
+			or url_meta.get("generation_entries")
+			or []
+		),
 		"gen_start_year_month": str(
 			payload.get("gen_start_year_month")
 			or html_parsed.get("gen_start_year_month")
@@ -452,7 +460,9 @@ def parse_tesla_procedure_html(html_content, url=""):
 		"category": "Maintenance",
 		"subcategory": "",
 		"applicable_model": url_meta.get("applicable_model") or "",
-		"applicable_generation": url_meta.get("matched_generation") or "",
+		"applicable_generation": url_meta.get("applicable_generation") or url_meta.get("matched_generation") or "",
+		"generations": url_meta.get("generations") or [],
+		"generation_entries": url_meta.get("generation_entries") or [],
 		"gen_start_year_month": url_meta.get("gen_start") or "",
 		"gen_end_year_month": url_meta.get("gen_end") or "",
 		"description": "",

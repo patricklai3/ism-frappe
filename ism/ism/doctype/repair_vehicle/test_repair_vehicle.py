@@ -387,3 +387,50 @@ class TestRepairVehicle(ISMTestCase):
 		)
 		self.assertEqual(thread_vals.vehicle_display, expected_updated)
 		self.assertIn(expected_updated, thread_vals.title)
+
+	def test_vehicle_generation_persistence_and_manufactured_month_redecode(self):
+		"""Verify RepairVehicle persists vehicle_generation + recommended_manual_url and re-decodes on manufactured_month."""
+		from ism.api.tesla import search_vehicles
+
+		# 2021 Model S VIN (5YJSA1E5...) splits Classic (Apr 2016 - Jan 2021) vs Palladium (Feb 2021 - May 2025)
+		tpl_ms = "5YJSA1E50MF000123"
+		vin_ms = f"{tpl_ms[:8]}{compute_vin_check_digit(tpl_ms)}{tpl_ms[9:]}"
+
+		ambig = decode_tesla_vin(vin_ms)
+		self.assertTrue(ambig["generation_ambiguous"])
+		self.assertEqual(len(ambig["candidate_generations"]), 2)
+
+		cust = self.create_test_customer(customer_name=f"{TEST_PREFIX}GenCust")
+		veh = frappe.get_doc({
+			"doctype": "Repair Vehicle",
+			"vin": vin_ms,
+			"customer": cust.name,
+			"color": "Pearl White",
+			"license_plate": "GEN 123",
+			"manufactured_month": "01/21",
+		}).insert(ignore_permissions=True)
+		self.track(veh)
+		self.assertEqual(veh.vehicle_generation, "Model S Apr 2016 - Jan 2021")
+		self.assertEqual(veh.recommended_manual_url, "https://service.tesla.com/docs/ModelS/ServiceManual/en-us/")
+
+		veh.manufactured_month = "03/21"
+		veh.save(ignore_permissions=True)
+		veh.reload()
+		self.assertEqual(veh.vehicle_generation, "Model S Feb 2021 - May 2025")
+		self.assertEqual(veh.recommended_manual_url, "https://service.tesla.com/docs/ModelS/ServiceManual/Palladium/en-us/")
+
+		# Search by generation finds the updated vehicle
+		hits = search_vehicles(generation="Model S Feb 2021 - May 2025")
+		self.assertIn(veh.name, [h["name"] for h in hits])
+		miss = search_vehicles(generation="Model S Apr 2016 - Jan 2021")
+		self.assertNotIn(veh.name, [h["name"] for h in miss])
+
+		# 2025 Model Y non-Juniper drive code (G) re-decodes between Jan 2025 legacy vs Feb 2025 Juniper
+		tpl_my = "7SAYGDEG0SF000456"
+		vin_my = f"{tpl_my[:8]}{compute_vin_check_digit(tpl_my)}{tpl_my[9:]}"
+		jan_y = decode_tesla_vin(vin_my, manufactured_month="01/25")
+		feb_y = decode_tesla_vin(vin_my, manufactured_month="02/25")
+		self.assertEqual(jan_y["vehicle_generation"], "Model Y Jan 2020 - Jan 2025")
+		self.assertEqual(jan_y["recommended_manual_url"], "https://service.tesla.com/docs/ModelY/ServiceManual/en-us/")
+		self.assertEqual(feb_y["vehicle_generation"], "Model Y Feb 2025")
+		self.assertEqual(feb_y["recommended_manual_url"], "https://service.tesla.com/docs/ModelY/ServiceManual/2025/en-us/")

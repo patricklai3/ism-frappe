@@ -4,7 +4,7 @@
 import re
 from typing import Any, Optional
 
-from ism.utils.tesla_manual import get_tesla_manual_url_for_vehicle
+from ism.utils.tesla_manual import get_tesla_manual_details_for_vehicle, get_tesla_manual_url_for_vehicle
 
 _F = "Tesla Fremont, CA"
 _SH = "Giga Shanghai, China"
@@ -393,7 +393,7 @@ def normalize_vin_string(vin: Optional[str]) -> str:
 	return re.sub(r"[^A-HJ-NPR-Z0-9]", "", str(vin).upper())
 
 
-def decode_tesla_vin(vin: Optional[str]) -> dict[str, Any]:
+def decode_tesla_vin(vin: Optional[str], manufactured_month: Optional[str] = None) -> dict[str, Any]:
 	"""Decode a Tesla VIN strictly offline using bundled WMI/spec/check-digit tables."""
 	normalized = normalize_vin_string(vin)
 	base = {
@@ -413,6 +413,10 @@ def decode_tesla_vin(vin: Optional[str]) -> dict[str, Any]:
 		"assembly_plant": None,
 		"production_sequence": None,
 		"autopilot_hardware": None,
+		"vehicle_generation": None,
+		"generation_date_range": None,
+		"generation_ambiguous": False,
+		"candidate_generations": [],
 		"recommended_manual_url": "https://service.tesla.com/docs/",
 		"error": None,
 	}
@@ -449,7 +453,26 @@ def decode_tesla_vin(vin: Optional[str]) -> dict[str, Any]:
 
 	decoded_model = MODEL.get(model_code, "Unknown")
 	decoded_year = YEAR.get(year_code, year_code)
-	manual_url = get_tesla_manual_url_for_vehicle({"model": decoded_model, "model_year": decoded_year})
+	decoded_drive_unit = drive_map.get(normalized[7], "Unknown") if drive_map else "Unknown"
+	manual_details = get_tesla_manual_details_for_vehicle(
+		{
+			"model": decoded_model,
+			"model_year": decoded_year,
+			"manufactured_month": manufactured_month,
+			"drive_unit": decoded_drive_unit,
+		}
+	)
+	manual_url = (
+		manual_details.get("recommended_manual_url")
+		or get_tesla_manual_url_for_vehicle(
+			{
+				"model": decoded_model,
+				"model_year": decoded_year,
+				"manufactured_month": manufactured_month,
+				"drive_unit": decoded_drive_unit,
+			}
+		)
+	)
 
 	return {
 		"vin": normalized,
@@ -464,10 +487,14 @@ def decode_tesla_vin(vin: Optional[str]) -> dict[str, Any]:
 		"trim": derived.get("trim") or "Unknown",
 		"drivetrain": derived.get("drivetrain") or "Unknown",
 		"battery_type": fuel_map.get(normalized[6], "Unknown") if fuel_map else "Unknown",
-		"drive_unit": drive_map.get(normalized[7], "Unknown") if drive_map else "Unknown",
+		"drive_unit": decoded_drive_unit,
 		"assembly_plant": PLANT.get(normalized[10], normalized[10]),
 		"production_sequence": seq,
 		"autopilot_hardware": hw.get("t") if hw else "Unknown",
+		"vehicle_generation": manual_details.get("vehicle_generation") or None,
+		"generation_date_range": manual_details.get("generation_date_range") or None,
+		"generation_ambiguous": bool(manual_details.get("generation_ambiguous")),
+		"candidate_generations": manual_details.get("candidate_generations") or [],
 		"recommended_manual_url": manual_url,
 		"error": None,
 	}

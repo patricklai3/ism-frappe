@@ -1625,3 +1625,17 @@ class TestSelfServeScheduling(ISMTestCase):
 		self.assertIn("Checked In", LOCKED_RO_STATUSES)
 		self.assertIn("Website Self-Serve", VALID_BOOKING_SOURCES)
 		self.assertEqual(VALID_WAITER_PREFERENCES, ("Drop-Off", "Waiter", "Not Specified"))
+
+	def test_provisional_vehicle_generation_persisted_on_schedule_entry(self):
+		norm = normalize_provisional_intake(
+			customer_name="Taylor Moss",
+			phone="6045550177",
+			vehicle_model="Model S",
+			vehicle_year=2021,
+			vehicle_color="Pearl White",
+			license_plate="EV 2021",
+			vehicle_generation="Model S Apr 2016 - Jan 2021",
+		)
+		self.assertEqual(norm["vehicle_generation"], "Model S Apr 2016 - Jan 2021")
+		self.assertEqual(norm["provisional_vehicle_info"], "2021 Pearl White Model S (EV 2021)")
+

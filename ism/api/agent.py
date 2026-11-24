@@ -376,6 +376,7 @@ def import_tesla_procedure(
 	correction_code: Optional[str] = None,
 	labor_hours: float = 1.0,
 	model: str = "Model 3",
+	applicable_generation: Optional[str] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	repair_order: Optional[str] = None,
 	url: Optional[str] = None,
@@ -393,6 +394,7 @@ def import_tesla_procedure(
 		correction_code=correction_code,
 		labor_hours=labor_hours,
 		model=model,
+		applicable_generation=applicable_generation,
 		parts=parts,
 		repair_order=repair_order,
 		url=url,
@@ -976,9 +978,17 @@ def estimate_duration(
 
 
 @frappe.whitelist()
-def decode_vehicle_vin(vin: str, include_summary: Any = False) -> Dict[str, Any]:
+def decode_vehicle_vin(
+	vin: str,
+	manufactured_month: Optional[str] = None,
+	include_summary: Any = False,
+) -> Dict[str, Any]:
 	"""Decode a 17-character Tesla VIN offline and return specs and manual URL."""
-	return _decode_vehicle_vin_impl(vin=vin, include_summary=include_summary)
+	return _decode_vehicle_vin_impl(
+		vin=vin,
+		manufactured_month=manufactured_month,
+		include_summary=include_summary,
+	)
 
 
 @frappe.whitelist()
@@ -986,14 +996,16 @@ def search_vehicles(
 	query: Optional[str] = None,
 	customer: Optional[str] = None,
 	model: Optional[str] = None,
+	generation: Optional[str] = None,
 	limit: int = 20,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
-	"""Search Repair Vehicles by VIN, license plate, model, or linked customer."""
+	"""Search Repair Vehicles by VIN, license plate, model, generation, or linked customer."""
 	return _search_vehicles_impl(
 		query=query,
 		customer=customer,
 		model=model,
+		generation=generation,
 		limit=limit,
 		include_summary=include_summary,
 	)

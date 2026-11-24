@@ -611,6 +611,11 @@ function open_import_tesla_procedure_dialog(frm) {
 		size: "large",
 		fields: [
 			{
+				fieldname: "vehicle_manual_hint",
+				fieldtype: "HTML",
+				options: "",
+			},
+			{
 				fieldname: "url",
 				fieldtype: "Data",
 				label: __("Tesla Service Manual URL"),
@@ -679,6 +684,34 @@ function open_import_tesla_procedure_dialog(frm) {
 		},
 	});
 	d.show();
+	if (frm.doc.vehicle) {
+		frappe.db
+			.get_value("Repair Vehicle", frm.doc.vehicle, ["model", "model_year", "vehicle_generation", "recommended_manual_url"])
+			.then((r) => {
+				const veh = r?.message;
+				if (!veh) return;
+				const labelParts = [veh.model_year, veh.model, veh.vehicle_generation].filter(Boolean);
+				const safeLabel = frappe.utils.escape_html(labelParts.join(" — "));
+				const manualUrl = veh.recommended_manual_url || "";
+				const htmlField = d.get_field("vehicle_manual_hint");
+				if (!htmlField) return;
+				if (manualUrl) {
+					htmlField.$wrapper.html(
+						`<div class="alert alert-info py-2 px-3 mb-2 d-flex align-items-center justify-content-between flex-wrap" style="gap:8px;">
+							<div><strong>${__("Vehicle Manual:")}</strong> ${safeLabel}</div>
+							<button type="button" class="btn btn-xs btn-default ism-open-vehicle-manual-btn">${__("Open Generation Manual")}</button>
+						</div>`
+					);
+					htmlField.$wrapper.find(".ism-open-vehicle-manual-btn").on("click", () => {
+						window.open(manualUrl, "_blank", "noopener");
+					});
+				} else if (safeLabel) {
+					htmlField.$wrapper.html(
+						`<div class="text-muted small mb-2"><strong>${__("Vehicle:")}</strong> ${safeLabel}</div>`
+					);
+				}
+			});
+	}
 }
 
 function open_apply_inspection_template_dialog(frm) {
@@ -1231,6 +1264,14 @@ frappe.ui.form.on("Repair Order", {
 			filters: frm.doc.customer ? { customer: frm.doc.customer } : {},
 		}));
 
+		frm.set_query("service_package", "services", () => {
+			if (!frm.doc.vehicle) return {};
+			return {
+				query: "ism.api.tesla.query_service_packages_for_vehicle",
+				filters: { vehicle: frm.doc.vehicle },
+			};
+		});
+
 		frm.set_query("taxes_and_charges", () => {
 			if (!frm.doc.company) return {};
 			return { filters: { company: frm.doc.company } };
@@ -1702,15 +1743,29 @@ frappe.ui.form.on("Repair Order Service", {
 		if (!row || !grid_row?.grid_form) return;
 
 		const $wrapper = grid_row.grid_form.wrapper;
+		const $parts_field = $wrapper.find('[data-fieldname="parts"]');
 		if (!$wrapper.find(".ism-manage-parts-btn").length) {
 			const $btn = $(
 				`<button type="button" class="btn btn-xs btn-default ism-manage-parts-btn mt-2 mb-2">🔩 ${__("Manage Parts")}</button>`
 			);
 			$btn.on("click", () => open_manage_parts_dialog(frm, cdn));
-			const $parts_field = $wrapper.find('[data-fieldname="parts"]');
 			if ($parts_field.length) {
 				$parts_field.prepend($btn);
 			}
+		}
+
+		$wrapper.find(".ism-open-service-manual-btn").remove();
+		if (row.tesla_manual_url && $parts_field.length) {
+			const $manual_btn = $(
+				`<button type="button" class="btn btn-xs btn-default ism-open-service-manual-btn mt-2 mb-2 ml-2">${__("Open Manual")}</button>`
+			);
+			$manual_btn.on("click", () => {
+				const currentRow = locals[cdt]?.[cdn];
+				if (currentRow?.tesla_manual_url) {
+					window.open(currentRow.tesla_manual_url, "_blank", "noopener");
+				}
+			});
+			$wrapper.find(".ism-manage-parts-btn").after($manual_btn);
 		}
 	},
 
@@ -1735,6 +1790,7 @@ frappe.ui.form.on("Repair Order Service", {
 				frappe.model.set_value(cdt, cdn, "service_title", pkg.package_name || "");
 				frappe.model.set_value(cdt, cdn, "correction_code", pkg.correction_code || "");
 				frappe.model.set_value(cdt, cdn, "applicable_model", pkg.applicable_model || "");
+				frappe.model.set_value(cdt, cdn, "applicable_generation", pkg.applicable_generation || "");
 				frappe.model.set_value(cdt, cdn, "is_flat_rate", pkg.is_flat_rate ? 1 : 0);
 				frappe.model.set_value(cdt, cdn, "is_mobile_capable", pkg.is_mobile_capable ? 1 : 0);
 				frappe.model.set_value(cdt, cdn, "tesla_manual_url", pkg.tesla_manual_url || "");
