@@ -48,6 +48,10 @@ from ism.ism.doctype.repair_order.pricing import (
 	save_service_row_as_package,
 )
 from ism.ism.naming import generate_safe_series_name
+from ism.utils.vehicle_display import (
+	format_vehicle_display,
+	validate_repair_vehicle_ready_for_check_in,
+)
 
 
 class RepairOrder(Document):
@@ -183,6 +187,9 @@ class RepairOrder(Document):
 			frappe.throw(_("Vehicle is mandatory for Repair Order."), frappe.MandatoryError)
 		if not frappe.db.exists("Repair Vehicle", self.vehicle):
 			frappe.throw(_("Repair Vehicle {0} does not exist.").format(self.vehicle))
+		if self.status == "Checked In" or (self.is_new() and self.status != "Cancelled"):
+			validate_repair_vehicle_ready_for_check_in(self.vehicle)
+		self.vehicle_display = format_vehicle_display(self.vehicle)[:140]
 
 	def _validate_odometer(self):
 		if self.odometer_in is None or self.odometer_in == "":

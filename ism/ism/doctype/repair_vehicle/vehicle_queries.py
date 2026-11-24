@@ -10,6 +10,7 @@ from frappe.utils import cint, flt
 from ism.api._validation import escape_like
 from ism.ism.doctype.repair_vehicle.vin_decoder import decode_tesla_vin, normalize_vin_string
 from ism.utils.tesla_manual import get_tesla_manual_url_for_vehicle
+from ism.utils.vehicle_display import build_vehicle_display_dict
 
 
 def _ensure_optional_str(value: Any, label: str) -> Optional[str]:
@@ -108,6 +109,8 @@ def build_vehicle_search_results(
 			"`tabRepair Vehicle`.name LIKE %s OR `tabRepair Vehicle`.vin LIKE %s "
 			"OR `tabRepair Vehicle`.vin LIKE %s "
 			"OR IFNULL(`tabRepair Vehicle`.license_plate, '') LIKE %s "
+			"OR IFNULL(`tabRepair Vehicle`.color, '') LIKE %s "
+			"OR IFNULL(`tabRepair Vehicle`.display_title, '') LIKE %s "
 			"OR IFNULL(`tabRepair Vehicle`.model, '') LIKE %s "
 			"OR IFNULL(`tabRepair Vehicle`.customer, '') LIKE %s "
 			"OR IFNULL(c.customer_name, '') LIKE %s "
@@ -119,7 +122,7 @@ def build_vehicle_search_results(
 			")"
 			")"
 		)
-		params.extend([like_q, like_q, like_norm, like_q, like_q, like_q, like_q, like_q, like_q])
+		params.extend([like_q, like_q, like_norm, like_q, like_q, like_q, like_q, like_q, like_q, like_q, like_q])
 
 	where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 	params.append(safe_limit)
@@ -128,7 +131,8 @@ def build_vehicle_search_results(
 		f"""
 		SELECT
 			`tabRepair Vehicle`.name, `tabRepair Vehicle`.vin, `tabRepair Vehicle`.license_plate,
-			`tabRepair Vehicle`.color, `tabRepair Vehicle`.customer, c.customer_name,
+			`tabRepair Vehicle`.color, `tabRepair Vehicle`.display_title,
+			`tabRepair Vehicle`.customer, c.customer_name,
 			`tabRepair Vehicle`.is_valid_vin, `tabRepair Vehicle`.manufacturer,
 			`tabRepair Vehicle`.model, `tabRepair Vehicle`.model_year,
 			`tabRepair Vehicle`.body_type, `tabRepair Vehicle`.trim,
@@ -150,6 +154,10 @@ def build_vehicle_search_results(
 	results = []
 	for row in rows:
 		item = dict(row)
+		vinfo = build_vehicle_display_dict(item)
+		item["display_title"] = item.get("display_title") or vinfo["display"]
+		item["vehicle_display"] = vinfo["display"]
+		item["compact_display"] = vinfo["compact_display"]
 		item["recommended_manual_url"] = get_tesla_manual_url_for_vehicle(item)
 		results.append(item)
 	return results
@@ -166,6 +174,7 @@ def build_vehicle_intelligence(vehicle_identifier: str, history_limit: int = 20)
 	service_history = _collect_vehicle_service_history(vdoc.name, safe_limit)
 	deferred_summary = _summarize_deferred_services(vdoc)
 	manual_url = get_tesla_manual_url_for_vehicle(vdoc)
+	vinfo = build_vehicle_display_dict(vdoc)
 
 	return {
 		"vehicle": {
@@ -174,6 +183,9 @@ def build_vehicle_intelligence(vehicle_identifier: str, history_limit: int = 20)
 			"is_valid_vin": cint(vdoc.is_valid_vin),
 			"license_plate": vdoc.license_plate or "",
 			"color": vdoc.color or "",
+			"display_title": vdoc.display_title or vinfo["display"],
+			"vehicle_display": vinfo["display"],
+			"compact_display": vinfo["compact_display"],
 			"customer": vdoc.customer or "",
 			"manufacturer": vdoc.manufacturer or "",
 			"model": vdoc.model or "",
@@ -192,6 +204,8 @@ def build_vehicle_intelligence(vehicle_identifier: str, history_limit: int = 20)
 			"next_service_odometer": cint(vdoc.next_service_odometer),
 			"next_service_date": str(vdoc.next_service_date) if vdoc.next_service_date else None,
 		},
+		"vehicle_display": vinfo["display"],
+		"compact_display": vinfo["compact_display"],
 		"vin_decode": decode_tesla_vin(vdoc.vin),
 		"recommended_manual_url": manual_url,
 		"owners": owners,

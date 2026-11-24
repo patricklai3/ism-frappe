@@ -53,6 +53,8 @@ frappe.ui.form.on('Schedule Entry', {
 		frm.toggle_display('provisional_vehicle_info', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_info));
 		frm.toggle_display('provisional_vehicle_model', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_model));
 		frm.toggle_display('provisional_vehicle_year', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_year));
+		frm.toggle_display('provisional_vehicle_color', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_color));
+		frm.toggle_display('provisional_license_plate', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_license_plate));
 		frm.toggle_display('provisional_vin_or_plate', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vin_or_plate));
 	},
 
@@ -64,37 +66,78 @@ frappe.ui.form.on('Schedule Entry', {
 				}, __('Navigate'));
 			} else {
 				frm.add_custom_button(__('Create Repair Order'), function () {
-					frappe.prompt(
-						[
-							{
-								fieldname: 'odometer_in',
-								fieldtype: 'Int',
-								label: __('Intake Odometer (km)'),
-								reqd: 1,
+					const open_create_ro_prompt = (default_color, default_plate) => {
+						frappe.prompt(
+							[
+								{
+									fieldname: 'odometer_in',
+									fieldtype: 'Int',
+									label: __('Intake Odometer (km)'),
+									reqd: 1,
+								},
+								{
+									fieldname: 'vehicle_color',
+									fieldtype: 'Data',
+									label: __('Vehicle Color'),
+									reqd: 1,
+									default: default_color || '',
+								},
+								{
+									fieldname: 'license_plate',
+									fieldtype: 'Data',
+									label: __('License Plate'),
+									reqd: 1,
+									default: default_plate || '',
+								},
+							],
+							function (values) {
+								const clean_color = String(values.vehicle_color || '').trim().replace(/\s+/g, ' ');
+								const clean_plate = String(values.license_plate || '').trim().replace(/\s+/g, ' ').toUpperCase();
+								frappe.call({
+									method: 'ism.api.scheduling.create_repair_order_from_schedule_entry',
+									args: {
+										schedule_entry: frm.doc.name,
+										odometer_in: values.odometer_in,
+										vehicle_color: clean_color,
+										license_plate: clean_plate,
+									},
+									freeze: true,
+									freeze_message: __('Creating Repair Order...'),
+									callback: (r) => {
+										if (r.message && r.message.repair_order) {
+											frappe.show_alert({
+												message: __('Repair Order {0} created.', [r.message.repair_order]),
+												indicator: 'green',
+											});
+											frappe.set_route('Form', 'Repair Order', r.message.repair_order);
+										}
+									},
+								});
 							},
-						],
-						function (values) {
-							frappe.call({
-								method: 'ism.api.scheduling.create_repair_order_from_schedule_entry',
-								args: {
-									schedule_entry: frm.doc.name,
-									odometer_in: values.odometer_in,
-								},
-								freeze: true,
-								freeze_message: __('Creating Repair Order...'),
-								callback: (r) => {
-									if (r.message && r.message.repair_order) {
-										frappe.show_alert({
-											message: __('Repair Order {0} created.', [r.message.repair_order]),
-											indicator: 'green',
-										});
-										frappe.set_route('Form', 'Repair Order', r.message.repair_order);
-									}
-								},
-							});
-						},
-						__('Create Repair Order')
-					);
+							__('Create Repair Order')
+						);
+					};
+
+					const fallback_color = frm.doc.provisional_vehicle_color || '';
+					const raw_legacy = String(frm.doc.provisional_vin_or_plate || '').trim();
+					const legacy_plate = raw_legacy && !(raw_legacy.length === 17 && /^[A-Za-z0-9]+$/.test(raw_legacy)) ? raw_legacy.toUpperCase() : '';
+					const fallback_plate = (frm.doc.provisional_license_plate || legacy_plate || '').toUpperCase();
+
+					if (frm.doc.repair_vehicle) {
+						frappe.db.get_value(
+							'Repair Vehicle',
+							frm.doc.repair_vehicle,
+							['color', 'license_plate'],
+							(r) => {
+								open_create_ro_prompt(
+									(r && r.color) || fallback_color,
+									(r && r.license_plate) || fallback_plate
+								);
+							}
+						);
+					} else {
+						open_create_ro_prompt(fallback_color, fallback_plate);
+					}
 				});
 			}
 		}

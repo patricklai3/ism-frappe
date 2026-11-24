@@ -32,6 +32,12 @@ from ism.ism.doctype.repair_vehicle.vin_decoder import (
 	get_hardware_generation,
 	normalize_vin_string,
 )
+from ism.utils.vehicle_display import (
+	format_vehicle_display,
+	normalize_license_plate,
+	normalize_vehicle_color,
+	require_vehicle_intake_fields,
+)
 
 __all__ = [
 	"ALL_WMI",
@@ -68,7 +74,88 @@ class RepairVehicle(Document):
 		if self.vin and getattr(self, "_normalized_vin_done", None) != self.vin:
 			self.normalize_vin()
 		self.decode_vin()
+		self.color = normalize_vehicle_color(self.color)
+		self.license_plate = normalize_license_plate(self.license_plate)
+		self.color, self.license_plate = require_vehicle_intake_fields(
+			color=self.color,
+			license_plate=self.license_plate,
+			context="Repair Vehicle intake",
+		)
+		self.display_title = format_vehicle_display(self)[:140]
 		self.sync_customers()
+
+	def on_update(self):
+		if self.flags.in_insert or not self.get_doc_before_save():
+			return
+		display_fields = ("display_title", "color", "license_plate", "model", "model_year")
+		if any(self.has_value_changed(field) for field in display_fields):
+			self._propagate_vehicle_display()
+
+	def _propagate_vehicle_display(self):
+		"""Propagate updated human-friendly vehicle display to linked ROs, Schedule Entries, and Board Threads."""
+		new_display = (self.display_title or format_vehicle_display(self))[:140]
+
+		if frappe.db.table_exists("Repair Order") and frappe.db.has_column("Repair Order", "vehicle_display"):
+			frappe.db.sql(
+				"""
+				UPDATE `tabRepair Order`
+				SET `vehicle_display` = %s
+				WHERE `vehicle` = %s AND IFNULL(`vehicle_display`, '') != %s
+				""",
+				(new_display, self.name, new_display),
+			)
+
+		if frappe.db.table_exists("Schedule Entry"):
+			entries = frappe.get_all(
+				"Schedule Entry",
+				filters={"repair_vehicle": self.name},
+				fields=["name", "customer", "provisional_customer_name", "title"],
+				ignore_permissions=True,
+			)
+			if entries:
+				cust_ids = list({e.customer for e in entries if e.customer})
+				cust_map = {}
+				if cust_ids:
+					cust_rows = frappe.get_all(
+						"Customer",
+						filters={"name": ["in", cust_ids]},
+						fields=["name", "customer_name"],
+						ignore_permissions=True,
+					)
+					cust_map = {c.name: (c.customer_name or c.name) for c in cust_rows}
+				for se in entries:
+					cust_label = (
+						cust_map.get(se.customer)
+						or se.customer
+						or se.provisional_customer_name
+						or "Guest"
+					)
+					new_title = f"{cust_label} | {new_display}"[:140]
+					if se.title != new_title:
+						frappe.db.set_value("Schedule Entry", se.name, "title", new_title, update_modified=False)
+
+		if frappe.db.table_exists("Shop Board Thread"):
+			has_vd_col = frappe.db.has_column("Shop Board Thread", "vehicle_display")
+			thread_fields = ["name", "repair_order", "bay", "title"]
+			if has_vd_col:
+				thread_fields.append("vehicle_display")
+			threads = frappe.get_all(
+				"Shop Board Thread",
+				filters={"vehicle": self.name},
+				fields=thread_fields,
+				ignore_permissions=True,
+			)
+			for thread in threads:
+				updates = {}
+				if has_vd_col and thread.get("vehicle_display") != new_display:
+					updates["vehicle_display"] = new_display
+				if thread.get("repair_order"):
+					title_parts = [p for p in (thread.get("repair_order"), new_display, thread.get("bay")) if p]
+					new_thread_title = " · ".join(title_parts)[:140]
+					if thread.get("title") != new_thread_title:
+						updates["title"] = new_thread_title
+				if updates:
+					frappe.db.set_value("Shop Board Thread", thread["name"], updates, update_modified=False)
 
 	def normalize_vin(self):
 		if self.vin:

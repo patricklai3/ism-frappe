@@ -374,7 +374,9 @@ def query_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters,
 	v = frappe.qb.DocType("Repair Vehicle")
 	search_cond = (
 		(v.name.like(txt_pattern))
+		| (v.display_title.like(txt_pattern))
 		| (v.license_plate.like(txt_pattern))
+		| (v.color.like(txt_pattern))
 		| (v.vin.like(txt_pattern))
 		| (v.model.like(txt_pattern))
 	)
@@ -388,14 +390,14 @@ def query_filtered_vehicles(doctype, txt, searchfield, start, page_len, filters,
 			frappe.qb.from_(v)
 			.left_join(vc)
 			.on(vc.parent == v.name)
-			.select(v.name, v.license_plate, v.manufacturer, v.model, v.model_year)
+			.select(v.name, v.display_title, v.license_plate, v.color, v.manufacturer, v.model, v.model_year)
 			.distinct()
 			.where(((v.customer == customer) | (vc.customer == customer)) & search_cond)
 		)
 	else:
 		query = (
 			frappe.qb.from_(v)
-			.select(v.name, v.license_plate, v.manufacturer, v.model, v.model_year)
+			.select(v.name, v.display_title, v.license_plate, v.color, v.manufacturer, v.model, v.model_year)
 			.where(search_cond)
 		)
 
@@ -542,14 +544,13 @@ def _maybe_send_ready_for_pickup_sms(ro) -> None:
 		if not phone:
 			return
 
-		vehicle_display = ro.vehicle or _("your vehicle")
-		if ro.vehicle:
-			v_info = frappe.db.get_value(
-				"Repair Vehicle", ro.vehicle, ["model", "license_plate"], as_dict=True
-			)
-			if v_info:
-				parts = [v_info.model, f"({v_info.license_plate})" if v_info.license_plate else ""]
-				vehicle_display = " ".join(p for p in parts if p).strip() or vehicle_display
+		from ism.utils.vehicle_display import format_vehicle_display
+
+		vehicle_display = (
+			format_vehicle_display(ro.vehicle, fallback=_("your vehicle"))
+			if ro.vehicle
+			else _("your vehicle")
+		)
 
 		customer_name = getattr(ro, "customer_name", None) or ro.customer or _("Customer")
 		sms_text = _("Hello {0}, your {1} (Repair Order {2}) is ready for pickup.").format(

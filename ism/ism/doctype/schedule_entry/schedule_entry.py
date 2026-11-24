@@ -94,43 +94,40 @@ class ScheduleEntry(Document):
 		return "Guest"
 
 	def get_display_vehicle(self) -> str:
-		"""Returns linked Repair Vehicle title/model/plate, or provisional vehicle info."""
+		"""Returns linked Repair Vehicle display (year, color, model, plate), or provisional vehicle info."""
+		from ism.utils.vehicle_display import format_vehicle_display
+
 		if self.repair_vehicle:
-			v = frappe.db.get_value(
-				"Repair Vehicle",
-				self.repair_vehicle,
-				["model_year", "manufacturer", "model", "license_plate", "vin"],
-				as_dict=True,
+			return format_vehicle_display(self.repair_vehicle, fallback=self.repair_vehicle)
+
+		has_structured = any(
+			[
+				cint(getattr(self, "provisional_vehicle_year", 0) or 0) > 0,
+				(getattr(self, "provisional_vehicle_model", None) or "").strip(),
+				(getattr(self, "provisional_vehicle_color", None) or "").strip(),
+				(getattr(self, "provisional_license_plate", None) or "").strip(),
+				(getattr(self, "provisional_vin_or_plate", None) or "").strip(),
+			]
+		)
+		if has_structured:
+			return format_vehicle_display(
+				{
+					"provisional_vehicle_year": getattr(self, "provisional_vehicle_year", None),
+					"provisional_vehicle_model": getattr(self, "provisional_vehicle_model", None),
+					"provisional_vehicle_color": getattr(self, "provisional_vehicle_color", None),
+					"provisional_license_plate": getattr(self, "provisional_license_plate", None),
+					"provisional_vin_or_plate": getattr(self, "provisional_vin_or_plate", None),
+				},
+				fallback=self.provisional_vehicle_info or "",
 			)
-			if v:
-				parts = [str(v.get(k)) for k in ["model_year", "model"] if v.get(k)]
-				if parts:
-					plate = v.get("license_plate")
-					if plate:
-						return f"{' '.join(parts)} ({plate})"
-					return " ".join(parts)
-				if v.get("vin"):
-					return v.get("vin")
-			return self.repair_vehicle
 		if self.provisional_vehicle_info:
 			return self.provisional_vehicle_info
-		parts = []
-		year = cint(getattr(self, "provisional_vehicle_year", 0) or 0)
-		if year > 0:
-			parts.append(str(year))
-		model = (getattr(self, "provisional_vehicle_model", None) or "").strip()
-		if model:
-			parts.append(model)
-		vin_or_plate = (getattr(self, "provisional_vin_or_plate", None) or "").strip()
-		if parts:
-			label = " ".join(parts)
-			return f"{label} ({vin_or_plate})" if vin_or_plate else label
-		if vin_or_plate:
-			return vin_or_plate
 		return ""
 
 	def _normalize_provisional_fields(self):
 		"""Trim leading/trailing whitespace on provisional intake text fields."""
+		from ism.utils.vehicle_display import normalize_license_plate, normalize_vehicle_color
+
 		for fieldname in (
 			"provisional_customer_name",
 			"provisional_phone",
@@ -142,6 +139,11 @@ class ScheduleEntry(Document):
 			val = getattr(self, fieldname, None)
 			if isinstance(val, str):
 				setattr(self, fieldname, val.strip())
+
+		if hasattr(self, "provisional_vehicle_color") and isinstance(self.provisional_vehicle_color, str):
+			self.provisional_vehicle_color = normalize_vehicle_color(self.provisional_vehicle_color) or ""
+		if hasattr(self, "provisional_license_plate") and isinstance(self.provisional_license_plate, str):
+			self.provisional_license_plate = normalize_license_plate(self.provisional_license_plate) or ""
 
 	def _normalize_reschedule_count(self):
 		"""Default reschedule_count to 0 and reject negative values."""

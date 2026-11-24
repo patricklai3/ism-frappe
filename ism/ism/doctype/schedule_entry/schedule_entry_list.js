@@ -5,6 +5,7 @@ frappe.provide("frappe.listview_settings");
 
 frappe.listview_settings["Schedule Entry"] = {
 	add_fields: [
+		"title",
 		"scheduled_date",
 		"scheduled_time",
 		"estimated_duration",
@@ -12,6 +13,7 @@ frappe.listview_settings["Schedule Entry"] = {
 		"assigned_technician",
 		"customer",
 		"repair_vehicle",
+		"provisional_vehicle_info",
 		"repair_order",
 		"status",
 	],
@@ -48,6 +50,21 @@ frappe.listview_settings["Schedule Entry"] = {
 		estimated_duration: function (val) {
 			if (val === null || val === undefined) return "";
 			return `<span style="font-family: monospace; font-size: 11px;">${val} min</span>`;
+		},
+
+		repair_vehicle: function (val, df, doc) {
+			let label = "";
+			if (doc && doc.title && doc.title.includes(" | ")) {
+				label = doc.title.split(" | ").slice(1).join(" | ").trim();
+			}
+			label = label || (doc && doc.provisional_vehicle_info) || val || "";
+			if (!label) return "";
+			const safe_label = frappe.utils.escape_html(label);
+			if (val && val !== label) {
+				const safe_vin = frappe.utils.escape_html(val);
+				return `<span title="VIN: ${safe_vin}">${safe_label}</span>`;
+			}
+			return safe_label;
 		},
 	},
 

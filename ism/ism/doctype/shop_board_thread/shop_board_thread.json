@@ -12,6 +12,7 @@
   "cb_identity",
   "repair_order",
   "vehicle",
+  "vehicle_display",
   "vin",
   "customer",
   "sec_floor",
@@ -78,6 +79,14 @@
    "fieldtype": "Link",
    "label": "Vehicle",
    "options": "Repair Vehicle"
+  },
+  {
+   "fieldname": "vehicle_display",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Vehicle Display",
+   "length": 140,
+   "read_only": 1
   },
   {
    "fieldname": "vin",
@@ -175,7 +184,7 @@
   }
  ],
  "links": [],
- "modified": "2026-11-22 00:00:00.000000",
+ "modified": "2026-11-24 02:15:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Shop Board Thread",

@@ -38,6 +38,8 @@
   "last_rescheduled_at",
   "provisional_vehicle_model",
   "provisional_vehicle_year",
+  "provisional_vehicle_color",
+  "provisional_license_plate",
   "provisional_vin_or_plate",
   "booked_packages_json",
   "section_break_portal_link",
@@ -286,6 +288,18 @@
   },
   {
    "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_vehicle_color",
+   "fieldtype": "Data",
+   "label": "Provisional Vehicle Color"
+  },
+  {
+   "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_license_plate",
+   "fieldtype": "Data",
+   "label": "Provisional License Plate"
+  },
+  {
+   "depends_on": "eval:!doc.repair_vehicle",
    "fieldname": "provisional_vin_or_plate",
    "fieldtype": "Data",
    "label": "Provisional VIN / Plate"
@@ -413,7 +427,7 @@
  "index_web_pages_for_search": 1,
  "is_calendar_and_gantt": 1,
  "links": [],
- "modified": "2026-11-22 05:05:00.000000",
+ "modified": "2026-11-24 02:15:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Schedule Entry",

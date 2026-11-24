@@ -1078,6 +1078,149 @@ function open_manage_parts_dialog(frm, initial_row_name = null) {
 	fetch_live_stock();
 }
 
+const RO_VEHICLE_FIELDS = [
+	"customer",
+	"manufacturer",
+	"model",
+	"model_year",
+	"color",
+	"license_plate",
+	"vin",
+	"display_title",
+];
+
+function format_ro_vehicle_fallback(v = {}) {
+	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.format === "function") {
+		return window.ISMVehicleDisplay.format(v, { includeVin: false });
+	}
+	const clean = (val) => String(val || "").trim().replace(/\s+/g, " ");
+	const year = clean(v.model_year);
+	const color = clean(v.color);
+	const model = clean(v.model) || clean(v.manufacturer);
+	const plate = clean(v.license_plate).toUpperCase();
+	const base = [year, color, model].filter(Boolean).join(" ");
+	if (base && plate) return `${base} (${plate})`;
+	if (base) return base;
+	if (plate) return plate;
+	return clean(v.display_title) || clean(v.vin) || "";
+}
+
+function render_ro_vehicle_strip_html(v = {}) {
+	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.renderHtml === "function") {
+		return window.ISMVehicleDisplay.renderHtml(v, { showVin: true });
+	}
+	const esc = frappe.utils.escape_html;
+	const parts = [];
+	if (v.model_year) parts.push(`<span class="ism-veh__year">${esc(String(v.model_year))}</span>`);
+	if (v.color) parts.push(`<span class="ism-veh__color">${esc(String(v.color))}</span>`);
+	if (v.model || v.manufacturer) {
+		parts.push(`<span class="ism-veh__model">${esc(String(v.model || v.manufacturer))}</span>`);
+	}
+	if (v.license_plate) {
+		parts.push(`<span class="ism-veh__plate">(${esc(String(v.license_plate).toUpperCase())})</span>`);
+	}
+	if (v.vin) {
+		parts.push(`<span class="ism-veh__vin text-muted">· VIN: ${esc(String(v.vin))}</span>`);
+	}
+	const inner = parts.length ? parts.join(" ") : esc(format_ro_vehicle_fallback(v) || __("Vehicle"));
+	return `<span class="ism-veh">${inner}</span>`;
+}
+
+function open_update_vehicle_intake_dialog(frm, vehicle_info = {}) {
+	if (!frm.doc.vehicle) return;
+	frappe.prompt(
+		[
+			{
+				fieldname: "color",
+				fieldtype: "Data",
+				label: __("Vehicle Color"),
+				reqd: 1,
+				default: vehicle_info.color || "",
+			},
+			{
+				fieldname: "license_plate",
+				fieldtype: "Data",
+				label: __("License Plate"),
+				reqd: 1,
+				default: vehicle_info.license_plate || "",
+			},
+		],
+		(values) => {
+			const clean_color = String(values.color || "").trim().replace(/\s+/g, " ");
+			const clean_plate = String(values.license_plate || "").trim().replace(/\s+/g, " ").toUpperCase();
+			frappe.call({
+				method: "frappe.client.set_value",
+				args: {
+					doctype: "Repair Vehicle",
+					name: frm.doc.vehicle,
+					fieldname: {
+						color: clean_color,
+						license_plate: clean_plate,
+					},
+				},
+				freeze: true,
+				freeze_message: __("Updating vehicle details..."),
+				callback: (r) => {
+					if (r.exc) return;
+					frappe.show_alert({
+						message: __("Vehicle color and license plate updated."),
+						indicator: "green",
+					});
+					if (!frm.is_new()) {
+						frm.reload_doc();
+					} else {
+						refresh_ro_vehicle_summary(frm, { sync_display: true });
+					}
+				},
+			});
+		},
+		__("Set Vehicle Color & License Plate"),
+		__("Save")
+	);
+}
+
+function refresh_ro_vehicle_summary(frm, options = {}) {
+	frm.set_intro("");
+	frm.remove_custom_button(__("Set Vehicle Color & Plate"));
+	if (!frm.doc.vehicle) return;
+
+	const requested_vehicle = frm.doc.vehicle;
+	frappe.db.get_value("Repair Vehicle", requested_vehicle, RO_VEHICLE_FIELDS, (r) => {
+		if (!r || frm.doc.vehicle !== requested_vehicle) return;
+
+		if (options.sync_customer && !frm.doc.customer && r.customer) {
+			frm.set_value("customer", r.customer);
+		}
+		if (options.sync_display) {
+			const display = (r.display_title || format_ro_vehicle_fallback(r)).slice(0, 140);
+			if (display && frm.doc.vehicle_display !== display) {
+				frm.set_value("vehicle_display", display);
+			}
+		}
+
+		const missing = [];
+		if (!String(r.color || "").trim()) missing.push(__("Color"));
+		if (!String(r.license_plate || "").trim()) missing.push(__("License Plate"));
+
+		const strip_html = render_ro_vehicle_strip_html(r);
+		if (missing.length) {
+			const warn_text = __("Missing required intake details: {0}.", [missing.join(", ")]);
+			frm.set_intro(
+				`<div class="ism-ro-vehicle-intro"><strong>${__("Vehicle")}:</strong> ${strip_html}<div class="mt-1">${frappe.utils.escape_html(warn_text)}</div></div>`,
+				"orange"
+			);
+			frm.add_custom_button(__("Set Vehicle Color & Plate"), () => {
+				open_update_vehicle_intake_dialog(frm, r);
+			});
+		} else {
+			frm.set_intro(
+				`<div class="ism-ro-vehicle-intro"><strong>${__("Vehicle")}:</strong> ${strip_html}</div>`,
+				"blue"
+			);
+		}
+	});
+}
+
 frappe.ui.form.on("Repair Order", {
 	setup(frm) {
 		frm.set_query("vehicle", () => ({
@@ -1096,6 +1239,7 @@ frappe.ui.form.on("Repair Order", {
 		frm.trigger("setup_fast_action_bar");
 		frm.trigger("setup_pin_to_drive_controls");
 		frm.trigger("setup_navigation_buttons");
+		refresh_ro_vehicle_summary(frm);
 	},
 
 	update_tab_visibility(frm) {
@@ -1537,18 +1681,14 @@ frappe.ui.form.on("Repair Order", {
 	},
 
 	vehicle(frm) {
-		if (!frm.doc.vehicle) return;
+		if (!frm.doc.vehicle) {
+			frm.set_value("vehicle_display", "");
+			frm.set_intro("");
+			frm.remove_custom_button(__("Set Vehicle Color & Plate"));
+			return;
+		}
 
-		frappe.db.get_value(
-			"Repair Vehicle",
-			frm.doc.vehicle,
-			["customer", "manufacturer", "model", "license_plate"],
-			(r) => {
-				if (r && !frm.doc.customer && r.customer) {
-					frm.set_value("customer", r.customer);
-				}
-			}
-		);
+		refresh_ro_vehicle_summary(frm, { sync_customer: true, sync_display: true });
 	},
 });
 
