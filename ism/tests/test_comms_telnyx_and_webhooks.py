@@ -661,3 +661,60 @@ class TestCommsTelnyxAndWebhooks(ISMTestCase):
 			self.assertEqual(legacy["error"], "Unsupported SMS provider: Twilio")
 		finally:
 			frappe.db.set_single_value("ISM Settings", "sms_gateway_provider", "Disabled")
+
+	def test_inbound_keyword_full_body_matching_and_conversational_replies(self):
+		"""CH-471: match exact single-word and canonical two-word keywords without false-positiving conversational replies."""
+		priv, raw_b64_pub, _pem_pub = _generate_ed25519_keypair()
+		now = int(time.time())
+		self._configure_settings(
+			sms_gateway_provider="Mock (Deterministic Test)",
+			telnyx_webhook_public_key=raw_b64_pub,
+			sms_enforce_opt_out=1,
+		)
+
+		def _send_inbound(phone_num: str, evt_id: str, text: str) -> tuple[int, dict]:
+			body = json.dumps(
+				{
+					"data": {
+						"id": evt_id,
+						"event_type": "message.received",
+						"payload": {
+							"id": f"msg_{evt_id}",
+							"from": {"phone_number": phone_num},
+							"to": [{"phone_number": "+14165550100"}],
+							"text": text,
+						},
+					}
+				}
+			).encode("utf-8")
+			return self._invoke_webhook(body, _sign_ed25519(priv, body, now))
+
+		# Conversational replies starting with CANCEL/YES must NOT trigger opt-out or opt-in
+		conv_phone = "+14165550171"
+		code, resp = _send_inbound(conv_phone, "evt_conv_cancel", "CANCEL my appointment")
+		self.assertEqual(code, 200)
+		self.assertEqual(resp["action"], "inbound_logged")
+		self.assertFalse(is_phone_opted_out(conv_phone))
+
+		# Opt out with STOP!, then verify "YES, 3pm works" does NOT re-opt-in
+		code, resp = _send_inbound(conv_phone, "evt_stop_bang", "STOP!")
+		self.assertEqual(code, 200)
+		self.assertEqual(resp["action"], "opted_out")
+		self.assertEqual(resp["keyword"], "STOP")
+		self.assertTrue(is_phone_opted_out(conv_phone))
+
+		code, resp = _send_inbound(conv_phone, "evt_conv_yes", "YES, 3pm works")
+		self.assertEqual(code, 200)
+		self.assertEqual(resp["action"], "inbound_logged")
+		self.assertTrue(is_phone_opted_out(conv_phone))
+
+		# Canonical two-word and hyphenated opt-out phrases MUST opt out
+		for idx, (phrase, expected_kw) in enumerate(
+			[("OPT OUT", "OPTOUT"), ("OPT-OUT", "OPTOUT"), ("STOP ALL", "STOPALL")]
+		):
+			p = f"+1416555017{idx + 2}"
+			c, r = _send_inbound(p, f"evt_kw_{idx}", phrase)
+			self.assertEqual(c, 200)
+			self.assertEqual(r["action"], "opted_out")
+			self.assertEqual(r["keyword"], expected_kw)
+			self.assertTrue(is_phone_opted_out(p))

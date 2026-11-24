@@ -54,6 +54,21 @@ _SYNC_STATUS_MANUAL_REVIEW = "Manual Review Required"
 _AMOUNT_TOLERANCE = 0.01
 _MAX_PROCESSED_WEBHOOK_IDS = 500
 _CARD_LAST4_RE = re.compile(r"^\d{4}$")
+_TERMINAL_TX_STATUSES = frozenset({
+	TX_STATUS_POSTED,
+	TX_STATUS_FAILED,
+	TX_STATUS_VOIDED,
+	TX_STATUS_PARTIALLY_REFUNDED,
+	TX_STATUS_REFUNDED,
+	TX_STATUS_RECONCILIATION_ERROR,
+})
+_REFUND_STATUS_PRECEDENCE: dict[str, int] = {
+	"UNKNOWN": 0,
+	"PENDING": 1,
+	"FAILED": 2,
+	"REJECTED": 2,
+	"COMPLETED": 3,
+}
 
 _SENSITIVE_MSG_PATTERNS = (
 	(re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;\"']+"), r"\1[REDACTED]"),
@@ -1109,11 +1124,16 @@ def reconcile_and_post_square_payment(
 		return _build_charge_result(tx)
 
 	if sq_status_upper in ("PENDING", "APPROVED"):
-		if tx.payment_entry or tx.status == TX_STATUS_POSTED:
+		if tx.payment_entry or tx.status in _TERMINAL_TX_STATUSES:
+			reason = (
+				f"Payment Entry {tx.payment_entry} is already posted"
+				if tx.payment_entry
+				else f"transaction is already in terminal status '{tx.status}'"
+			)
 			tx.append_audit_entry(
 				source=source,
 				event_type=webhook_event_type or "payment.pending.ignored",
-				summary=f"Ignored {sq_status_upper} update because Payment Entry {tx.payment_entry} is already posted.",
+				summary=f"Ignored {sq_status_upper} update because {reason}.",
 				event_id=webhook_event_id,
 				status_before=status_before,
 				status_after=tx.status,
@@ -1215,6 +1235,7 @@ def _handle_refund_webhook_event(tx_name: str, event: WebhookEventNormalized) ->
 
 	refund_id = _clean_str(event.get("refund_id"))
 	refund_status = (_clean_str(event.get("refund_status")) or "UNKNOWN").upper()
+	refund_currency = (_clean_str(event.get("currency")) or "").upper()
 	raw_refund_cents = event.get("refund_amount_cents")
 	refund_cents = (
 		int(raw_refund_cents)
@@ -1222,14 +1243,61 @@ def _handle_refund_webhook_event(tx_name: str, event: WebhookEventNormalized) ->
 		else 0
 	)
 
+	status_before = tx.status
+	if refund_currency != SQUARE_CURRENCY:
+		tx.erpnext_sync_status = _SYNC_STATUS_MANUAL_REVIEW
+		summary = (
+			f"Ignored non-{SQUARE_CURRENCY} Square refund {refund_id or '(unknown)'} "
+			f"({refund_status}, currency={refund_currency or 'MISSING'}). "
+			f"Total completed refunds remains ${flt(tx.refunded_amount, 2):.2f} {SQUARE_CURRENCY}."
+		)
+		tx.append_audit_entry(
+			source="webhook",
+			event_type=event_type,
+			summary=summary,
+			event_id=event_id,
+			status_before=status_before,
+			status_after=tx.status,
+		)
+		tx.save(ignore_permissions=True)
+		_emit_payment_alert(
+			ro_name=tx.repair_order,
+			tx_name=tx.name,
+			square_payment_id=tx.square_payment_id,
+			kind="refund",
+			title=f"Non-{SQUARE_CURRENCY} Square Refund Requires Review ({tx.repair_order})",
+			priority="High",
+			details=summary,
+			payment_intent=tx.payment_intent,
+			tx_status=tx.status,
+			amount=tx.amount,
+			payment_entry=tx.payment_entry or None,
+		)
+		frappe.db.commit()
+		return {
+			"status": "processed",
+			"event_id": event_id,
+			"event_type": event_type,
+			"transaction": tx.name,
+			"tx_status": tx.status,
+			"refunded_amount": flt(tx.refunded_amount, 2),
+			"erpnext_sync_status": tx.erpnext_sync_status,
+		}
+
 	refunds = [r for r in _load_json_list(tx.refund_ids_json) if isinstance(r, dict)]
 	if refund_id:
 		updated = False
+		incoming_rank = _REFUND_STATUS_PRECEDENCE.get(refund_status, 0)
 		for entry in refunds:
 			if entry.get("refund_id") == refund_id:
-				entry["amount_cents"] = refund_cents
-				entry["status"] = refund_status
-				entry["updated_at"] = str(now_datetime())
+				existing_status = str(entry.get("status") or "UNKNOWN").upper()
+				existing_rank = _REFUND_STATUS_PRECEDENCE.get(existing_status, 0)
+				# Monotonic precedence: never regress COMPLETED or downgrade higher-precedence states
+				if existing_status != "COMPLETED" and incoming_rank >= existing_rank:
+					entry["amount_cents"] = refund_cents
+					entry["status"] = refund_status
+					entry["currency"] = refund_currency
+					entry["updated_at"] = str(now_datetime())
 				updated = True
 				break
 		if not updated:
@@ -1237,6 +1305,7 @@ def _handle_refund_webhook_event(tx_name: str, event: WebhookEventNormalized) ->
 				"refund_id": refund_id,
 				"amount_cents": refund_cents,
 				"status": refund_status,
+				"currency": refund_currency,
 				"updated_at": str(now_datetime()),
 			})
 	tx.refund_ids_json = json.dumps(refunds)
@@ -1245,10 +1314,10 @@ def _handle_refund_webhook_event(tx_name: str, event: WebhookEventNormalized) ->
 		int(r.get("amount_cents") or 0)
 		for r in refunds
 		if str(r.get("status") or "").upper() == "COMPLETED"
+		and (r.get("currency") is None or str(r.get("currency")).upper() == SQUARE_CURRENCY)
 	)
 	tx.refunded_amount = cents_to_cad(completed_refund_cents)
 
-	status_before = tx.status
 	if completed_refund_cents > 0:
 		if completed_refund_cents >= int(tx.amount_cents):
 			tx.status = TX_STATUS_REFUNDED

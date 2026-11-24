@@ -29,6 +29,7 @@ from ism.payments.contracts import (
 	TX_STATUS_POSTED,
 	TX_STATUS_RECONCILIATION_ERROR,
 	TX_STATUS_REFUNDED,
+	TX_STATUS_VOIDED,
 	WebhookEventNormalized,
 )
 from ism.payments.erpnext_bridge import (
@@ -974,3 +975,101 @@ class TestPaymentsErpnextBridge(ISMTestCase):
 		self.assertEqual(alerts[0].priority, "Critical")
 		self.assertEqual(alerts[0].category, "General")
 		self.assertEqual(alerts[0].source, "Agent")
+
+	def test_11_monotonic_refund_and_terminal_status_webhook_guards(self):
+		"""CH-469: out-of-order refunds, non-CAD refunds, and delayed PENDING/APPROVED webhooks never regress state."""
+		ro = self._create_ro()
+		self._set_deposit_request(ro, 100.0)
+		paid = execute_tokenized_payment(
+			ro.name,
+			INTENT_MANUAL_DEPOSIT,
+			"mock_tok_ok",
+			idempotency_key=f"mono-{uuid.uuid4().hex[:16]}",
+			square_client=_FakeSquareClient(),
+		)
+		self.track("ISM Payment Transaction", paid["transaction"])
+		self.track("Payment Entry", paid["payment_entry"])
+		sq_id = paid["square_payment_id"]
+
+		# (a) Non-CAD refund must NOT be credited to CAD refunded_amount
+		usd_ref = process_square_webhook_event({
+			"event_id": "evt_ref_usd_1",
+			"event_type": "refund.updated",
+			"square_payment_id": sq_id,
+			"refund_id": "ref_usd_1",
+			"refund_status": "COMPLETED",
+			"refund_amount_cents": 5000,
+			"currency": "USD",
+			"ignored": False,
+		})
+		self.assertEqual(flt(usd_ref["refunded_amount"], 2), 0.0)
+		self.assertEqual(usd_ref["tx_status"], TX_STATUS_POSTED)
+
+		# (b) Out-of-order refund.created (PENDING) arriving after refund.updated (COMPLETED)
+		ref_comp = process_square_webhook_event({
+			"event_id": "evt_ref_comp_1",
+			"event_type": "refund.updated",
+			"square_payment_id": sq_id,
+			"refund_id": "ref_ooo_1",
+			"refund_status": "COMPLETED",
+			"refund_amount_cents": 4000,
+			"currency": "cad",
+			"ignored": False,
+		})
+		self.assertEqual(ref_comp["tx_status"], TX_STATUS_PARTIALLY_REFUNDED)
+		self.assertEqual(flt(ref_comp["refunded_amount"], 2), 40.0)
+
+		ref_stale = process_square_webhook_event({
+			"event_id": "evt_ref_stale_pending_1",
+			"event_type": "refund.created",
+			"square_payment_id": sq_id,
+			"refund_id": "ref_ooo_1",
+			"refund_status": "PENDING",
+			"refund_amount_cents": 4000,
+			"currency": SQUARE_CURRENCY,
+			"ignored": False,
+		})
+		self.assertEqual(ref_stale["tx_status"], TX_STATUS_PARTIALLY_REFUNDED)
+		self.assertEqual(flt(ref_stale["refunded_amount"], 2), 40.0)
+		tx = frappe.get_doc("ISM Payment Transaction", paid["transaction"])
+		refund_entries = json.loads(tx.refund_ids_json or "[]")
+		self.assertEqual(refund_entries[0]["status"], "COMPLETED")
+
+		# (c) Delayed PENDING / APPROVED webhook must NOT resurrect any terminal transaction status
+		terminal_statuses = (
+			TX_STATUS_FAILED,
+			TX_STATUS_VOIDED,
+			TX_STATUS_REFUNDED,
+			TX_STATUS_PARTIALLY_REFUNDED,
+			TX_STATUS_RECONCILIATION_ERROR,
+		)
+		for idx, term_status in enumerate(terminal_statuses):
+			term_tx = frappe.get_doc({
+				"doctype": "ISM Payment Transaction",
+				"repair_order": ro.name,
+				"customer": ro.customer,
+				"company": ro.company,
+				"payment_intent": INTENT_MANUAL_DEPOSIT,
+				"status": term_status,
+				"erpnext_sync_status": "Not Posted",
+				"amount": 25.0,
+				"amount_cents": 2500,
+				"currency": SQUARE_CURRENCY,
+				"idempotency_key": f"term-{idx}-{uuid.uuid4().hex[:12]}",
+				"square_payment_id": f"sq_term_{idx}_{uuid.uuid4().hex[:8]}",
+			}).insert(ignore_permissions=True)
+			self.track("ISM Payment Transaction", term_tx.name)
+			frappe.db.commit()
+
+			delayed_sq_status = "PENDING" if idx % 2 == 0 else "APPROVED"
+			res = reconcile_and_post_square_payment(
+				term_tx.name,
+				{"id": term_tx.square_payment_id, "status": delayed_sq_status},
+				source="webhook",
+				webhook_event_id=f"evt_delayed_{idx}_{uuid.uuid4().hex[:8]}",
+				webhook_event_type="payment.updated",
+			)
+			self.assertTrue(res["idempotent_replay"])
+			self.assertEqual(res["status"], term_status)
+			term_tx.reload()
+			self.assertEqual(term_tx.status, term_status)

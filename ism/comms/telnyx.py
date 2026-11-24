@@ -26,11 +26,11 @@ from ism.comms.contracts import (
 	TELNYX_MESSAGES_ENDPOINT,
 	TELNYX_OPT_OUT_ERROR_CODES,
 	SMSDispatchRequest,
+	normalize_inbound_sms_keyword,
 	normalize_phone_e164,
 	redact_otp_body,
 )
 
-_KEYWORD_CLEAN_RE = re.compile(r"[^A-Z0-9]+")
 _MAX_SANITIZED_PAYLOAD_LEN = 4000
 _MAX_ERROR_MESSAGE_LEN = 500
 _DEFAULT_HELP_REPLY_TEXT = "Reply STOP to unsubscribe from SMS alerts, or call the shop for assistance."
@@ -615,8 +615,7 @@ def _process_inbound_message_event(
 		to_phone = str(to_entries[0].get("phone_number") or "").strip() or None
 
 	raw_text = str(inner.get("text") or "").strip()
-	first_token = raw_text.split()[0].upper() if raw_text else ""
-	keyword = _KEYWORD_CLEAN_RE.sub("", first_token)
+	keyword = normalize_inbound_sms_keyword(raw_text)
 
 	configured_provider = (getattr(settings, "sms_gateway_provider", None) or "Telnyx").strip()
 	log_provider = configured_provider if configured_provider in SUPPORTED_SMS_PROVIDERS else "Telnyx"

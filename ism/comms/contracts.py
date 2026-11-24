@@ -26,7 +26,14 @@ STOP_KEYWORDS: frozenset[str] = frozenset(
 )
 START_KEYWORDS: frozenset[str] = frozenset({"START", "UNSTOP", "YES"})
 HELP_KEYWORDS: frozenset[str] = frozenset({"HELP", "INFO"})
+MULTIWORD_KEYWORD_CANONICALS: dict[str, str] = {
+	"OPT OUT": "OPTOUT",
+	"STOP ALL": "STOPALL",
+}
 TELNYX_OPT_OUT_ERROR_CODES: frozenset[str] = frozenset({"40300", "40008"})
+
+_KEYWORD_NON_ALNUM_SPACE_RE = re.compile(r"[^A-Z0-9\s]+")
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
 
 _BLOCKED_SMS_HOSTS: frozenset[str] = frozenset({"metadata.google.internal", "169.254.169.254"})
 _E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
@@ -138,6 +145,18 @@ class SMSProvider(Protocol):
 	def validate_config(self, settings: Any) -> str | None: ...
 
 	def send(self, phone_e164: str, body: str, settings: Any, *, http_post: Any = None) -> dict[str, Any]: ...
+
+
+def normalize_inbound_sms_keyword(raw_text: str | None) -> str:
+	"""Normalize full trimmed inbound SMS body for exact TCPA/CTIA keyword matching."""
+	trimmed = str(raw_text or "").strip().upper()
+	if not trimmed:
+		return ""
+	cleaned = _KEYWORD_NON_ALNUM_SPACE_RE.sub("", trimmed)
+	collapsed = _WHITESPACE_RUN_RE.sub(" ", cleaned).strip()
+	if not collapsed:
+		return ""
+	return MULTIWORD_KEYWORD_CANONICALS.get(collapsed, collapsed)
 
 
 def normalize_phone_e164(raw_phone: str, default_country_code: str = "+1") -> str:
