@@ -12,6 +12,7 @@ import frappe
 from frappe import _
 
 from ism.api import board as board_api
+from ism.board.contracts import parse_ro_from_thread_key
 from ism.board.gateways import resolve_actor_role
 from ism.board.projections import resolve_thread_key
 from ism.utils.web_security import apply_page_security_headers, compute_asset_version
@@ -43,20 +44,28 @@ def _build_login_redirect() -> str:
 	return f"/login?redirect-to={quote(target, safe='')}"
 
 
-def _resolve_initial_thread_key() -> tuple[str | None, str | None]:
-	raw_thread = (
-		frappe.form_dict.get("thread_key")
-		or frappe.form_dict.get("thread")
-		or ""
-	)
-	raw_ro = (
-		frappe.form_dict.get("ro")
-		or frappe.form_dict.get("repair_order")
-		or ""
-	)
+def _get_request_param(key: str) -> str:
+	val = None
+	try:
+		form_dict = getattr(frappe, "form_dict", None)
+		if form_dict is not None:
+			val = form_dict.get(key)
+	except Exception:
+		val = None
+	if not val:
+		try:
+			req = getattr(frappe, "request", None)
+			args = getattr(req, "args", None) if req is not None else None
+			if args is not None:
+				val = args.get(key)
+		except Exception:
+			val = None
+	return unquote(str(val)).strip() if val else ""
 
-	thread_val = unquote(str(raw_thread)).strip() if raw_thread else None
-	ro_val = unquote(str(raw_ro)).strip() if raw_ro else None
+
+def _resolve_initial_thread_key() -> tuple[str | None, str | None]:
+	thread_val = _get_request_param("thread_key") or _get_request_param("thread") or None
+	ro_val = _get_request_param("ro") or _get_request_param("repair_order") or None
 	if not thread_val and not ro_val:
 		return None, None
 
@@ -91,6 +100,18 @@ def get_context(context):
 		context.actor_role = "UNAUTHORIZED"
 		context.boot_json = "{}"
 		return
+
+	if actor_role == "TECH":
+		target_ro = _get_request_param("ro") or _get_request_param("repair_order")
+		if not target_ro:
+			raw_thread = _get_request_param("thread_key") or _get_request_param("thread")
+			if raw_thread:
+				target_ro = parse_ro_from_thread_key(raw_thread) or ""
+		if target_ro:
+			frappe.local.flags.redirect_location = f"/tech?ro={quote(target_ro, safe='')}&view=board"
+		else:
+			frappe.local.flags.redirect_location = "/tech"
+		raise frappe.Redirect
 
 	can_manage = actor_role == "MANAGER"
 	can_access_cockpit = actor_role == "MANAGER"

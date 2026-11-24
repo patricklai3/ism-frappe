@@ -282,6 +282,19 @@ class TestAuthAndRoles(ISMTestCase):
 		advisor = self._create_test_user("test_ism_adv", "ISM Service Advisor")
 		tech = self._create_test_user("test_ism_tech", "ISM Technician")
 		mgr = self._create_test_user("test_ism_mgr", "ISM Manager")
+		tech_emp = frappe.get_doc({
+			"doctype": "Employee",
+			"first_name": "Test ISM Tech",
+			"employee_name": "Test ISM Tech",
+			"status": "Active",
+			"designation": "Technician",
+			"company": self.get_manifest().company,
+			"gender": "Male",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"user_id": tech,
+		}).insert(ignore_permissions=True)
+		self.track(tech_emp)
 
 		# Repair Order DocType-level permissions
 		self.assertTrue(frappe.has_permission("Repair Order", "create", user=advisor))
@@ -323,6 +336,11 @@ class TestAuthAndRoles(ISMTestCase):
 			],
 			status="Authorized - In Progress",
 			approval_status="Approved",
+		)
+		self.create_test_schedule_entry(
+			repair_order=ro.name,
+			assigned_technician=tech_emp.name,
+			status="Confirmed",
 		)
 
 		frappe.set_user(advisor)

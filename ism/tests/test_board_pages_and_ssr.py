@@ -127,31 +127,33 @@ class TestBoardAndCockpitPagesSSR(ISMTestCase):
 		ctx_cockpit = frappe._dict()
 		with self.assertRaises(frappe.Redirect):
 			cockpit_page.get_context(ctx_cockpit)
-		self.assertEqual(frappe.local.flags.redirect_location, "/board")
+		self.assertEqual(frappe.local.flags.redirect_location, "/tech")
 
-	def test_technician_authorized_on_board_and_redirected_from_cockpit(self) -> None:
+	def test_technician_redirected_to_tech_from_board_and_cockpit(self) -> None:
 		tech_user = self._create_user_with_roles("board_tech_ssr", ["ISM Technician"])
 		frappe.set_user(tech_user)
 
 		self._attach_request("/board")
 		ctx_board = frappe._dict()
-		board_page.get_context(ctx_board)
-		self.assertTrue(ctx_board.authorized)
-		self.assertEqual(ctx_board.actor_role, "TECH")
-		self.assertFalse(ctx_board.can_approve)
-		self.assertFalse(ctx_board.can_access_cockpit)
-		self.assertTrue(bool(ctx_board.asset_version))
-		boot = json.loads(ctx_board.boot_json)
-		self.assertEqual(boot["actor_role"], "TECH")
-		self.assertFalse(boot["can_access_cockpit"])
-		self.assertIn("socketio_port", boot)
+		with self.assertRaises(frappe.Redirect):
+			board_page.get_context(ctx_board)
+		self.assertEqual(frappe.local.flags.redirect_location, "/tech")
 		self._assert_security_headers(ctx_board.response_headers)
 
+		frappe.local.flags.pop("redirect_location", None)
+		self._attach_request("/board?thread=RO%3ARO-TEST-001")
+		ctx_board_deep = frappe._dict()
+		with self.assertRaises(frappe.Redirect):
+			board_page.get_context(ctx_board_deep)
+		self.assertEqual(frappe.local.flags.redirect_location, "/tech?ro=RO-TEST-001&view=board")
+		self._assert_security_headers(ctx_board_deep.response_headers)
+
+		frappe.local.flags.pop("redirect_location", None)
 		self._attach_request("/cockpit")
 		ctx_cockpit = frappe._dict()
 		with self.assertRaises(frappe.Redirect):
 			cockpit_page.get_context(ctx_cockpit)
-		self.assertEqual(frappe.local.flags.redirect_location, "/board")
+		self.assertEqual(frappe.local.flags.redirect_location, "/tech")
 
 	def test_manager_and_advisor_live_website_response_headers_assets_and_socketio(self) -> None:
 		advisor_user = self._create_user_with_roles("board_adv_ssr", ["ISM Service Advisor"])

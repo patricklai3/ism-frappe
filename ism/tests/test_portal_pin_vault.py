@@ -311,6 +311,24 @@ class TestPortalPinVault(ISMTestCase):
 		self._track_action_items_for_ro(ro.name)
 
 		tech_user = self._create_test_user("pin_tech", "ISM Technician")
+		tech_emp = frappe.get_doc({
+			"doctype": "Employee",
+			"first_name": "Pin Tech",
+			"employee_name": "Pin Tech",
+			"status": "Active",
+			"designation": "Technician",
+			"company": self.get_manifest().company,
+			"gender": "Male",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"user_id": tech_user,
+		}).insert(ignore_permissions=True)
+		self.track(tech_emp)
+		self.create_test_schedule_entry(
+			repair_order=ro.name,
+			assigned_technician=tech_emp.name,
+			status="Confirmed",
+		)
 		advisor_user = self._create_test_user("pin_advisor", "ISM Service Advisor")
 		manager_user = self._create_test_user("pin_mgr", "ISM Manager")
 		sysmgr_user = self._create_test_user("pin_sysmgr", "System Manager")

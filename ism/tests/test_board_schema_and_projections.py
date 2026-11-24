@@ -599,7 +599,7 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 		ro = self._create_ro()
 		thread_key = ro_thread_key(ro.name)
 
-		# 1. RO-linked Shop Action Item projects SYSTEM pill onto RO:<id>
+		# 1. RO-linked Shop Action Item stays in /cockpit without projecting STATE_MUTATION pill onto RO:<id>
 		sai_ro = frappe.get_doc(
 			{
 				"doctype": "Shop Action Item",
@@ -608,6 +608,7 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 				"priority": "High",
 				"status": "Open",
 				"source": "Agent",
+				"dedup_key": f"portal:approval:{ro.name}",
 				"reference_doctype": "Repair Order",
 				"reference_name": ro.name,
 				"details": "Signed via Customer Portal",
@@ -620,22 +621,13 @@ class TestBoardSchemaAndProjections(ISMTestCase):
 			{"idempotency_key": f"action_item:{sai_ro.name}"},
 			"name",
 		)
-		self.assertIsNotNone(ev_name)
-		self.track("Shop Board Event", ev_name)
-		ev = frappe.get_doc("Shop Board Event", ev_name)
-		self.assertEqual(ev.thread, thread_key)
-		self.assertEqual(ev.actor_type, "SYSTEM")
-		self.assertEqual(ev.payload_type, "STATE_MUTATION")
-		meta = json.loads(ev.metadata_json)
-		self.assertEqual(meta["action_item"], sai_ro.name)
-
-		# Idempotent re-invocation returns same event without duplicating
-		dup_name = on_shop_action_item_after_insert(sai_ro)
-		self.assertEqual(dup_name, ev_name)
+		self.assertIsNone(ev_name)
+		self.assertIsNone(on_shop_action_item_after_insert(sai_ro))
 		self.assertEqual(
-			frappe.db.count("Shop Board Event", {"idempotency_key": f"action_item:{sai_ro.name}"}),
-			1,
+			frappe.db.count("Shop Board Event", {"thread": thread_key, "payload_type": "STATE_MUTATION"}),
+			0,
 		)
+		self.assertTrue(frappe.db.exists("Shop Action Item", sai_ro.name))
 
 		# 2. Unlinked Schedule Entry Shop Action Item creates ZERO board thread/event
 		se = self.create_test_schedule_entry(

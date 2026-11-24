@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+	<meta name="referrer" content="no-referrer" />
+	<meta name="theme-color" content="#0b0f17" />
+	<meta name="apple-mobile-web-app-capable" content="yes" />
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+	<meta name="mobile-web-app-capable" content="yes" />
+	<title>{{ title or "ISM Technician Workbench" }}</title>
+	<link rel="icon" href="data:," />
+	<link rel="stylesheet" href="/assets/ism/board/board.css?v={{ asset_version or '1' }}" />
+	<link rel="stylesheet" href="/assets/ism/tech/tech.css?v={{ asset_version or '1' }}" />
+</head>
+<body class="shop-os-body tech-body">
+	<header class="shop-os-nav" role="banner">
+		<div class="shop-os-nav__left">
+			<a class="shop-os-nav__brand" href="/tech">ISM Shop OS</a>
+			<nav class="shop-os-nav__tabs" aria-label="Shop OS views">
+				<a class="shop-os-nav__tab is-active" href="/tech" aria-current="page">My Jobs</a>
+				{% if can_manage %}
+				<a class="shop-os-nav__tab" href="/board">Board</a>
+				{% endif %}
+				{% if can_access_cockpit %}
+				<a class="shop-os-nav__tab" href="/cockpit">Cockpit</a>
+				{% endif %}
+			</nav>
+		</div>
+		<div class="shop-os-nav__right">
+			<div class="shop-os-nav__shortcuts" aria-label="Quick links">
+				<a class="shop-os-nav__pill" href="/app/ism">Desk</a>
+			</div>
+			<div class="shop-os-nav__user" title="{{ user_full_name }}">
+				<span class="shop-os-nav__user-name">{{ user_full_name }}</span>
+				<span class="shop-os-nav__role-badge">{{ actor_role }}</span>
+			</div>
+		</div>
+	</header>
+
+	{% if not authorized %}
+	<main class="board-unauth">
+		<section class="board-unauth__card" role="alert">
+			<h1>Access Restricted</h1>
+			<p>{{ error_message or "Your account does not have permission to open the Technician Workbench." }}</p>
+			<div class="board-unauth__actions">
+				<a class="btn btn-primary" href="/app">Go to Desk</a>
+				<a class="btn btn-ghost" href="/login">Switch Account</a>
+			</div>
+		</section>
+	</main>
+	{% else %}
+	<div id="offline-banner" class="board-offline-banner is-hidden" role="status" aria-live="polite">
+		<span id="offline-banner-text">Connection interrupted. Retrying sync...</span>
+		<button type="button" id="offline-retry-btn" class="btn btn-sm btn-amber">Retry</button>
+	</div>
+
+	<div id="tech-shell" class="tech-shell" data-active-layer="L1">
+		<!-- LAYER 1: My Assigned Jobs (Left rail on >=960px, full-screen on mobile) -->
+		<aside id="tech-layer-1" class="tech-rail" aria-label="My Assigned Jobs">
+			<div class="tech-rail__header">
+				<div class="tech-rail__title-row">
+					<h1 class="tech-rail__heading">
+						<span>My Assigned Jobs</span>
+						<span id="tech-total-count" class="tech-rail__count">(0)</span>
+					</h1>
+					<button type="button" id="tech-refresh-jobs-btn" class="btn btn-sm btn-ghost" title="Refresh jobs" aria-label="Refresh jobs">&#8635;</button>
+				</div>
+
+				<div class="tech-tabs" role="tablist" aria-label="Job status filter">
+					<button type="button" id="tab-active-jobs" class="tech-tab is-active" data-tab="ACTIVE" role="tab" aria-selected="true">
+						Active (<span id="tab-active-count">0</span>)
+					</button>
+					<button type="button" id="tab-completed-jobs" class="tech-tab" data-tab="COMPLETED" role="tab" aria-selected="false">
+						Completed (<span id="tab-completed-count">0</span>)
+					</button>
+				</div>
+
+				<div class="tech-rail__hint">Assigned approved ROs &amp; diagnostics only</div>
+
+				<input
+					type="search"
+					id="tech-job-search"
+					class="board-search-input tech-rail__search"
+					placeholder="Filter plate, vehicle, RO, bay..."
+					autocomplete="off"
+				/>
+			</div>
+
+			<div id="tech-jobs-scroll" class="tech-rail__scroll">
+				<div id="tech-jobs-list" class="tech-jobs-list"></div>
+			</div>
+		</aside>
+
+		<!-- RIGHT PANE: Layer 2 (Execution / Diagnostic) OR Layer 3 (Exception Chat Board) -->
+		<main id="tech-main" class="tech-main">
+			<!-- LAYER 2: RO Execution or Pre-RO Diagnostic Schedule Entry -->
+			<section id="tech-layer-2" class="tech-layer-2" aria-label="Job execution workspace">
+				<div id="tech-l2-empty" class="tech-empty-panel">
+					<div class="tech-empty-panel__card">
+						<h2>Select an Assigned Job</h2>
+						<p>Choose an approved Repair Order or Diagnostic appointment from My Assigned Jobs to begin.</p>
+					</div>
+				</div>
+
+				<div id="tech-l2-loading" class="tech-empty-panel is-hidden">
+					<div class="tech-empty-panel__card">
+						<p id="tech-l2-loading-text">Loading job details...</p>
+					</div>
+				</div>
+
+				<!-- LAYER 2A: Unlinked Diagnostic Schedule Entry -->
+				<div id="tech-se-view" class="tech-detail-scroll is-hidden"></div>
+
+				<!-- LAYER 2B: Approved Repair Order Execution -->
+				<div id="tech-ro-view" class="tech-detail-scroll is-hidden"></div>
+			</section>
+
+			<!-- LAYER 3: Exception Chat Board (one layer below RO Execution) -->
+			<section id="tech-layer-3" class="tech-layer-3 is-hidden" aria-label="Exception Chat Board">
+				<header class="tech-l3-header">
+					<div class="tech-l3-header__left">
+						<button type="button" id="tech-l3-back-btn" class="btn btn-sm btn-ghost tech-back-btn">
+							&larr; Back to RO Checklist
+						</button>
+						<div class="tech-l3-header__titles">
+							<h2 id="tech-l3-title" class="tech-l3-title">Exception Board</h2>
+							<div id="tech-l3-subtitle" class="tech-l3-subtitle"></div>
+						</div>
+					</div>
+					<div class="tech-l3-header__right">
+						<span id="tech-l3-status-badge" class="andon-badge andon-badge--ACTIVE">ACTIVE</span>
+						<span id="tech-l3-blocked-timer" class="andon-timer is-hidden" aria-live="off"></span>
+						<button type="button" id="tech-l3-sync-btn" class="btn btn-sm btn-ghost" title="Sync thread">Sync</button>
+					</div>
+				</header>
+
+				<div class="tech-l3-info-banner" role="note">
+					<span class="tech-info-icon" aria-hidden="true">i</span>
+					<span><strong>Exceptions &amp; Escalations Only</strong> &mdash; Routine approvals &amp; PINs never appear here.</span>
+				</div>
+
+				<section id="tech-timeline-scroll" class="board-timeline-scroll" aria-label="Exception timeline">
+					<div id="tech-load-more-wrap" class="load-more-wrap is-hidden">
+						<button type="button" id="tech-load-more-btn" class="btn btn-sm btn-ghost">Load Earlier Events</button>
+					</div>
+					<div id="tech-timeline-list" class="timeline-list">
+						<div class="timeline-empty">Loading exception board...</div>
+					</div>
+					<div id="tech-ai-status-bar" class="ai-status-bar is-hidden" role="status" aria-live="polite"></div>
+				</section>
+
+				<section id="tech-capture-dock" class="capture-dock" aria-label="Report blocker, missing part, or supplement">
+					<div id="tech-capture-readonly-banner" class="capture-readonly-banner is-hidden" role="status"></div>
+					<div id="tech-intent-pills" class="intent-pills" role="group" aria-label="Exception intent tags"></div>
+					<div id="tech-capture-notice" class="capture-notice is-hidden" role="status"></div>
+					<div id="tech-photo-tray" class="photo-tray is-hidden" aria-label="Staged photos"></div>
+					<div id="tech-upload-progress" class="upload-progress is-hidden">
+						<div id="tech-upload-progress-fill" class="upload-progress__fill"></div>
+						<span id="tech-upload-progress-label" class="upload-progress__label">Uploading 0%</span>
+					</div>
+					<div id="tech-ptt-recording-bar" class="ptt-recording-bar is-hidden" role="status" aria-live="polite">
+						<span class="ptt-dot" aria-hidden="true"></span>
+						<span id="tech-ptt-timer" class="ptt-timer">00:00</span>
+						<span class="ptt-hint">Recording voice note...</span>
+						<button type="button" id="tech-ptt-cancel-btn" class="btn btn-sm btn-danger">Cancel</button>
+						<button type="button" id="tech-ptt-stop-send-btn" class="btn btn-sm btn-primary">Send Voice</button>
+					</div>
+					<div class="capture-row">
+						<button
+							type="button"
+							id="tech-ptt-btn"
+							class="capture-btn capture-btn--ptt"
+							title="Hold or tap to record voice note"
+							aria-label="Push to talk voice note"
+						>
+							<span class="capture-btn__icon" aria-hidden="true">&#127908;</span>
+							<span class="capture-btn__label">PTT</span>
+						</button>
+
+						<label class="capture-btn capture-btn--cam" for="tech-camera-input" title="Take or attach photos">
+							<span class="capture-btn__icon" aria-hidden="true">&#128247;</span>
+							<span class="capture-btn__label">Cam</span>
+							<input
+								type="file"
+								id="tech-camera-input"
+								accept="image/*"
+								capture="environment"
+								multiple
+								class="sr-only"
+							/>
+						</label>
+
+						<textarea
+							id="tech-capture-text"
+							class="capture-input"
+							rows="1"
+							placeholder="Report blocker, missing part, or supplement..."
+							aria-label="Exception message text"
+						></textarea>
+
+						<button
+							type="button"
+							id="tech-send-btn"
+							class="capture-btn capture-btn--send"
+							aria-label="Send exception update"
+						>
+							Send
+						</button>
+					</div>
+				</section>
+			</section>
+		</main>
+	</div>
+
+	<div id="photo-lightbox" class="lightbox is-hidden" role="dialog" aria-modal="true" aria-label="Photo preview">
+		<button type="button" id="lightbox-close" class="lightbox__close" aria-label="Close photo">&times;</button>
+		<img id="lightbox-img" class="lightbox__img" src="" alt="Captured inspection media" />
+	</div>
+
+	<div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+	<script>
+		window.ISM_TECH_BOOT = {{ boot_json | safe }};
+		window.frappe = window.frappe || {};
+		if (window.ISM_TECH_BOOT && window.ISM_TECH_BOOT.csrf_token) {
+			window.frappe.csrf_token = window.ISM_TECH_BOOT.csrf_token;
+		}
+	</script>
+	<script src="/assets/ism/board/vendor/socket.io.min.js?v={{ asset_version or '1' }}"></script>
+	<script type="module" src="/assets/ism/tech/app.js?v={{ asset_version or '1' }}"></script>
+	{% endif %}
+</body>
+</html>

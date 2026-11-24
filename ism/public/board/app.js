@@ -552,6 +552,25 @@ function renderAndonHeader() {
 	if (t.vin) chips.push(`VIN: ${t.vin}`);
 	if (t.customer) chips.push(t.customer);
 	if (state.roSummary && state.roSummary.status) chips.push(state.roSummary.status);
+	if (state.roSummary) {
+		const locRaw = String(state.roSummary.vehicle_location || "");
+		const locShort =
+			locRaw === "In Bay / Being Serviced"
+				? "In Bay"
+				: locRaw === "In Customer Lot"
+				? "In Lot"
+				: locRaw === "Completed / Parked in Lot"
+				? "Parked (Done)"
+				: locRaw;
+		const approvedCnt =
+			state.roSummary.approved_count ?? state.roSummary.total_services ?? null;
+		const completedCnt =
+			state.roSummary.completed_count ?? state.roSummary.completed_services ?? null;
+		const hasTasks = approvedCnt !== null && Number(approvedCnt) >= 0;
+		const taskPart = hasTasks ? `${Number(completedCnt || 0)}/${Number(approvedCnt)} tasks` : "";
+		const execLabel = [locShort, taskPart].filter(Boolean).join(" · ");
+		if (execLabel) chips.push(execLabel);
+	}
 	el.andonMeta.innerHTML = chips.map((c) => `<span class="meta-chip">${escapeHtml(c)}</span>`).join("");
 
 	if (t.blocked_reason) {
@@ -1101,6 +1120,12 @@ function init() {
 			}
 		},
 		onThreadSummary: (payload) => {
+			if (
+				boot.actor_role === "TECH" &&
+				(!boot.tech_id || !payload || payload.assigned_technician !== boot.tech_id)
+			) {
+				return;
+			}
 			upsertThreadSummary(payload);
 		},
 		onCatchUpSync: () => {

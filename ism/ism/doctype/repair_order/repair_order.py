@@ -145,6 +145,15 @@ class RepairOrder(Document):
 				_("Only Administrators and System Managers are allowed to delete Repair Orders."),
 				frappe.PermissionError,
 			)
+		if frappe.db.exists("DocType", "Shop Board Thread"):
+			linked_threads = frappe.get_all(
+				"Shop Board Thread",
+				filters={"repair_order": self.name},
+				pluck="name",
+			)
+			for t_name in linked_threads:
+				if not frappe.db.exists("Shop Board Event", {"thread": t_name}):
+					frappe.delete_doc("Shop Board Thread", t_name, force=True, ignore_permissions=True)
 
 	def submit(self):
 		"""Save for non-submittable Repair Order to preserve API compatibility."""
@@ -237,9 +246,14 @@ class RepairOrder(Document):
 		return pick_up_ro_vehicle(self)
 
 	@frappe.whitelist()
-	def park_vehicle(self):
+	def park_vehicle(self, odometer_out=None, require_odometer=False, temporary=False):
 		"""Technician parks vehicle back in lot."""
-		return park_ro_vehicle(self)
+		return park_ro_vehicle(
+			self,
+			odometer_out=odometer_out,
+			require_odometer=require_odometer,
+			temporary=temporary,
+		)
 
 	@frappe.whitelist()
 	def toggle_service_completion(self, service_row_id=None, is_completed=None, **kwargs):
