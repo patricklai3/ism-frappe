@@ -142,13 +142,21 @@ function renderCaptureCard(event, { onOpenLightbox }) {
 		: "";
 
 	const meta = event.metadata || {};
-	const stampParts = [];
-	if (meta.bay_id) stampParts.push(`Bay: ${meta.bay_id}`);
-	if (meta.vin) stampParts.push(`VIN: ${meta.vin}`);
-	if (meta.tech_id) stampParts.push(`Tech: ${meta.tech_id}`);
+	const stampHtmlParts = [];
+	if (meta.bay_id) stampHtmlParts.push(`<span>${escapeHtml(`Bay: ${meta.bay_id}`)}</span>`);
+	const vehStampHtml = window.ISMVehicleDisplay
+		? window.ISMVehicleDisplay.renderHtml(meta.vehicle_info || meta, {
+				showVin: true,
+				fallback: "",
+		  })
+		: meta.vin
+			? `<span>${escapeHtml(`VIN: ${meta.vin}`)}</span>`
+			: "";
+	if (vehStampHtml) stampHtmlParts.push(vehStampHtml);
+	if (meta.tech_id) stampHtmlParts.push(`<span>${escapeHtml(`Tech: ${meta.tech_id}`)}</span>`);
 
-	const stampHtml = stampParts.length
-		? `<div class="event-card__meta-stamp">${stampParts.map((s) => `<span>${escapeHtml(s)}</span>`).join("")}</div>`
+	const stampHtml = stampHtmlParts.length
+		? `<div class="event-card__meta-stamp">${stampHtmlParts.join("")}</div>`
 		: "";
 
 	el.innerHTML = `

@@ -1789,3 +1789,48 @@ a:hover {
 	opacity: 0.45;
 	pointer-events: none;
 }
+
+/* Vehicle display integration in Board rail & Andon header */
+.thread-item__veh {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--shop-text);
+}
+
+.thread-item__sep {
+	opacity: 0.45;
+	flex: 0 0 auto;
+}
+
+.meta-chip--vehicle {
+	display: inline-flex;
+	align-items: center;
+	max-width: 100%;
+	min-width: 0;
+}
+
+.meta-chip--vin {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-weight: 500;
+	color: var(--shop-text-muted);
+}
+
+@container (max-width: 680px) {
+	.andon-meta .meta-chip--vin {
+		display: none;
+	}
+}
+
+@media (max-width: 1120px) {
+	.andon-meta .meta-chip--vin {
+		display: none;
+	}
+}
+
+@container (max-width: 420px) {
+	.andon-meta .ism-veh__year,
+	.andon-meta .ism-veh__plate {
+		display: none;
+	}
+}

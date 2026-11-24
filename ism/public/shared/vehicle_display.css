@@ -1,0 +1,131 @@
+/* ==========================================================================
+   ISM Shared Vehicle Display Component
+   Progressive hiding hierarchy under limited space:
+     1st hidden: VIN (.ism-veh__vin)
+     2nd hidden: Year (.ism-veh__year) & License Plate (.ism-veh__plate)
+     Kept visible longest: Color (.ism-veh__color) & Model (.ism-veh__model)
+   ========================================================================== */
+
+.ism-veh {
+	display: inline-flex;
+	align-items: baseline;
+	flex-wrap: nowrap;
+	gap: 0.35em;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	vertical-align: baseline;
+	line-height: 1.3;
+}
+
+.ism-veh__year {
+	flex: 0 0 auto;
+	opacity: 0.85;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.ism-veh__color {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 500;
+}
+
+.ism-veh__model {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 600;
+}
+
+.ism-veh__plate {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	padding: 0.04em 0.42em;
+	border-radius: 4px;
+	font-size: 0.84em;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	background: var(--ism-veh-plate-bg, rgba(148, 163, 184, 0.16));
+	border: 1px solid var(--ism-veh-plate-border, rgba(148, 163, 184, 0.35));
+	color: var(--ism-veh-plate-color, inherit);
+}
+
+.ism-veh__vin {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-size: 0.82em;
+	opacity: 0.72;
+}
+
+.ism-veh__fallback {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Explicit modifier classes */
+.ism-veh--no-vin .ism-veh__vin {
+	display: none;
+}
+
+.ism-veh--compact .ism-veh__year,
+.ism-veh--compact .ism-veh__plate,
+.ism-veh--compact .ism-veh__vin {
+	display: none;
+}
+
+/* Container-query scope ONLY on block / fixed-width / percentage-width wrappers
+   (never on shrink-to-fit inline chips/pills so they never collapse to 0px). */
+.cockpit-job-block,
+.cockpit-action-card,
+.cockpit-card,
+.thread-item,
+.andon-header,
+.event-card,
+.portal-card {
+	container-type: inline-size;
+}
+
+/* Tier 1 — Hide VIN first when container or viewport tightens */
+@container (max-width: 460px) {
+	.ism-veh__vin {
+		display: none;
+	}
+}
+
+@media (max-width: 1120px) {
+	.ism-veh--hide-vin-md .ism-veh__vin {
+		display: none;
+	}
+}
+
+/* Tier 2 — Hide Year & License Plate next, keeping Color + Model visible */
+@container (max-width: 280px) {
+	.ism-veh__year,
+	.ism-veh__plate {
+		display: none;
+	}
+}
+
+@media (max-width: 600px) {
+	.ism-veh--responsive-tight .ism-veh__year,
+	.ism-veh--responsive-tight .ism-veh__plate {
+		display: none;
+	}
+}

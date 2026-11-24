@@ -321,19 +321,28 @@ function upsertThreadSummary(summary) {
 function threadMatchesFilter(thread) {
 	if (state.searchQuery) {
 		const q = state.searchQuery.toLowerCase();
-		const hay = [
-			thread.thread_key,
-			thread.title,
-			thread.repair_order,
-			thread.vin,
-			thread.customer,
-			thread.bay,
-			thread.last_event_preview,
-		]
-			.filter(Boolean)
-			.join(" ")
-			.toLowerCase();
-		if (!hay.includes(q)) return false;
+		const vehMatch =
+			window.ISMVehicleDisplay && window.ISMVehicleDisplay.matchesSearch(thread, q);
+		if (!vehMatch) {
+			const hay = [
+				thread.thread_key,
+				thread.title,
+				thread.repair_order,
+				thread.vehicle_display,
+				thread.vehicle_year,
+				thread.vehicle_model,
+				thread.vehicle_color,
+				thread.license_plate,
+				thread.vin,
+				thread.customer,
+				thread.bay,
+				thread.last_event_preview,
+			]
+				.filter(Boolean)
+				.join(" ")
+				.toLowerCase();
+			if (!hay.includes(q)) return false;
+		}
 	}
 
 	if (state.filter === "CLOSED") {
@@ -363,10 +372,11 @@ function buildThreadItemButton(thread) {
 
 	const displayTitle = thread.title || thread.repair_order || thread.thread_key;
 	const openCount = Number(thread.open_action_count || 0);
-	const subLine =
-		thread.last_event_preview ||
-		[thread.bay, thread.customer, thread.vin].filter(Boolean).join(" · ") ||
-		"No updates yet";
+	const vehHtml = window.ISMVehicleDisplay
+		? window.ISMVehicleDisplay.renderHtml(thread, { showVin: false, fallback: "" })
+		: "";
+	const fallbackMeta = [thread.bay, thread.customer].filter(Boolean).join(" · ");
+	const previewText = thread.last_event_preview || (!vehHtml ? fallbackMeta || "No updates yet" : "");
 
 	btn.innerHTML = `
 		<div class="thread-item__top">
@@ -376,7 +386,14 @@ function buildThreadItemButton(thread) {
 				<span class="status-dot status-dot--${escapeHtml(thread.board_status || "ACTIVE")}" title="${escapeHtml(thread.board_status || "ACTIVE")}"></span>
 			</span>
 		</div>
-		<div class="thread-item__sub">${escapeHtml(subLine)}</div>
+		${
+			vehHtml
+				? `<div class="thread-item__sub thread-item__veh">${vehHtml}${
+						thread.bay ? `<span class="thread-item__sep">·</span><span>${escapeHtml(thread.bay)}</span>` : ""
+				  }</div>`
+				: ""
+		}
+		${previewText ? `<div class="thread-item__sub">${escapeHtml(previewText)}</div>` : ""}
 	`;
 
 	btn.addEventListener("click", () => {
@@ -545,14 +562,32 @@ function renderAndonHeader() {
 
 	el.andonTitle.textContent = t.title || t.thread_key;
 
-	const chips = [];
-	if (t.repair_order) chips.push(`RO: ${t.repair_order}`);
-	if (t.bay) chips.push(`Bay: ${t.bay}`);
-	if (t.assigned_technician) chips.push(`Tech: ${t.assigned_technician}`);
-	if (t.vin) chips.push(`VIN: ${t.vin}`);
-	if (t.customer) chips.push(t.customer);
-	if (state.roSummary && state.roSummary.status) chips.push(state.roSummary.status);
-	el.andonMeta.innerHTML = chips.map((c) => `<span class="meta-chip">${escapeHtml(c)}</span>`).join("");
+	const chipHtml = [];
+	if (t.repair_order) chipHtml.push(`<span class="meta-chip">${escapeHtml(`RO: ${t.repair_order}`)}</span>`);
+	const vehHtml = window.ISMVehicleDisplay
+		? window.ISMVehicleDisplay.renderHtml(t, {
+				showVin: false,
+				extraClass: "ism-veh--responsive-tight",
+				fallback: "",
+		  })
+		: "";
+	if (vehHtml) {
+		chipHtml.push(`<span class="meta-chip meta-chip--vehicle">${vehHtml}</span>`);
+	}
+	if (t.bay) chipHtml.push(`<span class="meta-chip">${escapeHtml(`Bay: ${t.bay}`)}</span>`);
+	if (t.assigned_technician) {
+		chipHtml.push(`<span class="meta-chip">${escapeHtml(`Tech: ${t.assigned_technician}`)}</span>`);
+	}
+	if (t.customer) chipHtml.push(`<span class="meta-chip">${escapeHtml(t.customer)}</span>`);
+	if (state.roSummary && state.roSummary.status) {
+		chipHtml.push(`<span class="meta-chip">${escapeHtml(state.roSummary.status)}</span>`);
+	}
+	if (t.vin) {
+		chipHtml.push(
+			`<span class="meta-chip meta-chip--vin" title="${escapeHtml(`VIN: ${t.vin}`)}">${escapeHtml(`VIN: ${t.vin}`)}</span>`
+		);
+	}
+	el.andonMeta.innerHTML = chipHtml.join("");
 
 	if (t.blocked_reason) {
 		el.andonBlockedReason.textContent = t.blocked_reason;

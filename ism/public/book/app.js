@@ -136,17 +136,97 @@ function initBookingApp() {
 		return state.selectedPackageIds.map((id) => byId.get(id)).filter(Boolean);
 	}
 
+	const VEHICLE_COLOR_PRESETS = [
+		"Pearl White",
+		"Solid Black",
+		"Stealth Grey",
+		"Midnight Silver",
+		"Deep Blue",
+		"Ultra Red",
+		"Quicksilver",
+	];
+	let step1Attempted = false;
+
 	function vehicleSummaryText(state) {
+		if (window.ISMVehicleDisplay) {
+			return window.ISMVehicleDisplay.formatText(state.vehicle, { fallback: "" });
+		}
 		const parts = [];
 		if (state.vehicle.year) parts.push(String(state.vehicle.year));
+		if (state.vehicle.color) parts.push(state.vehicle.color.trim());
 		if (state.vehicle.model) parts.push(state.vehicle.model);
-		return parts.join(" ");
+		const core = parts.join(" ");
+		const plate = (state.vehicle.license_plate || "").trim();
+		return core && plate ? `${core} (${plate})` : core || plate;
+	}
+
+	function renderVehicleDisplayNode(vehicleObj, { showVin = false, extraClass = "ism-veh--responsive-tight" } = {}) {
+		const norm = window.ISMVehicleDisplay
+			? window.ISMVehicleDisplay.normalize(vehicleObj)
+			: {
+					year: vehicleObj && vehicleObj.year ? String(vehicleObj.year) : "",
+					color: (vehicleObj && vehicleObj.color) || "",
+					model: (vehicleObj && vehicleObj.model) || "",
+					manufacturer: (vehicleObj && vehicleObj.manufacturer) || "",
+					plate: (vehicleObj && (vehicleObj.license_plate || vehicleObj.plate)) || "",
+					vin: (vehicleObj && vehicleObj.vin) || "",
+					display: typeof vehicleObj === "string" ? vehicleObj : "",
+			  };
+		const tooltip = window.ISMVehicleDisplay
+			? window.ISMVehicleDisplay.formatTooltip(norm)
+			: vehicleSummaryText({ vehicle: norm });
+		const modelPart = norm.model || norm.manufacturer;
+		const children = [];
+		if (norm.year) children.push(el("span", { className: "ism-veh__year", textContent: norm.year }));
+		if (norm.color) children.push(el("span", { className: "ism-veh__color", textContent: norm.color }));
+		if (modelPart) children.push(el("span", { className: "ism-veh__model", textContent: modelPart }));
+		if (norm.plate) children.push(el("span", { className: "ism-veh__plate", textContent: norm.plate }));
+		if (showVin && norm.vin) {
+			children.push(el("span", { className: "ism-veh__vin", textContent: `VIN: ${norm.vin}` }));
+		}
+		if (!children.length) {
+			const fb = norm.display || norm.vin || "Vehicle";
+			children.push(el("span", { className: "ism-veh__fallback", textContent: fb }));
+		}
+		return el(
+			"span",
+			{
+				className: `ism-veh${extraClass ? ` ${extraClass}` : ""}`,
+				title: tooltip || undefined,
+			},
+			children
+		);
+	}
+
+	function renderVehicleSummaryPill(state) {
+		return el("span", { className: "ism-summary-pill ism-summary-pill--vehicle" }, renderVehicleDisplayNode(state.vehicle));
+	}
+
+	function canProceedStep1(state) {
+		return Boolean(
+			state.vehicle.model &&
+				state.vehicle.color &&
+				state.vehicle.color.trim() &&
+				state.vehicle.license_plate &&
+				state.vehicle.license_plate.trim()
+		);
 	}
 
 	async function loadPackagesForVehicle() {
 		const state = store.getState();
+		step1Attempted = true;
 		if (!state.vehicle.model) {
 			store.setError("Please select your vehicle model to continue.");
+			return;
+		}
+		if (!state.vehicle.color || !state.vehicle.color.trim()) {
+			pendingFocusId = "ism-vehicle-color";
+			store.setError("Please select or enter your vehicle color to continue.");
+			return;
+		}
+		if (!state.vehicle.license_plate || !state.vehicle.license_plate.trim()) {
+			pendingFocusId = "ism-vehicle-plate";
+			store.setError("Please enter your license plate number to continue.");
 			return;
 		}
 		store.clearError();
@@ -194,6 +274,9 @@ function initBookingApp() {
 	}
 
 	function buildBookingRequestPayload(state) {
+		const color = (state.vehicle.color || "").trim();
+		const licensePlate = (state.vehicle.license_plate || "").trim().toUpperCase();
+		const vin = (state.vehicle.vin || "").trim().toUpperCase();
 		return {
 			package_ids: state.selectedPackageIds,
 			target_date: state.selectedSlot ? state.selectedSlot.date : "",
@@ -203,7 +286,10 @@ function initBookingApp() {
 			email: state.customer.email.trim() || undefined,
 			vehicle_model: state.vehicle.model || undefined,
 			vehicle_year: state.vehicle.year || undefined,
-			vin_or_plate: state.vehicle.vin_or_plate.trim() || undefined,
+			vehicle_color: color || undefined,
+			license_plate: licensePlate || undefined,
+			vin: vin || undefined,
+			vin_or_plate: vin || licensePlate || undefined,
 			notes: state.customer.notes.trim() || undefined,
 			waiter_preference: policy.enable_waiter_preference
 				? state.customer.waiter_preference
@@ -464,15 +550,65 @@ function initBookingApp() {
 			);
 		});
 
+		const currentColorLower = (state.vehicle.color || "").trim().toLowerCase();
+		const colorChips = VEHICLE_COLOR_PRESETS.map((preset) => {
+			const isSelected = currentColorLower === preset.toLowerCase();
+			return el("button", {
+				type: "button",
+				className: `ism-color-chip${isSelected ? " is-selected" : ""}`,
+				"aria-pressed": isSelected ? "true" : "false",
+				onClick: () => store.setVehicleColor(preset),
+				textContent: preset,
+			});
+		});
+
+		const missingModel = step1Attempted && !state.vehicle.model;
+		const missingColor = step1Attempted && !(state.vehicle.color && state.vehicle.color.trim());
+		const missingPlate =
+			step1Attempted && !(state.vehicle.license_plate && state.vehicle.license_plate.trim());
+
 		return el(
 			"section",
 			{ className: "ism-card", "aria-labelledby": "ism-step1-title" },
 			el("h1", { id: "ism-step1-title", className: "ism-card__title", textContent: "Select Your Vehicle" }),
 			el("p", {
 				className: "ism-card__text",
-				textContent: "Choose your model so we can show compatible services and accurate pricing.",
+				textContent:
+					"Choose your model, color, and license plate so our team can identify your car easily at drop-off.",
 			}),
 			el("div", { className: "ism-model-grid", role: "group", "aria-label": "Vehicle model" }, modelButtons),
+			missingModel
+				? el("div", { className: "ism-field__error", role: "alert", textContent: "Please select a vehicle model." })
+				: null,
+			el(
+				"div",
+				{ className: "ism-field-grid" },
+				el(
+					"div",
+					{ className: "ism-field" },
+					el(
+						"label",
+						{ className: "ism-field__label", for: "ism-vehicle-color" },
+						"Vehicle Color ",
+						el("span", { className: "ism-field__required", textContent: "*" })
+					),
+					el("div", { className: "ism-color-chips", role: "group", "aria-label": "Common vehicle colors" }, colorChips),
+					el("input", {
+						id: "ism-vehicle-color",
+						className: `ism-input${missingColor ? " is-invalid" : ""}`,
+						type: "text",
+						maxlength: "60",
+						required: true,
+						"aria-invalid": missingColor ? "true" : null,
+						placeholder: "e.g. Pearl White, Stealth Grey, or custom wrap color",
+						value: state.vehicle.color,
+						onInput: (e) => store.setVehicleColor(e.target.value),
+					}),
+					missingColor
+						? el("span", { className: "ism-field__error", role: "alert", textContent: "Vehicle color is required." })
+						: null
+				)
+			),
 			el(
 				"div",
 				{ className: "ism-field-grid ism-field-grid--two" },
@@ -494,30 +630,67 @@ function initBookingApp() {
 				el(
 					"div",
 					{ className: "ism-field" },
+					el(
+						"label",
+						{ className: "ism-field__label", for: "ism-vehicle-plate" },
+						"License Plate ",
+						el("span", { className: "ism-field__required", textContent: "*" })
+					),
+					el("input", {
+						id: "ism-vehicle-plate",
+						className: `ism-input ism-input--upper${missingPlate ? " is-invalid" : ""}`,
+						type: "text",
+						maxlength: "20",
+						required: true,
+						autocomplete: "off",
+						"aria-invalid": missingPlate ? "true" : null,
+						placeholder: "e.g. ABCD 123",
+						value: state.vehicle.license_plate,
+						onInput: (e) => store.setLicensePlate(e.target.value),
+					}),
+					missingPlate
+						? el("span", { className: "ism-field__error", role: "alert", textContent: "License plate is required." })
+						: null
+				)
+			),
+			el(
+				"div",
+				{ className: "ism-field-grid" },
+				el(
+					"div",
+					{ className: "ism-field" },
 					el("label", {
 						className: "ism-field__label",
 						for: "ism-vehicle-vin",
-						textContent: "VIN or License Plate (Optional)",
+						textContent: "VIN (Optional)",
 					}),
 					el("input", {
 						id: "ism-vehicle-vin",
-						className: "ism-input",
+						className: "ism-input ism-input--upper",
 						type: "text",
-						maxlength: "32",
-						placeholder: "e.g. 5YJ3E1EA... or ABC1234",
-						value: state.vehicle.vin_or_plate,
-						onInput: (e) => store.setVinOrPlate(e.target.value),
+						maxlength: "17",
+						autocomplete: "off",
+						placeholder: "e.g. 5YJ3E1EA... (17 characters)",
+						value: state.vehicle.vin,
+						onInput: (e) => store.setVin(e.target.value),
+					}),
+					el("span", {
+						className: "ism-field__hint",
+						textContent: "Optional — helps us pre-check exact parts compatibility.",
 					})
 				)
 			),
 			el(
 				"div",
 				{ className: "ism-actions-row" },
-				el("span"),
+				el("span", {
+					className: "ism-field__hint",
+					textContent: canProceedStep1(state) ? "" : "Model, color, and license plate are required.",
+				}),
 				el("button", {
 					type: "button",
 					className: "ism-btn ism-btn-primary",
-					disabled: !state.vehicle.model || state.loading.packages,
+					disabled: state.loading.packages,
 					onClick: () => loadPackagesForVehicle(),
 					textContent: state.loading.packages ? "Loading Services..." : "Continue to Services",
 				})
@@ -645,7 +818,7 @@ function initBookingApp() {
 				el(
 					"div",
 					{ className: "ism-summary-strip" },
-					el("span", { className: "ism-summary-pill", textContent: vehicleSummaryText(state) })
+					renderVehicleSummaryPill(state)
 				),
 				state.packagesCatalog.length > 0
 					? el(
@@ -780,7 +953,7 @@ function initBookingApp() {
 			el(
 				"div",
 				{ className: "ism-summary-strip" },
-				el("span", { className: "ism-summary-pill", textContent: vehicleSummaryText(state) }),
+				renderVehicleSummaryPill(state),
 				chosenPackages.map((pkg) =>
 					el("span", { className: "ism-summary-pill", textContent: pkg.title })
 				)
@@ -932,7 +1105,7 @@ function initBookingApp() {
 			el(
 				"div",
 				{ className: "ism-summary-strip" },
-				el("span", { className: "ism-summary-pill", textContent: vehicleSummaryText(state) }),
+				renderVehicleSummaryPill(state),
 				slotText ? el("span", { className: "ism-summary-pill", textContent: slotText }) : null,
 				chosenPackages.map((pkg) =>
 					el("span", { className: "ism-summary-pill", textContent: pkg.title })
@@ -1268,12 +1441,18 @@ function initBookingApp() {
 					el("span", { className: "ism-receipt-row__label", textContent: "Booking Reference" }),
 					el("span", { className: "ism-receipt-row__value", textContent: conf.booking_reference || "" })
 				),
-				conf.vehicle_display
+				conf.vehicle_info || conf.vehicle_display || state.vehicle.model
 					? el(
 							"div",
 							{ className: "ism-receipt-row" },
 							el("span", { className: "ism-receipt-row__label", textContent: "Vehicle" }),
-							el("span", { className: "ism-receipt-row__value", textContent: conf.vehicle_display })
+							el(
+								"span",
+								{ className: "ism-receipt-row__value" },
+								renderVehicleDisplayNode(conf.vehicle_info || state.vehicle || conf.vehicle_display, {
+									showVin: false,
+								})
+							)
 						)
 					: null,
 				conf.waiter_preference
@@ -1316,6 +1495,7 @@ function initBookingApp() {
 					className: "ism-btn ism-btn-secondary",
 					onClick: () => {
 						stopResendTimer();
+						step1Attempted = false;
 						store.resetForNewBooking();
 					},
 					textContent: "Book Another Appointment",

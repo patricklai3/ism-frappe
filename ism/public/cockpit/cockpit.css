@@ -1176,3 +1176,26 @@ body.cockpit-body {
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   }
 }
+
+/* Vehicle display integration in Cockpit action cards & swimlane blocks */
+.cockpit-card-vehicle {
+  font-size: 0.78rem;
+  color: var(--shop-text, #f1f5f9);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.cockpit-job-block {
+  container-type: inline-size;
+}
+
+.cockpit-job-sub .ism-veh {
+  font-size: 0.65rem;
+  color: #e2e8f0;
+  width: 100%;
+}
+
+.cockpit-job-sub .ism-veh__plate {
+  padding: 0 0.32em;
+  font-size: 0.88em;
+}

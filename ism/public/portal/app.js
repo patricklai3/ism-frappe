@@ -88,16 +88,25 @@ function renderVehicleCard(visit) {
 	if (!vehicle) {
 		return "";
 	}
-	const label =
-		[vehicle.model_year, vehicle.manufacturer, vehicle.model].filter(Boolean).join(" ") ||
+	const fallbackLabel =
+		[vehicle.model_year, vehicle.color, vehicle.model || vehicle.manufacturer]
+			.filter(Boolean)
+			.join(" ") ||
 		vehicle.label ||
 		"Vehicle";
+	const titleHtml = window.ISMVehicleDisplay
+		? window.ISMVehicleDisplay.renderHtml(vehicle, {
+				showVin: false,
+				extraClass: "ism-veh--responsive-tight",
+				fallback: fallbackLabel,
+		  })
+		: escapeHtml(fallbackLabel);
 
 	return `
-		<section class="portal-card">
+		<section class="portal-card portal-card--vehicle">
 			<div class="portal-card__header">
 				<div>
-					<h2 class="portal-card__title">${escapeHtml(label)}</h2>
+					<h2 class="portal-card__title">${titleHtml}</h2>
 					<p class="portal-card__subtitle">
 						${visit.repair_order ? `Repair Order #${escapeHtml(visit.repair_order)}` : `Booking #${escapeHtml(visit.schedule_entry || "")}`}
 					</p>
@@ -105,13 +114,18 @@ function renderVehicleCard(visit) {
 			</div>
 			<div class="portal-grid-2">
 				${
+					vehicle.color
+						? `<div class="portal-kv portal-kv--color"><span class="portal-kv__label">Color</span><span class="portal-kv__value">${escapeHtml(vehicle.color)}</span></div>`
+						: ""
+				}
+				${
 					vehicle.license_plate
-						? `<div class="portal-kv"><span class="portal-kv__label">License Plate</span><span class="portal-kv__value">${escapeHtml(vehicle.license_plate)}</span></div>`
+						? `<div class="portal-kv portal-kv--plate"><span class="portal-kv__label">License Plate</span><span class="portal-kv__value">${escapeHtml(vehicle.license_plate)}</span></div>`
 						: ""
 				}
 				${
 					vehicle.vin
-						? `<div class="portal-kv"><span class="portal-kv__label">VIN</span><span class="portal-kv__value">${escapeHtml(vehicle.vin)}</span></div>`
+						? `<div class="portal-kv portal-kv--vin"><span class="portal-kv__label">VIN</span><span class="portal-kv__value">${escapeHtml(vehicle.vin)}</span></div>`
 						: ""
 				}
 			</div>
@@ -152,6 +166,15 @@ function renderVisitHub(root, hub, { boot, state }) {
 				.map((item) => {
 					const isActive = activeVisit && item.visit_key === activeVisit.visit_key;
 					const badges = Array.isArray(item.action_required_badges) ? item.action_required_badges : [];
+					const fallbackPillTitle =
+						item.vehicle_label || item.repair_order || item.schedule_entry || "Visit";
+					const pillTitleHtml = window.ISMVehicleDisplay
+						? window.ISMVehicleDisplay.renderHtml(item.vehicle_info || item, {
+								showVin: false,
+								extraClass: "ism-veh--responsive-tight",
+								fallback: fallbackPillTitle,
+						  })
+						: escapeHtml(fallbackPillTitle);
 					return `
 						<button
 							type="button"
@@ -159,7 +182,7 @@ function renderVisitHub(root, hub, { boot, state }) {
 							data-visit-ro="${escapeHtml(item.repair_order || "")}"
 							data-visit-se="${escapeHtml(item.schedule_entry || "")}"
 						>
-							<span class="portal-visit-pill__title">${escapeHtml(item.vehicle_label || item.repair_order || item.schedule_entry || "Visit")}</span>
+							<span class="portal-visit-pill__title">${pillTitleHtml}</span>
 							<span class="portal-visit-pill__meta">${escapeHtml(item.status_label || "")}</span>
 							${badges.length ? `<span class="portal-badge portal-badge--warning">${escapeHtml(badges[0])}</span>` : ""}
 						</button>

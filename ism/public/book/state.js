@@ -86,6 +86,9 @@ export function createBookingStore(bootConfig) {
 			vehicle: {
 				model: "",
 				year: null,
+				color: "",
+				license_plate: "",
+				vin: "",
 				vin_or_plate: "",
 			},
 			packagesCatalog: [],
@@ -211,6 +214,39 @@ export function createBookingStore(bootConfig) {
 				selectedSlot: null,
 				idempotency_key: generateIdempotencyKey(),
 				errorBanner: null,
+			}));
+		},
+
+		setVehicleColor(val) {
+			setState((prev) => ({
+				...prev,
+				vehicle: { ...prev.vehicle, color: String(val || "") },
+				errorBanner: null,
+			}));
+		},
+
+		setLicensePlate(val) {
+			const plate = String(val || "").toUpperCase();
+			setState((prev) => ({
+				...prev,
+				vehicle: {
+					...prev.vehicle,
+					license_plate: plate,
+					vin_or_plate: prev.vehicle.vin || plate,
+				},
+				errorBanner: null,
+			}));
+		},
+
+		setVin(val) {
+			const vin = String(val || "").toUpperCase();
+			setState((prev) => ({
+				...prev,
+				vehicle: {
+					...prev.vehicle,
+					vin: vin,
+					vin_or_plate: vin || prev.vehicle.license_plate,
+				},
 			}));
 		},
 

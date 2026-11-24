@@ -8,6 +8,7 @@
 	<meta name="theme-color" content="#1a202c">
 	<title>{{ title }}</title>
 	<link rel="icon" href="data:,">
+	<link rel="stylesheet" href="/assets/ism/shared/vehicle_display.css?v={{ asset_version }}">
 	<link rel="stylesheet" href="/assets/ism/book/book.css?v={{ asset_version }}">
 </head>
 <body class="ism-book-body">
@@ -117,6 +118,7 @@
 
 	<script type="application/json" id="ism-booking-boot">{{ boot_config_json }}</script>
 	{% if boot_config.enabled %}
+	<script src="/assets/ism/shared/vehicle_display.js?v={{ asset_version }}"></script>
 	<script type="module" src="/assets/ism/book/app.js?v={{ asset_version }}"></script>
 	{% endif %}
 </body>

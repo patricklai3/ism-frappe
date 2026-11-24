@@ -10,6 +10,7 @@
 	<meta name="mobile-web-app-capable" content="yes" />
 	<title>{{ title or "ISM Shop Floor Blackboard" }}</title>
 	<link rel="icon" href="data:," />
+	<link rel="stylesheet" href="/assets/ism/shared/vehicle_display.css?v={{ asset_version or '1' }}" />
 	<link rel="stylesheet" href="/assets/ism/board/board.css?v={{ asset_version or '1' }}" />
 </head>
 <body class="shop-os-body">
@@ -84,7 +85,7 @@
 						type="search"
 						id="thread-search-input"
 						class="board-search-input"
-						placeholder="Search active RO, VIN, bay, customer..."
+						placeholder="Search RO, model, color, plate, customer, bay, VIN..."
 						autocomplete="off"
 					/>
 					<div class="board-filter-row" id="thread-filter-row" role="tablist" aria-label="Thread filters">
@@ -225,6 +226,7 @@
 	<script>
 		window.ISM_BOARD_BOOT = {{ boot_json | safe }};
 	</script>
+	<script src="/assets/ism/shared/vehicle_display.js?v={{ asset_version or '1' }}"></script>
 	<script src="/assets/ism/board/vendor/socket.io.min.js?v={{ asset_version or '1' }}"></script>
 	<script type="module" src="/assets/ism/board/app.js?v={{ asset_version or '1' }}"></script>
 	{% endif %}
