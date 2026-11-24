@@ -119,6 +119,16 @@ body.ism-book-body {
 	font-size: 0.95rem;
 }
 
+.ism-demo-banner {
+	margin: 0 0 14px;
+	padding: 10px 14px;
+	border-radius: var(--ism-radius-md);
+	background: var(--ism-info-bg);
+	border: 1px solid var(--ism-info-border);
+	color: var(--ism-info);
+	font-size: 0.88rem;
+}
+
 /* 5-Step Progress Indicator */
 .ism-stepper {
 	margin-bottom: 18px;
@@ -950,6 +960,48 @@ body.ism-book-body {
 	margin: 4px 0 0;
 	font-size: 0.88rem;
 	color: var(--ism-slate-700);
+}
+
+/* Post-Submit PIN-to-Drive Modal */
+.ism-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 50;
+	background: rgba(15, 23, 42, 0.56);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+}
+
+.ism-modal {
+	width: 100%;
+	max-width: 480px;
+	max-height: 90vh;
+	overflow-y: auto;
+	background: var(--ism-white);
+	border-radius: var(--ism-radius-lg);
+	padding: 22px;
+	box-shadow: 0 20px 44px rgba(15, 23, 42, 0.28);
+}
+
+.ism-modal__close {
+	border: none;
+	background: transparent;
+	color: var(--ism-slate-500);
+	font-size: 1.5rem;
+	line-height: 1;
+	cursor: pointer;
+	padding: 4px 8px;
+	border-radius: var(--ism-radius-sm);
+}
+
+.ism-modal__close:hover,
+.ism-modal__close:focus-visible {
+	background: var(--ism-surface);
+	color: var(--ism-slate-900);
+	outline: 2px solid var(--ism-emerald-500);
+	outline-offset: 1px;
 }
 
 /* Empty & Loading States */

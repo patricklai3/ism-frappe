@@ -16,6 +16,7 @@ import {
 import { openScopeUpgradeModal, renderAuthGate, renderHeaderAuthControls } from "./auth.js";
 import { renderInvoicesSection } from "./invoices.js";
 import { renderPaymentsSection } from "./payments.js";
+import { renderPhoneKeyTopBanner } from "./phone_key.js";
 import { openPinModal, renderPinSection, renderQuoteSection } from "./quote_pin.js";
 import { renderAppointmentSection } from "./reschedule.js";
 
@@ -215,11 +216,18 @@ function renderVisitHub(root, hub, { boot, state }) {
 				<div class="portal-header__actions" id="portal-header-auth-controls"></div>
 			</header>
 
+			${
+				shop.demo_mode || boot.demo_mode
+					? `<div class="portal-alert portal-alert--info" role="status"><strong>Demo Mode Active</strong> — SMS verification and Repair Order parts-stock gates are bypassed.</div>`
+					: ""
+			}
+
 			${switcherHtml}
 
 			${
 				activeVisit
 					? `
+				<div id="portal-slot-phone-key-banner"></div>
 				${readOnlyBannerHtml}
 				${renderBinaryStatusBanner(activeVisit.status, shop)}
 				${renderVehicleCard(activeVisit)}
@@ -283,6 +291,12 @@ function renderVisitHub(root, hub, { boot, state }) {
 			notify,
 		});
 	};
+
+	renderPhoneKeyTopBanner(root.querySelector("#portal-slot-phone-key-banner"), {
+		visit: activeVisit,
+		onHubUpdated,
+		notify,
+	});
 
 	renderAppointmentSection(root.querySelector("#portal-slot-appointment"), {
 		visit: activeVisit,

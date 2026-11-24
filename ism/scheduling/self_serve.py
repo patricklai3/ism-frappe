@@ -55,6 +55,7 @@ from ism.scheduling.time_utils import (
 	normalize_time,
 	to_timedelta,
 )
+from ism.utils.demo_mode import is_demo_mode
 
 ALLOWED_RESCHEDULE_ENTRY_STATUSES: Tuple[str, ...] = ("Scheduled", "Confirmed")
 ALLOWED_RESCHEDULE_RO_STATUSES: Tuple[str, ...] = ("Draft Estimate", "Pending Authorization")
@@ -452,6 +453,53 @@ def find_self_serve_slots(
 		if day_slots:
 			days_out.append({"date": str(curr_dt), "slots": day_slots})
 			total_slots += len(day_slots)
+
+	if (
+		total_slots == 0
+		and is_demo_mode()
+		and (not window.candidate_bays or (window.enable_tech and not window.active_techs))
+	):
+		op_start: timedelta = settings["operating_hours_start"]
+		op_end: timedelta = settings["operating_hours_end"]
+		bs_td: Optional[timedelta] = settings["break_start"]
+		be_td: Optional[timedelta] = settings["break_end"]
+		interval_mins: int = max(15, int(settings.get("default_slot_interval") or 30))
+		if op_start < op_end:
+			is_holiday = build_holiday_checker(settings)
+			step = timedelta(minutes=interval_mins)
+			for curr_dt in window.iter_dates():
+				if is_holiday(curr_dt):
+					continue
+				day_slots = []
+				curr_time = op_start
+				while curr_time < op_end:
+					if bs_td and be_td and bs_td <= curr_time < be_td:
+						curr_time += step
+						continue
+					eff_end = effective_end_time(curr_time, resolved_duration, bs_td, be_td)
+					if eff_end > op_end:
+						curr_time += step
+						continue
+					start_str = format_timedelta(curr_time)
+					arrival_dt = to_customer_arrival_datetime(
+						curr_dt,
+						start_str,
+						offset_minutes=offset_minutes,
+					)
+					if arrival_dt >= earliest_arrival_dt:
+						day_slots.append(
+							to_public_slot_projection(
+								curr_dt,
+								{"start_time": start_str, "effective_capacity": 1},
+								offset_minutes=offset_minutes,
+							)
+						)
+						if slot_limit > 0 and len(day_slots) >= slot_limit:
+							break
+					curr_time += step
+				if day_slots:
+					days_out.append({"date": str(curr_dt), "slots": day_slots})
+					total_slots += len(day_slots)
 
 	return {
 		"start_date": str(effective_start_dt),
@@ -1002,6 +1050,8 @@ def reschedule_self_serve_appointment(
 	)
 	required_tags = get_required_tags_for_entry(se)
 
+	demo_active = is_demo_mode()
+
 	# 6. Canonical Lock Order Steps 2 & 3: Lock active Service Bays, then active Technicians.
 	active_bays = _lock_active_service_bays()
 	active_techs = _lock_active_technicians(settings)
@@ -1010,26 +1060,32 @@ def reschedule_self_serve_appointment(
 	sp = f"ss_resched_{uuid4().hex[:12]}"
 	frappe.db.savepoint(sp)
 	try:
-		chosen_bay = _select_available_bay_under_lock(
-			active_bays,
-			iso_date,
-			internal_start_time,
-			duration,
-			required_tags=required_tags,
-			preferred_bay=se.service_bay,
-			exclude_entry=se.name,
-			holiday_fn=holiday_fn,
-		)
-		new_assigned_tech = _check_technician_capacity_under_lock(
-			active_techs,
-			iso_date,
-			internal_start_time,
-			duration,
-			settings=settings,
-			current_assigned_tech=se.assigned_technician,
-			exclude_entry=se.name,
-			holiday_fn=holiday_fn,
-		)
+		if demo_active and not active_bays:
+			chosen_bay = None
+		else:
+			chosen_bay = _select_available_bay_under_lock(
+				active_bays,
+				iso_date,
+				internal_start_time,
+				duration,
+				required_tags=required_tags,
+				preferred_bay=se.service_bay,
+				exclude_entry=se.name,
+				holiday_fn=holiday_fn,
+			)
+		if demo_active and cint(settings.get("enable_technician_capacity")) and not active_techs:
+			new_assigned_tech = se.assigned_technician
+		else:
+			new_assigned_tech = _check_technician_capacity_under_lock(
+				active_techs,
+				iso_date,
+				internal_start_time,
+				duration,
+				settings=settings,
+				current_assigned_tech=se.assigned_technician,
+				exclude_entry=se.name,
+				holiday_fn=holiday_fn,
+			)
 		_check_vehicle_availability_under_lock(
 			se,
 			iso_date,
@@ -1337,6 +1393,8 @@ def create_provisional_booking(
 		require_same_day=True,
 	)
 
+	demo_active = is_demo_mode()
+
 	# Canonical lock order: active Service Bay ORDER BY name ASC -> active Employee ORDER BY name ASC.
 	active_bays = _lock_active_service_bays()
 	active_techs = _lock_active_technicians(settings)
@@ -1344,22 +1402,26 @@ def create_provisional_booking(
 	sp = f"ss_book_{uuid4().hex[:12]}"
 	frappe.db.savepoint(sp)
 	try:
-		chosen_bay = _select_available_bay_under_lock(
-			active_bays,
-			iso_date,
-			internal_start_time,
-			duration,
-			required_tags=reqs["required_tags"],
-			holiday_fn=holiday_fn,
-		)
-		_check_technician_capacity_under_lock(
-			active_techs,
-			iso_date,
-			internal_start_time,
-			duration,
-			settings=settings,
-			holiday_fn=holiday_fn,
-		)
+		if demo_active and not active_bays:
+			chosen_bay = None
+		else:
+			chosen_bay = _select_available_bay_under_lock(
+				active_bays,
+				iso_date,
+				internal_start_time,
+				duration,
+				required_tags=reqs["required_tags"],
+				holiday_fn=holiday_fn,
+			)
+		if not (demo_active and cint(settings.get("enable_technician_capacity")) and not active_techs):
+			_check_technician_capacity_under_lock(
+				active_techs,
+				iso_date,
+				internal_start_time,
+				duration,
+				settings=settings,
+				holiday_fn=holiday_fn,
+			)
 		_check_vehicle_availability_under_lock(
 			{
 				"customer": customer,

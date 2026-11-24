@@ -394,6 +394,7 @@ class ScheduleEntry(Document):
 			return
 
 		from ism.api.technician_availability import get_technician_pool_availability
+		from ism.utils.demo_mode import is_demo_mode
 
 		settings = get_shop_settings()
 		if not settings.get("enable_technician_capacity"):
@@ -401,7 +402,7 @@ class ScheduleEntry(Document):
 
 		designation = settings.get("technician_designation") or "Technician"
 		emp = frappe.qb.DocType("Employee")
-		(
+		active_tech_rows = (
 			frappe.qb.from_(emp)
 			.select(emp.name)
 			.where(emp.designation == designation)
@@ -410,6 +411,8 @@ class ScheduleEntry(Document):
 			.for_update()
 			.run()
 		)
+		if is_demo_mode() and not active_tech_rows:
+			return
 
 		pool = get_technician_pool_availability(
 			date=str(self.scheduled_date),

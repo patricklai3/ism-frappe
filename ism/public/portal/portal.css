@@ -848,3 +848,238 @@
 		display: flex !important;
 	}
 }
+
+/* Tesla Phone Key Top Banner & Privacy Modal */
+.portal-pk-banner {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 15px;
+	border-radius: var(--portal-radius-sm);
+	border: 1px solid var(--portal-border);
+	border-left-width: 4px;
+	background: var(--portal-surface);
+	box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.portal-pk-banner--optional {
+	background: #f8fafc;
+	border-color: #cbd5e1;
+	border-left-color: #2563eb;
+}
+
+.portal-pk-banner--encrypted {
+	background: #f0fdf4;
+	border-color: #bbf7d0;
+	border-left-color: #16a34a;
+}
+
+.portal-pk-banner--released {
+	background: #ecfdf5;
+	border-color: #86efac;
+	border-left-color: #059669;
+	box-shadow: 0 2px 6px rgba(5, 150, 105, 0.08);
+}
+
+.portal-pk-banner--purged {
+	background: #f8fafc;
+	border-color: #cbd5e1;
+	border-left-color: #64748b;
+}
+
+.portal-pk-banner__icon {
+	flex: 0 0 auto;
+	width: 34px;
+	height: 34px;
+	border-radius: 10px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(37, 99, 235, 0.1);
+	color: #1d4ed8;
+}
+
+.portal-pk-banner--encrypted .portal-pk-banner__icon,
+.portal-pk-banner--released .portal-pk-banner__icon {
+	background: rgba(5, 150, 105, 0.12);
+	color: #047857;
+}
+
+.portal-pk-banner--purged .portal-pk-banner__icon {
+	background: rgba(100, 116, 139, 0.12);
+	color: #475569;
+}
+
+.portal-pk-banner__body {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.portal-pk-banner__head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 2px;
+}
+
+.portal-pk-banner__title {
+	font-size: 0.92rem;
+	font-weight: 700;
+	color: #0f172a;
+}
+
+.portal-pk-banner__copy {
+	margin: 0;
+	font-size: 0.83rem;
+	line-height: 1.45;
+	color: #475569;
+}
+
+.portal-pk-banner--released .portal-pk-banner__copy {
+	color: #14532d;
+}
+
+.portal-pk-banner__action {
+	flex: 0 0 auto;
+}
+
+.portal-pk-pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+}
+
+.portal-pk-pill--optional {
+	background: #dbeafe;
+	color: #1e40af;
+}
+
+.portal-pk-pill--encrypted,
+.portal-pk-pill--released {
+	background: #dcfce7;
+	color: #166534;
+}
+
+.portal-pk-pill--purged {
+	background: #e2e8f0;
+	color: #334155;
+}
+
+.portal-pk-lock-note {
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: #475569;
+}
+
+.portal-pk-modal {
+	max-width: 520px;
+}
+
+.portal-pk-trust-kicker {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.75rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: #047857;
+	margin-bottom: 4px;
+}
+
+.portal-pk-note {
+	background: #f8fafc;
+	border: 1px solid #e2e8f0;
+	border-radius: var(--portal-radius-sm);
+	padding: 10px 12px;
+	font-size: 0.86rem;
+	line-height: 1.45;
+	color: #334155;
+	margin-bottom: 14px;
+}
+
+.portal-pk-steps {
+	margin: 0 0 14px;
+	padding-left: 20px;
+	font-size: 0.88rem;
+	line-height: 1.55;
+	color: #1e293b;
+}
+
+.portal-pk-steps li {
+	margin-bottom: 4px;
+}
+
+.portal-pk-steps code {
+	background: #f1f5f9;
+	padding: 1px 5px;
+	border-radius: 4px;
+	font-size: 0.84rem;
+}
+
+.portal-pk-input {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-size: 0.9rem;
+}
+
+.portal-pk-guarantees {
+	background: #f0fdf4;
+	border: 1px solid #bbf7d0;
+	border-radius: var(--portal-radius-sm);
+	padding: 11px 13px;
+	margin: 14px 0;
+}
+
+.portal-pk-guarantees__title {
+	font-size: 0.8rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: #166534;
+	margin-bottom: 6px;
+}
+
+.portal-pk-guarantees ul {
+	margin: 0;
+	padding-left: 18px;
+	font-size: 0.83rem;
+	line-height: 1.45;
+	color: #14532d;
+}
+
+.portal-pk-guarantees li {
+	margin-bottom: 4px;
+}
+
+.portal-pk-guarantees li:last-child {
+	margin-bottom: 0;
+}
+
+.portal-btn--danger-outline {
+	background: #ffffff;
+	color: #b91c1c;
+	border: 1px solid #fca5a5;
+}
+
+.portal-btn--danger-outline:hover:not(:disabled) {
+	background: #fef2f2;
+	border-color: #ef4444;
+}
+
+@media (max-width: 600px) {
+	.portal-pk-banner {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+	.portal-pk-banner__action {
+		width: 100%;
+	}
+	.portal-pk-banner__action .portal-btn {
+		width: 100%;
+	}
+}

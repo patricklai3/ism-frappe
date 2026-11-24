@@ -50,6 +50,14 @@ from ism.portal.invoices import (
 	get_ro_invoice_summary,
 	render_sales_invoice_pdf,
 )
+from ism.portal.phone_key_vault import (
+	get_ro_phone_key_for_staff,
+	get_schedule_entry_phone_key_for_staff,
+	remove_ro_phone_key,
+	remove_schedule_entry_phone_key,
+	submit_ro_phone_key,
+	submit_schedule_entry_phone_key,
+)
 from ism.portal.pin_vault import (
 	get_ro_pin_for_staff,
 	get_schedule_entry_pin_for_staff,
@@ -408,6 +416,71 @@ def opt_out_pin_to_drive(
 	}
 
 
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def submit_tesla_phone_key(
+	repair_order: str | None = None,
+	invite_url: str | None = None,
+	schedule_entry: str | None = None,
+) -> dict[str, Any]:
+	"""Submit or update an optional encrypted Tesla Phone Key invite link (NEVER echoes invite_url)."""
+	session = require_portal_session(touch=True)
+
+	clean_ro = repair_order.strip() if isinstance(repair_order, str) and repair_order.strip() else None
+	clean_se = schedule_entry.strip() if isinstance(schedule_entry, str) and schedule_entry.strip() else None
+	if not clean_ro and not clean_se:
+		frappe.throw(_("Either a Repair Order or appointment reference is required."), frappe.ValidationError)
+
+	if clean_ro:
+		assert_session_owns_ro(session, clean_ro)
+		if clean_se:
+			assert_session_owns_schedule_entry(session, clean_se)
+		phone_key_state = submit_ro_phone_key(clean_ro, invite_url, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_ro=clean_ro)
+	else:
+		assert_session_owns_schedule_entry(session, clean_se)
+		phone_key_state = submit_schedule_entry_phone_key(
+			clean_se, invite_url, actor_label="Customer Portal"
+		)
+		hub = build_portal_hub_payload(session, active_schedule_entry=clean_se)
+
+	return {
+		"success": True,
+		"phone_key": phone_key_state,
+		"hub": hub,
+	}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def remove_tesla_phone_key(
+	repair_order: str | None = None,
+	schedule_entry: str | None = None,
+) -> dict[str, Any]:
+	"""Erase customer's encrypted Tesla Phone Key invite link under active portal session."""
+	session = require_portal_session(touch=True)
+
+	clean_ro = repair_order.strip() if isinstance(repair_order, str) and repair_order.strip() else None
+	clean_se = schedule_entry.strip() if isinstance(schedule_entry, str) and schedule_entry.strip() else None
+	if not clean_ro and not clean_se:
+		frappe.throw(_("Either a Repair Order or appointment reference is required."), frappe.ValidationError)
+
+	if clean_ro:
+		assert_session_owns_ro(session, clean_ro)
+		if clean_se:
+			assert_session_owns_schedule_entry(session, clean_se)
+		phone_key_state = remove_ro_phone_key(clean_ro, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_ro=clean_ro)
+	else:
+		assert_session_owns_schedule_entry(session, clean_se)
+		phone_key_state = remove_schedule_entry_phone_key(clean_se, actor_label="Customer Portal")
+		hub = build_portal_hub_payload(session, active_schedule_entry=clean_se)
+
+	return {
+		"success": True,
+		"phone_key": phone_key_state,
+		"hub": hub,
+	}
+
+
 @frappe.whitelist(allow_guest=True, methods=["GET"])
 def get_reschedule_options(
 	schedule_entry: str,
@@ -715,3 +788,15 @@ def reveal_ro_pin(repair_order: str) -> dict[str, Any]:
 def reveal_schedule_entry_pin(schedule_entry: str) -> dict[str, Any]:
 	"""Staff-only convenience wrapper delegating to ism.portal.pin_vault.get_schedule_entry_pin_for_staff."""
 	return get_schedule_entry_pin_for_staff(schedule_entry, channel="Desk")
+
+
+@frappe.whitelist(allow_guest=False, methods=["POST"])
+def reveal_ro_phone_key(repair_order: str) -> dict[str, Any]:
+	"""Advisor/Manager-only wrapper delegating to ism.portal.phone_key_vault.get_ro_phone_key_for_staff."""
+	return get_ro_phone_key_for_staff(repair_order, channel="Desk")
+
+
+@frappe.whitelist(allow_guest=False, methods=["POST"])
+def reveal_schedule_entry_phone_key(schedule_entry: str) -> dict[str, Any]:
+	"""Advisor/Manager-only wrapper delegating to ism.portal.phone_key_vault.get_schedule_entry_phone_key_for_staff."""
+	return get_schedule_entry_phone_key_for_staff(schedule_entry, channel="Desk")

@@ -85,6 +85,7 @@
   "enable_waiter_preference",
   "sb_self_serve_booking",
   "enable_self_serve_booking",
+  "customer_journey_demo_mode",
   "self_serve_booking_title",
   "self_serve_booking_intro",
   "self_serve_max_packages_per_booking",
@@ -121,6 +122,7 @@
   "portal_invoice_print_format",
   "portal_pin_encryption_key",
   "portal_pin_prompt_disclaimer",
+  "portal_phone_key_disclaimer",
   "sb_inventory_dimensions",
   "require_bin_on_receive"
  ],
@@ -602,6 +604,13 @@
    "label": "Enable Self-Serve Booking"
   },
   {
+   "default": "0",
+   "description": "Testing/walkthrough mode ONLY (never enable in production). Unblocks /book and /portal without SMS credentials, serves fallback demo packages and open slots if none exist, and bypasses Repair Order parts-stock holds.",
+   "fieldname": "customer_journey_demo_mode",
+   "fieldtype": "Check",
+   "label": "Customer Journey Demo Mode"
+  },
+  {
    "default": "Book Your Service Appointment",
    "description": "Customer-facing hero title shown on /book (max 140 characters).",
    "fieldname": "self_serve_booking_title",
@@ -808,6 +817,11 @@
    "label": "PIN-to-Drive Prompt Disclaimer"
   },
   {
+   "fieldname": "portal_phone_key_disclaimer",
+   "fieldtype": "Small Text",
+   "label": "Tesla Phone Key Privacy Disclaimer"
+  },
+  {
    "fieldname": "sb_inventory_dimensions",
    "fieldtype": "Section Break",
    "label": "Inventory & Bin Locations"
@@ -822,7 +836,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-11-24 00:00:00.000000",
+ "modified": "2026-11-24 05:00:00.000000",
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "ISM Settings",

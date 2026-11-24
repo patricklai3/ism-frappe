@@ -665,7 +665,7 @@ def purge_ro_pin(repair_order: str, *, reason: str = "Closed / Released") -> boo
 
 
 def on_repair_order_update_purge_pin(doc: Any, method: str | None = None) -> None:
-	"""Repair Order.on_update hook: purge PIN whenever status enters Closed / Released or Cancelled."""
+	"""Repair Order.on_update hook: purge PIN & Tesla Phone Key on Closed/Released or Cancelled and send release SMS."""
 	_ = method
 	if not doc or not getattr(doc, "name", None):
 		return
@@ -674,9 +674,17 @@ def on_repair_order_update_purge_pin(doc: Any, method: str | None = None) -> Non
 	if status not in RO_PIN_PURGE_STATUSES:
 		return
 
-	purged = purge_ro_pin(doc.name, reason=status)
+	from ism.portal.phone_key_vault import (
+		dispatch_vehicle_release_credential_sms,
+		purge_ro_phone_key,
+		purge_schedule_entry_phone_key,
+	)
+
+	is_released = status == "Closed / Released"
+
+	pin_purged = purge_ro_pin(doc.name, reason=status)
 	doc.pin_to_drive_encrypted = None
-	if purged:
+	if pin_purged:
 		doc.pin_to_drive_status = PIN_STATUS_PURGED
 		doc.pin_to_drive_purged_at = frappe.db.get_value(
 			"Repair Order",
@@ -684,13 +692,50 @@ def on_repair_order_update_purge_pin(doc: Any, method: str | None = None) -> Non
 			"pin_to_drive_purged_at",
 		)
 
+	phone_key_purged = purge_ro_phone_key(
+		doc.name,
+		reason=status,
+		released=is_released,
+		released_by=getattr(doc, "tesla_phone_key_released_by", None),
+	)
+	doc.tesla_phone_key_encrypted = None
+	if phone_key_purged:
+		pk_meta = (
+			frappe.db.get_value(
+				"Repair Order",
+				doc.name,
+				[
+					"tesla_phone_key_status",
+					"tesla_phone_key_released_at",
+					"tesla_phone_key_released_by",
+					"tesla_phone_key_purged_at",
+				],
+				as_dict=True,
+			)
+			or {}
+		)
+		doc.tesla_phone_key_status = pk_meta.get("tesla_phone_key_status")
+		doc.tesla_phone_key_released_at = pk_meta.get("tesla_phone_key_released_at")
+		doc.tesla_phone_key_released_by = pk_meta.get("tesla_phone_key_released_by")
+		doc.tesla_phone_key_purged_at = pk_meta.get("tesla_phone_key_purged_at")
+
 	linked_entries = frappe.get_all(
 		"Schedule Entry",
 		filters={"repair_order": doc.name},
 		pluck="name",
 	)
 	for se_name in linked_entries:
-		purge_schedule_entry_pin(se_name, reason=status)
+		if purge_schedule_entry_pin(se_name, reason=status):
+			pin_purged = True
+		if purge_schedule_entry_phone_key(se_name, reason=status, released=is_released):
+			phone_key_purged = True
+
+	if is_released and (pin_purged or phone_key_purged):
+		dispatch_vehicle_release_credential_sms(
+			doc,
+			pin_removed=pin_purged,
+			phone_key_removed=phone_key_purged,
+		)
 
 
 def get_schedule_entry_pin_state(schedule_entry: str) -> dict[str, Any]:
@@ -1159,15 +1204,22 @@ def purge_schedule_entry_pin(schedule_entry: str, *, reason: str = "Cancelled") 
 
 
 def on_schedule_entry_update_sync_pin(doc: Any, method: str | None = None) -> None:
-	"""Schedule Entry.on_update hook: transfer PIN on RO link, or purge on Cancelled/No Show/Completed."""
+	"""Schedule Entry.on_update hook: transfer PIN & Phone Key on RO link, or purge on Cancelled/No Show/Completed."""
 	_ = method
 	if not doc or not getattr(doc, "name", None):
 		return
 
+	from ism.portal.phone_key_vault import (
+		purge_schedule_entry_phone_key,
+		transfer_schedule_entry_phone_key_to_ro,
+	)
+
 	linked_ro = (getattr(doc, "repair_order", None) or "").strip()
 	if linked_ro:
 		transfer_schedule_entry_pin_to_ro(doc.name, linked_ro)
+		transfer_schedule_entry_phone_key_to_ro(doc.name, linked_ro)
 		doc.pin_to_drive_encrypted = None
+		doc.tesla_phone_key_encrypted = None
 		return
 
 	status = getattr(doc, "status", None)
@@ -1183,6 +1235,21 @@ def on_schedule_entry_update_sync_pin(doc: Any, method: str | None = None) -> No
 			doc.name,
 			"pin_to_drive_purged_at",
 		)
+
+	pk_purged = purge_schedule_entry_phone_key(doc.name, reason=status, released=False)
+	doc.tesla_phone_key_encrypted = None
+	if pk_purged:
+		pk_meta = (
+			frappe.db.get_value(
+				"Schedule Entry",
+				doc.name,
+				["tesla_phone_key_status", "tesla_phone_key_purged_at"],
+				as_dict=True,
+			)
+			or {}
+		)
+		doc.tesla_phone_key_status = pk_meta.get("tesla_phone_key_status")
+		doc.tesla_phone_key_purged_at = pk_meta.get("tesla_phone_key_purged_at")
 
 
 def purge_stale_closed_ro_pins() -> int:
@@ -1270,5 +1337,9 @@ def purge_stale_closed_ro_pins() -> int:
 		purged = purge_schedule_entry_pin(se_name, reason=reason)
 		if purged or had_auth_row:
 			purged_count += 1
+
+	from ism.portal.phone_key_vault import purge_stale_closed_phone_keys
+
+	purged_count += purge_stale_closed_phone_keys()
 
 	return purged_count

@@ -38,8 +38,13 @@ from ism.portal.contracts import (
 	PORTAL_STATUS_LABELS,
 	PORTAL_STATUS_READY_FOR_PICKUP,
 	PORTAL_STATUS_SCHEDULED,
+	is_tesla_vehicle_info,
 )
 from ism.portal.invoices import get_ro_invoice_summary
+from ism.portal.phone_key_vault import (
+	get_ro_phone_key_customer_state,
+	get_schedule_entry_phone_key_customer_state,
+)
 from ism.portal.pin_vault import (
 	get_ro_pin_customer_state,
 	get_schedule_entry_pin_customer_state,
@@ -191,6 +196,11 @@ def _build_vehicle_section(ro_doc: Any, se_doc: Any) -> dict[str, Any]:
 				"color": info.get("color"),
 				"license_plate": info.get("license_plate"),
 				"vin": info.get("vin"),
+				"is_tesla": is_tesla_vehicle_info(
+					manufacturer=info.get("manufacturer"),
+					model=info.get("model"),
+					vin=info.get("vin"),
+				),
 				"display": label,
 				"compact_display": compact_label,
 				"label": label,
@@ -227,6 +237,11 @@ def _build_vehicle_section(ro_doc: Any, se_doc: Any) -> dict[str, Any]:
 			"color": prov_color,
 			"license_plate": prov_dict["license_plate"],
 			"vin": prov_vin,
+			"is_tesla": is_tesla_vehicle_info(
+				model=prov_model,
+				vin=prov_vin,
+				provisional_info=prov_info,
+			),
 			"display": label,
 			"compact_display": compact_label,
 			"label": label,
@@ -242,6 +257,7 @@ def _build_vehicle_section(ro_doc: Any, se_doc: Any) -> dict[str, Any]:
 		"color": None,
 		"license_plate": None,
 		"vin": None,
+		"is_tesla": False,
 		"display": fallback,
 		"compact_display": fallback,
 		"label": fallback,
@@ -451,6 +467,9 @@ def build_portal_hub_payload(
 		pin_state = _to_plain_value(
 			get_ro_pin_customer_state(ro_doc, has_active_appointment=has_active_appointment)
 		)
+		phone_key_state = _to_plain_value(
+			get_ro_phone_key_customer_state(ro_doc, is_tesla=bool(vehicle_obj.get("is_tesla")))
+		)
 		payment_state = _to_plain_value(get_ro_payment_state(ro_doc.name))
 		badges = _compute_action_badges(
 			ro_doc=ro_doc,
@@ -470,6 +489,7 @@ def build_portal_hub_payload(
 			"status": status_obj,
 			"vehicle": vehicle_obj,
 			"pin_state": pin_state,
+			"phone_key_state": phone_key_state,
 			"payment_state": payment_state,
 			"action_required_badges": badges,
 		})
@@ -485,6 +505,11 @@ def build_portal_hub_payload(
 		)
 		vehicle_obj = _build_vehicle_section(None, se_doc)
 		pin_state = _to_plain_value(get_schedule_entry_pin_customer_state(se_doc))
+		phone_key_state = _to_plain_value(
+			get_schedule_entry_phone_key_customer_state(
+				se_doc, is_tesla=bool(vehicle_obj.get("is_tesla"))
+			)
+		)
 		badges = _compute_action_badges(
 			ro_doc=None,
 			is_read_only=is_read_only,
@@ -503,6 +528,7 @@ def build_portal_hub_payload(
 			"status": status_obj,
 			"vehicle": vehicle_obj,
 			"pin_state": pin_state,
+			"phone_key_state": phone_key_state,
 			"payment_state": None,
 			"action_required_badges": badges,
 		})
@@ -586,6 +612,7 @@ def build_portal_hub_payload(
 			"appointment": _build_appointment_section(se_doc),
 			"quote": _build_quote_section(ro_doc, is_read_only=is_read_only),
 			"pin_to_drive": selected["pin_state"],
+			"phone_key": selected["phone_key_state"],
 			"payment": payment_block,
 			"invoice": _to_plain_value(get_ro_invoice_summary(ro_doc)) if ro_doc is not None else None,
 		}
@@ -599,6 +626,7 @@ def build_portal_hub_payload(
 		},
 		"shop": {
 			"portal_enabled": branding["portal_enabled"],
+			"demo_mode": bool(branding.get("demo_mode")),
 			"company_name": branding["company_name"],
 			"support_phone": branding["support_phone"],
 			"pickup_hours_text": pickup_hours,

@@ -364,87 +364,122 @@ function open_checkout_release_dialog(frm) {
 		</div>
 	`;
 
+	const has_active_phone_key = frm.doc.tesla_phone_key_status === "Provided";
+
+	const checkout_fields = [
+		{
+			fieldname: "summary",
+			fieldtype: "HTML",
+			options: summary_html,
+		},
+		{
+			fieldname: "odometer_out",
+			fieldtype: "Int",
+			label: __("Final Odometer Out"),
+			default: frm.doc.odometer_out || frm.doc.odometer_in || 0,
+			reqd: 1,
+		},
+		{
+			fieldname: "tender_mode",
+			fieldtype: "Select",
+			label: __("Tender Mode"),
+			options: "Single Tender\nSplit Tenders",
+			default: "Single Tender",
+			reqd: 1,
+		},
+		{
+			fieldname: "payment_method",
+			fieldtype: "Select",
+			label: __("Payment Method"),
+			options: PAYMENT_METHODS.join("\n"),
+			default: "Debit / Interac",
+			depends_on: "eval:doc.tender_mode=='Single Tender'",
+		},
+		{
+			fieldname: "paid_amount",
+			fieldtype: "Currency",
+			label: __("Amount Paid"),
+			default: remaining,
+			depends_on: "eval:doc.tender_mode=='Single Tender'",
+		},
+		{
+			fieldname: "payments",
+			fieldtype: "Table",
+			label: __("Split Tender Payments"),
+			depends_on: "eval:doc.tender_mode=='Split Tenders'",
+			data: [
+				{
+					payment_method: "Debit / Interac",
+					amount: remaining,
+					reference_no: "",
+				},
+			],
+			fields: [
+				{
+					fieldname: "payment_method",
+					fieldtype: "Select",
+					label: __("Method"),
+					options: PAYMENT_METHODS.join("\n"),
+					default: "Debit / Interac",
+					in_list_view: 1,
+					columns: 4,
+				},
+				{
+					fieldname: "amount",
+					fieldtype: "Currency",
+					label: __("Amount"),
+					in_list_view: 1,
+					columns: 3,
+				},
+				{
+					fieldname: "reference_no",
+					fieldtype: "Data",
+					label: __("Reference #"),
+					in_list_view: 1,
+					columns: 3,
+				},
+			],
+		},
+	];
+
+	if (has_active_phone_key) {
+		checkout_fields.push(
+			{
+				fieldname: "phone_key_notice",
+				fieldtype: "HTML",
+				options: `
+					<div class="alert alert-warning mb-2" style="font-size: 0.9rem;">
+						<strong>🔑 ${__("Active Tesla Phone Key on File")}</strong><br/>
+						${__("Before releasing this vehicle, remove it from the shop phone's Tesla app. Releasing will permanently delete the invite link, mark the phone key as released on the customer portal, and send a confirmation SMS to the customer.")}
+					</div>
+				`,
+			},
+			{
+				fieldname: "phone_key_removed_confirmed",
+				fieldtype: "Check",
+				label: __("I confirm the Tesla Phone Key has been removed from the shop phone"),
+				reqd: 1,
+				default: 0,
+			}
+		);
+	}
+
 	const d = new frappe.ui.Dialog({
 		title: __("Checkout & Release Vehicle"),
 		size: "large",
-		fields: [
-			{
-				fieldname: "summary",
-				fieldtype: "HTML",
-				options: summary_html,
-			},
-			{
-				fieldname: "odometer_out",
-				fieldtype: "Int",
-				label: __("Final Odometer Out"),
-				default: frm.doc.odometer_out || frm.doc.odometer_in || 0,
-				reqd: 1,
-			},
-			{
-				fieldname: "tender_mode",
-				fieldtype: "Select",
-				label: __("Tender Mode"),
-				options: "Single Tender\nSplit Tenders",
-				default: "Single Tender",
-				reqd: 1,
-			},
-			{
-				fieldname: "payment_method",
-				fieldtype: "Select",
-				label: __("Payment Method"),
-				options: PAYMENT_METHODS.join("\n"),
-				default: "Debit / Interac",
-				depends_on: "eval:doc.tender_mode=='Single Tender'",
-			},
-			{
-				fieldname: "paid_amount",
-				fieldtype: "Currency",
-				label: __("Amount Paid"),
-				default: remaining,
-				depends_on: "eval:doc.tender_mode=='Single Tender'",
-			},
-			{
-				fieldname: "payments",
-				fieldtype: "Table",
-				label: __("Split Tender Payments"),
-				depends_on: "eval:doc.tender_mode=='Split Tenders'",
-				data: [
-					{
-						payment_method: "Debit / Interac",
-						amount: remaining,
-						reference_no: "",
-					},
-				],
-				fields: [
-					{
-						fieldname: "payment_method",
-						fieldtype: "Select",
-						label: __("Method"),
-						options: PAYMENT_METHODS.join("\n"),
-						default: "Debit / Interac",
-						in_list_view: 1,
-						columns: 4,
-					},
-					{
-						fieldname: "amount",
-						fieldtype: "Currency",
-						label: __("Amount"),
-						in_list_view: 1,
-						columns: 3,
-					},
-					{
-						fieldname: "reference_no",
-						fieldtype: "Data",
-						label: __("Reference #"),
-						in_list_view: 1,
-						columns: 3,
-					},
-				],
-			},
-		],
+		fields: checkout_fields,
 		primary_action_label: __("Process Payment & Release"),
 		primary_action(values) {
+			if (has_active_phone_key && !values.phone_key_removed_confirmed) {
+				frappe.msgprint(
+					__("Please confirm that the Tesla Phone Key has been removed from the shop phone before releasing the vehicle.")
+				);
+				return;
+			}
 			const args = { odometer_out: values.odometer_out };
+			if (has_active_phone_key) {
+				args.phone_key_removed_confirmed = values.phone_key_removed_confirmed ? 1 : 0;
+			}
 			if (values.tender_mode === "Split Tenders") {
 				const payments = (values.payments || [])
 					.filter((p) => ro_flt(p.amount, 2) > 0)
@@ -1282,6 +1317,7 @@ frappe.ui.form.on("Repair Order", {
 		frm.trigger("update_tab_visibility");
 		frm.trigger("setup_fast_action_bar");
 		frm.trigger("setup_pin_to_drive_controls");
+		frm.trigger("setup_phone_key_controls");
 		frm.trigger("setup_navigation_buttons");
 		refresh_ro_vehicle_summary(frm);
 	},
@@ -1708,6 +1744,129 @@ frappe.ui.form.on("Repair Order", {
 
 					auto_hide_timeout = setTimeout(() => {
 						clear_pin_timers();
+						d.hide();
+					}, mask_seconds * 1000);
+
+					frm.reload_doc();
+				},
+			});
+		}, __("Workshop"));
+	},
+
+	setup_phone_key_controls(frm) {
+		if (frm.is_new() || frm.doc.docstatus === 2) return;
+		if (frm.doc.tesla_phone_key_status !== "Provided") return;
+		if (PIN_PURGE_RO_STATUSES.includes(frm.doc.status)) return;
+
+		const allowed_roles = [
+			"ISM Service Advisor",
+			"ISM Manager",
+			"System Manager",
+		];
+		const can_view_phone_key =
+			frappe.session.user === "Administrator" ||
+			allowed_roles.some((role) => frappe.user.has_role(role));
+		if (!can_view_phone_key) return;
+
+		frm.add_custom_button(__("🔑 Tesla Phone Key Invite"), () => {
+			frappe.call({
+				method: "ism.portal.phone_key_vault.reveal_ro_phone_key_desk",
+				args: { repair_order: frm.doc.name },
+				freeze: true,
+				freeze_message: __("Retrieving Tesla Phone Key Invite..."),
+				callback: (r) => {
+					if (r.exc) return;
+					const data = r.message || {};
+					if (!data.available || !data.invite_url) {
+						frappe.show_alert({
+							message: __("No active Tesla Phone Key invitation is available for this Repair Order."),
+							indicator: "orange",
+						});
+						frm.reload_doc();
+						return;
+					}
+
+					const invite_url = String(data.invite_url);
+					const mask_seconds = Math.max(1, parseInt(data.auto_mask_seconds, 10) || 60);
+					let remaining = mask_seconds;
+					let countdown_interval = null;
+					let auto_hide_timeout = null;
+
+					const clear_timers = () => {
+						if (countdown_interval) {
+							clearInterval(countdown_interval);
+							countdown_interval = null;
+						}
+						if (auto_hide_timeout) {
+							clearTimeout(auto_hide_timeout);
+							auto_hide_timeout = null;
+						}
+					};
+
+					const d = new frappe.ui.Dialog({
+						title: __("Tesla Phone Key Invite — {0}", [frm.doc.name]),
+						fields: [
+							{
+								fieldname: "pk_html",
+								fieldtype: "HTML",
+							},
+						],
+						primary_action_label: __("Clear & Close"),
+						primary_action() {
+							d.hide();
+						},
+						onhide() {
+							clear_timers();
+							d.fields_dict.pk_html.$wrapper.empty();
+						},
+					});
+
+					const safe_url = frappe.utils.escape_html(invite_url);
+					const safe_views = frappe.utils.escape_html(String(data.view_count || 1));
+					d.fields_dict.pk_html.$wrapper.html(`
+						<div class="py-2">
+							<div class="text-muted small mb-2">
+								${__("Ephemeral Customer Tesla Phone Key Invitation (Advisor/Manager Audited Access)")}
+							</div>
+							<div class="p-2 mb-3 rounded" style="background: var(--subtle-fg, #f8fafc); border: 1px solid var(--border-color, #e2e8f0); word-break: break-all; font-family: monospace; font-size: 0.88rem;">
+								<span class="ism-pk-url">${safe_url}</span>
+							</div>
+							<div class="d-flex flex-wrap" style="gap: 8px;">
+								<a class="btn btn-primary btn-sm ism-pk-open-link" href="${safe_url}" target="_blank" rel="noopener noreferrer">
+									${__("Open Tesla Invite")}
+								</a>
+								<button type="button" class="btn btn-default btn-sm ism-pk-copy-btn">
+									${__("Copy Link")}
+								</button>
+							</div>
+							<div class="text-muted small mt-3">
+								${__("Auto-clearing in")} <strong class="ism-pk-countdown">${mask_seconds}</strong>s
+								&middot; ${__("Access")} #${safe_views}
+								<br/>${__("Remember to remove this vehicle from the shop phone's Tesla app before releasing the car.")}
+							</div>
+						</div>
+					`);
+
+					d.fields_dict.pk_html.$wrapper.find(".ism-pk-copy-btn").on("click", () => {
+						frappe.utils.copy_to_clipboard(invite_url);
+					});
+
+					d.show();
+
+					countdown_interval = setInterval(() => {
+						remaining -= 1;
+						const $countdown = d.fields_dict.pk_html.$wrapper.find(".ism-pk-countdown");
+						if ($countdown.length) {
+							$countdown.text(String(Math.max(0, remaining)));
+						}
+						if (remaining <= 0) {
+							clear_timers();
+							d.hide();
+						}
+					}, 1000);
+
+					auto_hide_timeout = setTimeout(() => {
+						clear_timers();
 						d.hide();
 					}, mask_seconds * 1000);
 

@@ -8,6 +8,7 @@ frappe.ui.form.on('Schedule Entry', {
 		frm.trigger('setup_field_visibility');
 		frm.trigger('setup_buttons');
 		frm.trigger('setup_pin_to_drive_controls');
+		frm.trigger('setup_phone_key_controls');
 	},
 
 	entry_type(frm) {
@@ -233,6 +234,116 @@ frappe.ui.form.on('Schedule Entry', {
 						}
 						if (remaining <= 0) {
 							clear_pin_timer();
+							d.hide();
+						}
+					}, 1000);
+				},
+			});
+		});
+	},
+
+	setup_phone_key_controls(frm) {
+		if (frm.is_new() || frm.doc.docstatus === 2) return;
+		if (frm.doc.tesla_phone_key_status !== 'Provided') return;
+		if (!frm.doc.repair_order && SE_PIN_PURGE_STATUSES.includes(frm.doc.status)) return;
+
+		const allowed_roles = [
+			'ISM Service Advisor',
+			'ISM Manager',
+			'System Manager',
+		];
+		const can_view_phone_key =
+			frappe.session.user === 'Administrator' ||
+			allowed_roles.some((role) => frappe.user.has_role(role));
+		if (!can_view_phone_key) return;
+
+		frm.add_custom_button(__('🔑 Tesla Phone Key Invite'), () => {
+			frappe.call({
+				method: 'ism.portal.phone_key_vault.reveal_schedule_entry_phone_key_desk',
+				args: { schedule_entry: frm.doc.name },
+				freeze: true,
+				freeze_message: __('Retrieving Tesla Phone Key Invite...'),
+				callback: (r) => {
+					if (r.exc) return;
+					const data = r.message || {};
+					if (!data.available || !data.invite_url) {
+						frappe.show_alert({
+							message: __('No active Tesla Phone Key invitation is available for this appointment.'),
+							indicator: 'orange',
+						});
+						frm.reload_doc();
+						return;
+					}
+
+					const invite_url = String(data.invite_url);
+					const mask_seconds = Math.max(1, parseInt(data.auto_mask_seconds, 10) || 60);
+					let remaining = mask_seconds;
+					let countdown_interval = null;
+
+					const clear_timer = () => {
+						if (countdown_interval) {
+							clearInterval(countdown_interval);
+							countdown_interval = null;
+						}
+					};
+
+					const d = new frappe.ui.Dialog({
+						title: __('Tesla Phone Key Invite — {0}', [data.repair_order || frm.doc.name]),
+						fields: [
+							{
+								fieldname: 'pk_html',
+								fieldtype: 'HTML',
+							},
+						],
+						primary_action_label: __('Clear & Close'),
+						primary_action() {
+							d.hide();
+						},
+						onhide() {
+							clear_timer();
+							d.fields_dict.pk_html.$wrapper.empty();
+						},
+					});
+
+					const safe_url = frappe.utils.escape_html(invite_url);
+					const safe_views = frappe.utils.escape_html(String(data.view_count || 1));
+					d.fields_dict.pk_html.$wrapper.html(`
+						<div class="py-2">
+							<div class="text-muted small mb-2">
+								${__('Ephemeral Customer Tesla Phone Key Invitation (Advisor/Manager Audited Access)')}
+							</div>
+							<div class="p-2 mb-3 rounded" style="background: var(--subtle-fg, #f8fafc); border: 1px solid var(--border-color, #e2e8f0); word-break: break-all; font-family: monospace; font-size: 0.88rem;">
+								<span class="ism-pk-url">${safe_url}</span>
+							</div>
+							<div class="d-flex flex-wrap" style="gap: 8px;">
+								<a class="btn btn-primary btn-sm" href="${safe_url}" target="_blank" rel="noopener noreferrer">
+									${__('Open Tesla Invite')}
+								</a>
+								<button type="button" class="btn btn-default btn-sm ism-pk-copy-btn">
+									${__('Copy Link')}
+								</button>
+							</div>
+							<div class="text-muted small mt-3">
+								${__('Auto-clearing in')} <strong class="ism-pk-countdown">${mask_seconds}</strong>s
+								&middot; ${__('Access')} #${safe_views}
+							</div>
+						</div>
+					`);
+
+					d.fields_dict.pk_html.$wrapper.find('.ism-pk-copy-btn').on('click', () => {
+						frappe.utils.copy_to_clipboard(invite_url);
+					});
+
+					d.show();
+
+					countdown_interval = setInterval(() => {
+						remaining -= 1;
+						const $countdown = d.fields_dict.pk_html.$wrapper.find('.ism-pk-countdown');
+						if ($countdown.length) {
+							$countdown.text(String(Math.max(0, remaining)));
+						}
+						if (remaining <= 0) {
+							clear_timer();
 							d.hide();
 						}
 					}, 1000);

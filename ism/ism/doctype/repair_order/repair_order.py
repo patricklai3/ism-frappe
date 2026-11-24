@@ -373,6 +373,7 @@ class RepairOrder(Document):
 		paid_amount=None,
 		odometer_out=None,
 		payments=None,
+		phone_key_removed_confirmed=False,
 		**kwargs,
 	):
 		"""Finalize billing audit, create Sales Invoice and Payment Entry, and release vehicle."""
@@ -382,6 +383,7 @@ class RepairOrder(Document):
 			paid_amount=paid_amount,
 			odometer_out=odometer_out,
 			payments=payments,
+			phone_key_removed_confirmed=phone_key_removed_confirmed,
 			**kwargs,
 		)
 

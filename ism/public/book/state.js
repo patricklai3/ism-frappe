@@ -63,12 +63,14 @@ function emptyOtpState() {
 }
 
 function emptyPinState(initial = null) {
+	const status = (initial && initial.status) || "Not Prompted";
 	return {
-		status: (initial && initial.status) || "Not Prompted",
+		status,
 		masked_display: (initial && initial.masked_display) || null,
 		disclaimer: (initial && initial.disclaimer) || "",
 		code: "",
 		editing: false,
+		modalOpen: Boolean(initial && status === "Not Prompted"),
 		submitting: false,
 		error: null,
 		feedback: null,
@@ -528,7 +530,14 @@ export function createBookingStore(bootConfig) {
 		setPinEditing(editing) {
 			setState((prev) => ({
 				...prev,
-				pin: { ...prev.pin, editing: Boolean(editing), code: "", error: null },
+				pin: { ...prev.pin, editing: Boolean(editing), modalOpen: Boolean(editing), code: "", error: null },
+			}));
+		},
+
+		setPinModalOpen(open) {
+			setState((prev) => ({
+				...prev,
+				pin: { ...prev.pin, modalOpen: Boolean(open), editing: Boolean(open), code: "", error: null },
 			}));
 		},
 
@@ -543,6 +552,7 @@ export function createBookingStore(bootConfig) {
 					disclaimer: (pinState && pinState.disclaimer) || prev.pin.disclaimer,
 					code: "",
 					editing: false,
+					modalOpen: false,
 					submitting: false,
 					error: null,
 					feedback: feedback || null,

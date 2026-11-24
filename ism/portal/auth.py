@@ -56,6 +56,7 @@ from ism.portal.contracts import (
 	RO_CLOSED_LOCKED_STATUSES,
 	hash_portal_token,
 )
+from ism.utils.demo_mode import is_demo_mode
 
 __all__ = [
 	"assert_ro_mutating_unlocked",
@@ -79,6 +80,8 @@ __all__ = [
 
 _PORTAL_AUTH_RL_PREFIX = "ism:portal_auth_rl"
 _PORTAL_NOOP_OTP_PREFIX = "ism:portal:noop_otp"
+_PORTAL_DEMO_OTP_PREFIX = "ism:portal:demo_otp"
+_DEMO_PORTAL_CHALLENGES: dict[str, str] = {}
 _LINK_EXCHANGE_WINDOW_SEC = 60
 _LINK_EXCHANGE_IP_LIMIT = 30
 _LINK_EXCHANGE_TOKEN_LIMIT = 30
@@ -321,6 +324,7 @@ def get_public_portal_branding() -> dict[str, Any]:
 
 	return {
 		"portal_enabled": portal_enabled,
+		"demo_mode": is_demo_mode(settings),
 		"company_name": company_name,
 		"support_phone": support_phone,
 		"pickup_hours_text": pickup_hours_text,
@@ -684,6 +688,24 @@ def request_portal_login_otp(
 	except ValueError:
 		frappe.throw(_("Please enter a valid mobile phone number."), frappe.ValidationError)
 
+	if is_demo_mode(settings):
+		challenge_id = f"demo-{secrets.token_urlsafe(12)}"
+		_DEMO_PORTAL_CHALLENGES[challenge_id] = phone_e164
+		cache = _cache_or_none()
+		if cache is not None:
+			cache.set_value(f"{_PORTAL_DEMO_OTP_PREFIX}:{challenge_id}", phone_e164, expires_in_sec=300)
+		payload = OTPChallengeResult(
+			success=True,
+			challenge_id=challenge_id,
+			phone_masked=mask_phone_e164(phone_e164),
+			expires_in_seconds=300,
+			resend_available_in_seconds=5,
+		).to_dict()
+		payload["demo_mode"] = True
+		payload["demo_code"] = "000000"
+		payload["message"] = _("Demo Mode: Enter 000000 to sign in (SMS bypassed).")
+		return payload
+
 	subjects = resolve_subjects_for_phone(phone_e164)
 	if subjects["customers"] or subjects["schedule_entries"]:
 		result = request_sms_otp(
@@ -808,27 +830,44 @@ def verify_portal_login_otp(
 				cache.set_value(noop_key, noop_marker, expires_in_sec=cfg["ttl_seconds"])
 		return _generic_otp_verify_failure(clean_challenge_id)
 
-	verify_result = verify_sms_otp(
-		clean_challenge_id,
-		clean_code,
-		phone=normalized_phone,
-		purpose="portal_login",
-		client_ip=client_ip,
-		consume=True,
-	)
-	if not verify_result.verified:
-		if verify_result.error_code == "LOCKED_OUT":
-			return {
-				"verified": False,
-				"challenge_id": verify_result.challenge_id or clean_challenge_id,
-				"session": None,
-				"locked_until": verify_result.locked_until,
-				"error": verify_result.error,
-				"error_code": "LOCKED_OUT",
-			}
-		return _generic_otp_verify_failure(verify_result.challenge_id or clean_challenge_id)
+	source_challenge_id: str | None = None
+	if is_demo_mode(settings) and clean_challenge_id.startswith("demo-"):
+		demo_key = f"{_PORTAL_DEMO_OTP_PREFIX}:{clean_challenge_id}"
+		demo_phone = cache.get_value(demo_key) if cache is not None else None
+		if not demo_phone:
+			demo_phone = _DEMO_PORTAL_CHALLENGES.get(clean_challenge_id)
+		if not demo_phone or not clean_code.isdigit() or not (4 <= len(clean_code) <= 8):
+			return _generic_otp_verify_failure(clean_challenge_id)
+		if normalized_phone and normalized_phone != demo_phone:
+			return _generic_otp_verify_failure(clean_challenge_id)
+		if cache is not None:
+			cache.delete_value(demo_key)
+		_DEMO_PORTAL_CHALLENGES.pop(clean_challenge_id, None)
+		verified_phone = str(demo_phone)
+	else:
+		verify_result = verify_sms_otp(
+			clean_challenge_id,
+			clean_code,
+			phone=normalized_phone,
+			purpose="portal_login",
+			client_ip=client_ip,
+			consume=True,
+		)
+		if not verify_result.verified:
+			if verify_result.error_code == "LOCKED_OUT":
+				return {
+					"verified": False,
+					"challenge_id": verify_result.challenge_id or clean_challenge_id,
+					"session": None,
+					"locked_until": verify_result.locked_until,
+					"error": verify_result.error,
+					"error_code": "LOCKED_OUT",
+				}
+			return _generic_otp_verify_failure(verify_result.challenge_id or clean_challenge_id)
 
-	verified_phone = verify_result.phone_e164
+		verified_phone = verify_result.phone_e164
+		source_challenge_id = verify_result.challenge_id
+
 	subjects = resolve_subjects_for_phone(verified_phone or "")
 	primary_customer = subjects["customers"][0] if subjects["customers"] else None
 	primary_schedule_entry = (
@@ -859,7 +898,7 @@ def verify_portal_login_otp(
 				customer=primary_customer,
 				phone_e164=verified_phone,
 				schedule_entry=primary_schedule_entry,
-				source_otp_challenge=verify_result.challenge_id,
+				source_otp_challenge=source_challenge_id,
 				client_ip=client_ip,
 				user_agent=user_agent,
 				set_response_cookie=set_response_cookie,
@@ -871,7 +910,7 @@ def verify_portal_login_otp(
 			customer=primary_customer,
 			phone_e164=verified_phone,
 			schedule_entry=primary_schedule_entry,
-			source_otp_challenge=verify_result.challenge_id,
+			source_otp_challenge=source_challenge_id,
 			client_ip=client_ip,
 			user_agent=user_agent,
 			set_response_cookie=set_response_cookie,
@@ -879,7 +918,7 @@ def verify_portal_login_otp(
 
 	return {
 		"verified": True,
-		"challenge_id": verify_result.challenge_id,
+		"challenge_id": source_challenge_id or clean_challenge_id,
 		"session": session_info,
 		"customers": subjects["customers"],
 		"schedule_entries": subjects["schedule_entries"],

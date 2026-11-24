@@ -13,6 +13,7 @@ from ism.api._validation import escape_like
 from ism.api.parts import _resolve_default_warehouse as get_default_warehouse
 from ism.api.parts import get_items_available_stock_batch
 from ism.api.sms import dispatch_sms
+from ism.utils.demo_mode import is_demo_mode
 
 
 def link_ro_vehicle_to_customer(ro) -> None:
@@ -89,6 +90,8 @@ def sync_completed_deferred_services(ro) -> None:
 
 def check_ro_parts_stock_availability(ro) -> tuple[bool, List[Dict[str, Any]]]:
 	"""Check stock availability for all parts in approved services. Returns (is_all_available, deficit_items)."""
+	if is_demo_mode():
+		return True, []
 	approved_services = [s for s in ro.services if s.status == "Approved"]
 	if not approved_services:
 		return True, []

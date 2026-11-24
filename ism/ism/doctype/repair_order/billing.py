@@ -20,6 +20,7 @@ from ism.api.parts_stock import (
 )
 from ism.ism.doctype.repair_order.fulfillment import complete_linked_schedule_entries
 from ism.ism.doctype.repair_order.pricing import get_or_create_default_tax_template
+from ism.utils.demo_mode import is_demo_mode
 
 _REOPEN_FROM_STATUSES = ("Billed / Paid", "Closed / Released")
 _LOCKED_INVOICE_STATUSES = ("Cancelled", "Closed / Released", "Billed / Paid")
@@ -260,7 +261,8 @@ def _acquire_locked_ro_state(ro) -> Dict[str, Any]:
 
 	locked_rows = frappe.db.sql(
 		"""
-		SELECT name, status, sales_invoice, vehicle_released, customer, company, grand_total, paid_amount
+		SELECT name, status, sales_invoice, vehicle_released, customer, company, grand_total, paid_amount,
+		       tesla_phone_key_status
 		FROM `tabRepair Order`
 		WHERE name = %s
 		FOR UPDATE
@@ -525,8 +527,11 @@ def _recompute_ro_payment_state(
 	_persist_ro_payment_fields(ro_name, updates)
 
 
-def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str, Any]) -> None:
-	"""Verify Bin actual_qty and any explicitly pinned Storage Bin balances cover all Approved stock parts."""
+def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str, Any]) -> bool:
+	"""Verify Bin actual_qty and any explicitly pinned Storage Bin balances cover all Approved stock parts.
+
+	Returns True if deficits were bypassed under Customer Journey Demo Mode, else False.
+	"""
 	required_by_key: Dict[tuple[str, str], float] = {}
 	required_by_pinned_bin: Dict[tuple[str, str, str], float] = {}
 	for idx, _service in enumerate(approved_services):
@@ -552,7 +557,7 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 					required_by_pinned_bin[pin_key] = flt(required_by_pinned_bin.get(pin_key, 0.0) + qty, 6)
 
 	if not required_by_key:
-		return
+		return False
 
 	req_items = list({k[0] for k in required_by_key})
 	req_whs = list({k[1] for k in required_by_key})
@@ -575,6 +580,8 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 			)
 
 	if deficits:
+		if is_demo_mode():
+			return True
 		frappe.throw(
 			_("Insufficient warehouse stock for Repair Order {0}: {1}").format(
 				ro.name, "; ".join(deficits)
@@ -601,12 +608,15 @@ def _validate_pre_checkout_stock(ro, approved_services: List[Any], ctx: Dict[str
 					)
 				)
 		if bin_deficits:
+			if is_demo_mode():
+				return True
 			frappe.throw(
 				_("Insufficient bin stock for Repair Order {0}: {1}").format(
 					ro.name, "; ".join(bin_deficits)
 				),
 				frappe.ValidationError,
 			)
+	return False
 
 
 def _apply_ro_advances_to_invoice(si, ro_name: str, customer: str) -> float:
@@ -756,6 +766,7 @@ def process_ro_payment_and_release(
 	paid_amount=None,
 	odometer_out=None,
 	payments=None,
+	phone_key_removed_confirmed=False,
 	**kwargs,
 ) -> Dict[str, Any]:
 	"""
@@ -777,6 +788,9 @@ def process_ro_payment_and_release(
 		paid_amount = payment_method.get("paid_amount", paid_amount)
 		odometer_out = payment_method.get("odometer_out", odometer_out)
 		payments = payment_method.get("payments", payments)
+		phone_key_removed_confirmed = payment_method.get(
+			"phone_key_removed_confirmed", phone_key_removed_confirmed
+		)
 		if payment_method.get("payment_method"):
 			explicit_method_supplied = True
 		payment_method = payment_method.get("payment_method") or "Debit / Interac"
@@ -793,12 +807,37 @@ def process_ro_payment_and_release(
 		odometer_out = kwargs.get("odometer_out")
 	if payments is None and "payments" in kwargs:
 		payments = kwargs.get("payments")
+	if not phone_key_removed_confirmed and "phone_key_removed_confirmed" in kwargs:
+		phone_key_removed_confirmed = kwargs.get("phone_key_removed_confirmed")
 
 	pay_amt: float | None = None
 	if paid_amount is not None and payments is None:
 		pay_amt = _parse_strict_amount(paid_amount, "Paid amount", allow_zero=True)
 
-	_acquire_locked_ro_state(ro)
+	locked_ro = _acquire_locked_ro_state(ro)
+
+	has_active_phone_key = (
+		(locked_ro.get("tesla_phone_key_status") or getattr(ro, "tesla_phone_key_status", None))
+		== "Provided"
+	)
+	if has_active_phone_key:
+		confirmed_flag = (
+			phone_key_removed_confirmed
+			if isinstance(phone_key_removed_confirmed, bool)
+			else (
+				str(phone_key_removed_confirmed).strip().lower() in ("1", "true", "yes", "on")
+				if isinstance(phone_key_removed_confirmed, str)
+				else bool(cint(phone_key_removed_confirmed))
+			)
+		)
+		if not confirmed_flag:
+			frappe.throw(
+				_(
+					"Please remove this vehicle's Tesla Phone Key from the shop phone and confirm removal "
+					"before releasing the vehicle."
+				),
+				frappe.ValidationError,
+			)
 
 	if odometer_out is not None:
 		ro.odometer_out = _parse_strict_odometer(odometer_out, "Odometer Out")
@@ -829,7 +868,7 @@ def process_ro_payment_and_release(
 		)
 
 	ctx = _resolve_billing_context(ro, approved_services)
-	_validate_pre_checkout_stock(ro, approved_services, ctx)
+	demo_stock_bypassed = _validate_pre_checkout_stock(ro, approved_services, ctx)
 
 	explicit_zero_tax = (
 		ro.tax_rate is not None and str(ro.tax_rate).strip() != "" and flt(ro.tax_rate) == 0.0
@@ -848,7 +887,7 @@ def process_ro_payment_and_release(
 	si.company = ro.company
 	si.posting_date = today()
 	si.currency = ro.currency or "CAD"
-	si.update_stock = 1
+	si.update_stock = 0 if demo_stock_bypassed else 1
 	if ctx["default_warehouse"] and frappe.db.exists(
 		"Warehouse",
 		{"name": ctx["default_warehouse"], "company": ro.company, "is_group": 0, "disabled": 0},
@@ -1193,6 +1232,9 @@ def process_ro_payment_and_release(
 	ro.vehicle_released = 1
 	ro.status = "Closed / Released"
 	ro.checkout_date = now_datetime()
+	if has_active_phone_key:
+		ro.tesla_phone_key_released_by = getattr(frappe.session, "user", None) or "Administrator"
+		ro.tesla_phone_key_released_at = ro.checkout_date
 
 	if ro.vehicle:
 		frappe.db.set_value(

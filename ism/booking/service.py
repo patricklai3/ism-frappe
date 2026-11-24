@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import json
+import secrets
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -33,6 +34,7 @@ from ism.booking.contracts import (
 	ERR_SMS_UNCONFIGURED,
 	ERR_VEHICLE_CONFLICT,
 	HONEYPOT_FIELD_NAME,
+	MIN_FORM_FILL_SECONDS,
 	PORTAL_ROUTE,
 	VEHICLE_MIN_YEAR,
 	BookingConfigSnapshot,
@@ -43,7 +45,7 @@ from ism.booking.contracts import (
 	resolve_booking_pin_state,
 	resolve_booking_portal_link,
 )
-from ism.comms.contracts import SMSDispatchRequest, get_client_ip
+from ism.comms.contracts import SMSDispatchRequest, get_client_ip, mask_phone_e164
 from ism.comms.email_dispatch import dispatch_transactional_email
 from ism.comms.otp import (
 	consume_verified_otp_challenge,
@@ -71,6 +73,7 @@ from ism.scheduling.self_serve import (
 	normalize_provisional_intake,
 )
 from ism.scheduling.time_utils import get_shop_settings, normalize_date
+from ism.utils.demo_mode import list_demo_packages
 from ism.utils.tesla_manual import get_generation_catalog
 
 _COMMIT_SAVEPOINT_NAME: str = "p5_booking_commit"
@@ -540,7 +543,10 @@ def get_booking_boot_config(
 	branding = get_shop_branding()
 	sms_ready = get_sms_unconfigured_reason() is None
 
-	if not booking_settings.enable_self_serve_booking:
+	if booking_settings.demo_mode:
+		enabled = True
+		disabled_reason = None
+	elif not booking_settings.enable_self_serve_booking:
 		enabled = False
 		disabled_reason: str | None = ERR_BOOKING_DISABLED
 	elif not sms_ready:
@@ -554,6 +560,7 @@ def get_booking_boot_config(
 
 	return {
 		"enabled": enabled,
+		"demo_mode": booking_settings.demo_mode,
 		"disabled_reason": disabled_reason,
 		"title": booking_settings.title,
 		"intro": booking_settings.intro,
@@ -625,11 +632,17 @@ def get_public_booking_packages(
 			http_status=422,
 		)
 
+	is_demo_catalog = False
+	if not packages and booking_settings.demo_mode:
+		packages = list_demo_packages(vehicle_model=vehicle_model, search=search)
+		is_demo_catalog = True
+
 	return {
 		"success": True,
 		"packages": packages,
 		"max_packages_per_booking": booking_settings.max_packages_per_booking,
 		"currency": _DEFAULT_CURRENCY,
+		"is_demo_catalog": is_demo_catalog,
 	}
 
 
@@ -751,7 +764,7 @@ def initiate_booking_otp(
 			http_status=503,
 		)
 
-	if get_sms_unconfigured_reason() is not None:
+	if not booking_settings.demo_mode and get_sms_unconfigured_reason() is not None:
 		return _error_result(
 			error_code=ERR_SMS_UNCONFIGURED,
 			error=(
@@ -766,6 +779,7 @@ def initiate_booking_otp(
 		form_nonce=form_nonce,
 		settings=booking_settings,
 		now_ts=now_ts,
+		min_elapsed_seconds=0 if booking_settings.demo_mode else MIN_FORM_FILL_SECONDS,
 	)
 	if not abuse_res.allowed:
 		return _error_result(
@@ -776,18 +790,19 @@ def initiate_booking_otp(
 
 	resolved_ip = get_client_ip(client_ip)
 	resolved_ua = _resolve_user_agent(user_agent)
-	ip_rl = enforce_booking_ip_rate_limit(
-		"otp",
-		client_ip=resolved_ip,
-		limit=booking_settings.ip_rate_limit_per_hour,
-	)
-	if not ip_rl.allowed:
-		return _error_result(
-			error_code=ip_rl.error_code or "RATE_LIMITED",
-			error=ip_rl.error or "Too many booking requests. Please wait and try again.",
-			http_status=ip_rl.http_status,
-			retry_after_seconds=ip_rl.retry_after_seconds or None,
+	if not booking_settings.demo_mode:
+		ip_rl = enforce_booking_ip_rate_limit(
+			"otp",
+			client_ip=resolved_ip,
+			limit=booking_settings.ip_rate_limit_per_hour,
 		)
+		if not ip_rl.allowed:
+			return _error_result(
+				error_code=ip_rl.error_code or "RATE_LIMITED",
+				error=ip_rl.error or "Too many booking requests. Please wait and try again.",
+				http_status=ip_rl.http_status,
+				retry_after_seconds=ip_rl.retry_after_seconds or None,
+			)
 
 	deduped_ids, pkg_err = _parse_and_validate_package_ids(package_ids, settings=booking_settings)
 	if pkg_err is not None or deduped_ids is None:
@@ -864,19 +879,20 @@ def initiate_booking_otp(
 			http_status=422,
 		)
 
-	phone_guard = check_phone_daily_limit_and_duplicate(
-		phone_e164=normalized["phone"],
-		target_date=iso_date,
-		internal_start_time=internal_start_time,
-		settings=booking_settings,
-		now_dt=now_dt,
-	)
-	if not phone_guard.allowed:
-		return _error_result(
-			error_code=phone_guard.error_code or "RATE_LIMITED",
-			error=phone_guard.error or "Unable to schedule another appointment right now.",
-			http_status=phone_guard.http_status,
+	if not booking_settings.demo_mode:
+		phone_guard = check_phone_daily_limit_and_duplicate(
+			phone_e164=normalized["phone"],
+			target_date=iso_date,
+			internal_start_time=internal_start_time,
+			settings=booking_settings,
+			now_dt=now_dt,
 		)
+		if not phone_guard.allowed:
+			return _error_result(
+				error_code=phone_guard.error_code or "RATE_LIMITED",
+				error=phone_guard.error or "Unable to schedule another appointment right now.",
+				http_status=phone_guard.http_status,
+			)
 
 	shop_settings = get_shop_settings()
 	holiday_fn = build_holiday_checker(shop_settings.get("holiday_list"), iso_date)
@@ -949,6 +965,16 @@ def initiate_booking_otp(
 			http_status=409,
 		)
 
+	if booking_settings.demo_mode:
+		return {
+			"success": True,
+			"challenge_id": f"demo-{secrets.token_urlsafe(12)}",
+			"phone_masked": mask_phone_e164(normalized["phone"]),
+			"expires_in_seconds": 300,
+			"resend_available_in_seconds": 5,
+			"demo_mode": True,
+		}
+
 	try:
 		otp_res = request_sms_otp(
 			normalized["phone"],
@@ -1013,7 +1039,7 @@ def verify_and_commit_booking(
 			http_status=503,
 		)
 
-	if get_sms_unconfigured_reason() is not None:
+	if not booking_settings.demo_mode and get_sms_unconfigured_reason() is not None:
 		return _error_result(
 			error_code=ERR_SMS_UNCONFIGURED,
 			error=(
@@ -1028,6 +1054,7 @@ def verify_and_commit_booking(
 		form_nonce=form_nonce,
 		settings=booking_settings,
 		now_ts=now_ts,
+		min_elapsed_seconds=0 if booking_settings.demo_mode else MIN_FORM_FILL_SECONDS,
 	)
 	if not abuse_res.allowed:
 		return _error_result(
@@ -1038,18 +1065,19 @@ def verify_and_commit_booking(
 
 	resolved_ip = get_client_ip(client_ip)
 	resolved_ua = _resolve_user_agent(user_agent)
-	ip_rl = enforce_booking_ip_rate_limit(
-		"commit",
-		client_ip=resolved_ip,
-		limit=booking_settings.ip_rate_limit_per_hour,
-	)
-	if not ip_rl.allowed:
-		return _error_result(
-			error_code=ip_rl.error_code or "RATE_LIMITED",
-			error=ip_rl.error or "Too many booking requests. Please wait and try again.",
-			http_status=ip_rl.http_status,
-			retry_after_seconds=ip_rl.retry_after_seconds or None,
+	if not booking_settings.demo_mode:
+		ip_rl = enforce_booking_ip_rate_limit(
+			"commit",
+			client_ip=resolved_ip,
+			limit=booking_settings.ip_rate_limit_per_hour,
 		)
+		if not ip_rl.allowed:
+			return _error_result(
+				error_code=ip_rl.error_code or "RATE_LIMITED",
+				error=ip_rl.error or "Too many booking requests. Please wait and try again.",
+				http_status=ip_rl.http_status,
+				retry_after_seconds=ip_rl.retry_after_seconds or None,
+			)
 
 	clean_challenge_id = challenge_id.strip() if isinstance(challenge_id, str) else ""
 	if not clean_challenge_id:
@@ -1128,10 +1156,12 @@ def verify_and_commit_booking(
 	if cached_payload is not None:
 		return cached_payload
 
+	is_demo_bypass = booking_settings.demo_mode and clean_challenge_id.startswith("demo-")
+
 	# Step 4: Pre-commit SMS OTP verification BEFORE opening the booking savepoint
 	# so Verified status survives a slot-conflict savepoint rollback.
 	clean_otp = otp_code.strip() if isinstance(otp_code, str) and otp_code.strip() else None
-	if clean_otp is not None:
+	if not is_demo_bypass and clean_otp is not None:
 		verify_res = verify_sms_otp(
 			clean_challenge_id,
 			clean_otp,
@@ -1146,29 +1176,30 @@ def verify_and_commit_booking(
 	# Step 5: Atomic single-use OTP consume + provisional Schedule Entry commit inside savepoint.
 	frappe.db.savepoint(_COMMIT_SAVEPOINT_NAME)
 	try:
-		consume_res = consume_verified_otp_challenge(
-			clean_challenge_id,
-			expected_purpose=BOOKING_OTP_PURPOSE,
-			expected_phone=phone_e164,
-		)
-		if not consume_res.verified:
-			_rollback_savepoint_safe(_COMMIT_SAVEPOINT_NAME)
-			return _map_otp_consume_error(consume_res)
-
-		phone_guard = check_phone_daily_limit_and_duplicate(
-			phone_e164=phone_e164,
-			target_date=iso_date,
-			internal_start_time=internal_start_time,
-			settings=booking_settings,
-			now_dt=now_dt,
-		)
-		if not phone_guard.allowed:
-			_rollback_savepoint_safe(_COMMIT_SAVEPOINT_NAME)
-			return _error_result(
-				error_code=phone_guard.error_code or "RATE_LIMITED",
-				error=phone_guard.error or "Unable to schedule another appointment right now.",
-				http_status=phone_guard.http_status,
+		if not is_demo_bypass:
+			consume_res = consume_verified_otp_challenge(
+				clean_challenge_id,
+				expected_purpose=BOOKING_OTP_PURPOSE,
+				expected_phone=phone_e164,
 			)
+			if not consume_res.verified:
+				_rollback_savepoint_safe(_COMMIT_SAVEPOINT_NAME)
+				return _map_otp_consume_error(consume_res)
+
+			phone_guard = check_phone_daily_limit_and_duplicate(
+				phone_e164=phone_e164,
+				target_date=iso_date,
+				internal_start_time=internal_start_time,
+				settings=booking_settings,
+				now_dt=now_dt,
+			)
+			if not phone_guard.allowed:
+				_rollback_savepoint_safe(_COMMIT_SAVEPOINT_NAME)
+				return _error_result(
+					error_code=phone_guard.error_code or "RATE_LIMITED",
+					error=phone_guard.error or "Unable to schedule another appointment right now.",
+					http_status=phone_guard.http_status,
+				)
 
 		prior_len = _message_log_len()
 		try:
@@ -1239,12 +1270,17 @@ def verify_and_commit_booking(
 	waiter_pref: str = str(booking_result.get("waiter_preference") or normalized["waiter_preference"])
 
 	# Step 6: Post-commit rate-limit bookkeeping & persistent portal cookie promotion.
-	record_phone_daily_booking(phone_e164)
+	if not is_demo_bypass:
+		record_phone_daily_booking(phone_e164)
 
-	challenge_doc_name = frappe.db.get_value(
-		"Portal OTP Challenge",
-		{"challenge_id": clean_challenge_id},
-		"name",
+	challenge_doc_name = (
+		None
+		if is_demo_bypass
+		else frappe.db.get_value(
+			"Portal OTP Challenge",
+			{"challenge_id": clean_challenge_id},
+			"name",
+		)
 	)
 	matched_customer = _find_unique_customer_by_phone(phone_e164)
 
@@ -1269,29 +1305,30 @@ def verify_and_commit_booking(
 	direct_portal_url, has_tokenized_link = resolve_booking_portal_link(booking_reference)
 
 	sms_sent = False
-	try:
-		sms_body = (
-			f"{shop_name_single_line}: Your appointment for {vehicle_label} is confirmed for "
-			f"{display_datetime} (Ref: {booking_reference}). "
-			f"Manage or reschedule: {direct_portal_url}"
-		)
-		sms_res = send_sms(
-			SMSDispatchRequest(
-				to_phone=phone_e164,
-				body=sms_body,
-				message_type="Booking Confirmation",
-				reference_doctype="Schedule Entry",
-				reference_name=booking_reference,
-				redact_body=False,
-				respect_opt_out=True,
+	if get_sms_unconfigured_reason() is None:
+		try:
+			sms_body = (
+				f"{shop_name_single_line}: Your appointment for {vehicle_label} is confirmed for "
+				f"{display_datetime} (Ref: {booking_reference}). "
+				f"Manage or reschedule: {direct_portal_url}"
 			)
-		)
-		sms_sent = bool(sms_res.success)
-	except Exception:
-		frappe.log_error(
-			title="Booking Confirmation SMS Failed",
-			message=frappe.get_traceback(),
-		)
+			sms_res = send_sms(
+				SMSDispatchRequest(
+					to_phone=phone_e164,
+					body=sms_body,
+					message_type="Booking Confirmation",
+					reference_doctype="Schedule Entry",
+					reference_name=booking_reference,
+					redact_body=False,
+					respect_opt_out=True,
+				)
+			)
+			sms_sent = bool(sms_res.success)
+		except Exception:
+			frappe.log_error(
+				title="Booking Confirmation SMS Failed",
+				message=frappe.get_traceback(),
+			)
 
 	email_sent = False
 	recipient_email = normalized.get("email")

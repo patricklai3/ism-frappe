@@ -1121,6 +1121,7 @@ def checkout_repair_order(
 	odometer_out: Optional[int] = None,
 	payments: Optional[Union[List[Any], str]] = None,
 	confirm: Any = False,
+	phone_key_removed_confirmed: Any = False,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Invoice, record payment, complete linked schedule entries, and release a Repair Order."""
@@ -1143,6 +1144,7 @@ def checkout_repair_order(
 		"payment_method": payment_method or parsed_payments[0]["payment_method"],
 		"paid_amount": explicit_paid,
 		"odometer_out": validated_odo_out,
+		"phone_key_removed_confirmed": coerce_bool(phone_key_removed_confirmed),
 	}
 	if parsed_payments is not None:
 		release_kwargs["payments"] = parsed_payments

@@ -12,7 +12,7 @@ import {
 	requestBookingOtp,
 	submitBookingPinToDrive,
 } from "./api.js";
-import { createBookingStore } from "./state.js";
+import { createBookingStore } from "./state.js?v=2";
 
 function el(tag, attrs = null, ...children) {
 	const node = document.createElement(tag);
@@ -107,6 +107,7 @@ function initBookingApp() {
 	const policy = bootConfig.policy || {};
 	const shop = bootConfig.shop || {};
 	const portalUrl = bootConfig.portal_url || "/portal";
+	const isDemoMode = Boolean(bootConfig.demo_mode);
 	const maxPackages = Math.max(1, Number(policy.max_packages_per_booking) || 5);
 	const store = createBookingStore(bootConfig);
 
@@ -356,19 +357,20 @@ function initBookingApp() {
 		}
 	}
 
-	async function handleConfirmBooking({ skipOtpCode = false } = {}) {
+	async function handleConfirmBooking({ skipOtpCode = false, demoBypass = false } = {}) {
 		const state = store.getState();
 		if (!validateCustomerDetails(state)) return;
 		if (!state.selectedSlot) {
 			store.setError("Please choose a drop-off time first.");
 			return;
 		}
-		if (!state.otp.challenge_id) {
+		const useDemoBypass = Boolean(demoBypass && isDemoMode);
+		if (!useDemoBypass && !state.otp.challenge_id) {
 			store.setError("Please send and enter your 6-digit SMS verification code first.");
 			return;
 		}
-		const otpCode = skipOtpCode || state.otp.otp_verified ? null : state.otp.code.trim();
-		if (!skipOtpCode && !state.otp.otp_verified && (!otpCode || otpCode.length < 4)) {
+		const otpCode = useDemoBypass || skipOtpCode || state.otp.otp_verified ? null : state.otp.code.trim();
+		if (!useDemoBypass && !skipOtpCode && !state.otp.otp_verified && (!otpCode || otpCode.length < 4)) {
 			store.setError("Please enter the 6-digit verification code sent to your mobile phone.");
 			return;
 		}
@@ -378,12 +380,15 @@ function initBookingApp() {
 		try {
 			const payload = {
 				...buildBookingRequestPayload(state),
-				challenge_id: state.otp.challenge_id,
+				challenge_id: useDemoBypass ? "demo-bypass" : state.otp.challenge_id,
 				otp_code: otpCode,
 				idempotency_key: state.idempotency_key,
 			};
 			const res = await confirmSelfServeBooking(payload);
 			stopResendTimer();
+			if (res && res.pin_to_drive && (!res.pin_to_drive.status || res.pin_to_drive.status === "Not Prompted")) {
+				pendingFocusId = "ism-booking-pin-input";
+			}
 			store.setConfirmation(res);
 		} catch (err) {
 			if (err instanceof BookingApiError) {
@@ -1164,7 +1169,9 @@ function initBookingApp() {
 					el("h1", { id: "ism-step4-title", className: "ism-card__title", textContent: "Your Details & Verification" }),
 					el("p", {
 						className: "ism-card__text",
-						textContent: "We will text a 6-digit code to confirm your appointment.",
+						textContent: isDemoMode
+							? "Demo Mode: SMS verification is bypassed. Enter your details to confirm."
+							: "We will text a 6-digit code to confirm your appointment.",
 					})
 				),
 				el("button", {
@@ -1189,7 +1196,9 @@ function initBookingApp() {
 					className: "ism-field-grid",
 					onSubmit: (e) => {
 						e.preventDefault();
-						if (state.otp.sent) {
+						if (isDemoMode) {
+							handleConfirmBooking({ demoBypass: true });
+						} else if (state.otp.sent) {
 							handleConfirmBooking();
 						} else {
 							handleSendOtp();
@@ -1240,7 +1249,9 @@ function initBookingApp() {
 						}),
 						el("span", {
 							className: "ism-field__hint",
-							textContent: "SMS verification code will be sent to this number.",
+							textContent: isDemoMode
+								? "Used to look up your visit in the Customer Portal (no SMS sent in Demo Mode)."
+								: "SMS verification code will be sent to this number.",
 						})
 					),
 					el(
@@ -1297,10 +1308,14 @@ function initBookingApp() {
 							el("button", {
 								type: "submit",
 								className: "ism-btn ism-btn-primary",
-								disabled: state.loading.otp,
-								textContent: state.loading.otp
-									? "Sending Code..."
-									: "Send Verification Code",
+								disabled: isDemoMode ? state.loading.confirm : state.loading.otp,
+								textContent: isDemoMode
+									? state.loading.confirm
+										? "Confirming Appointment..."
+										: "Confirm Appointment (Demo Mode)"
+									: state.loading.otp
+										? "Sending Code..."
+										: "Send Verification Code",
 							})
 						)
 					: null
@@ -1320,71 +1335,9 @@ function initBookingApp() {
 		const disclaimer =
 			pin.disclaimer ||
 			"Your 4-digit PIN-to-Drive is encrypted at rest, accessible only to authorized shop technicians while your vehicle is in service, and permanently purged as soon as your vehicle is released.";
-		const showForm = status === "Not Prompted" || Boolean(pin.editing);
 
 		let bodyNode;
-		if (showForm) {
-			bodyNode = el(
-				"form",
-				{
-					className: "ism-pin-form",
-					onSubmit: (e) => {
-						e.preventDefault();
-						handleSaveBookingPin();
-					},
-				},
-				el(
-					"div",
-					{ className: "ism-field" },
-					el("label", {
-						className: "ism-field__label",
-						for: "ism-booking-pin-input",
-						textContent: "4-Digit Numeric PIN-to-Drive",
-					}),
-					el("input", {
-						id: "ism-booking-pin-input",
-						className: "ism-input ism-pin-input",
-						type: "password",
-						inputmode: "numeric",
-						pattern: "\\d{4}",
-						maxlength: "4",
-						autocomplete: "off",
-						placeholder: "••••",
-						value: pin.code || "",
-						disabled: Boolean(pin.submitting),
-						onInput: (e) => store.setPinCode(e.target.value),
-					})
-				),
-				el(
-					"div",
-					{ className: "ism-pin-actions" },
-					el("button", {
-						type: "submit",
-						id: "ism-booking-pin-save-btn",
-						className: "ism-btn ism-btn-primary",
-						disabled: Boolean(pin.submitting) || (pin.code || "").length !== 4,
-						textContent: pin.submitting ? "Encrypting & Saving..." : "Save 4-Digit PIN",
-					}),
-					el("button", {
-						type: "button",
-						id: "ism-booking-pin-optout-btn",
-						className: "ism-btn ism-btn-secondary",
-						disabled: Boolean(pin.submitting),
-						onClick: () => handleOptOutBookingPin(),
-						textContent: "No PIN-to-Drive enabled",
-					}),
-					pin.editing
-						? el("button", {
-								type: "button",
-								className: "ism-btn-link",
-								disabled: Boolean(pin.submitting),
-								onClick: () => store.setPinEditing(false),
-								textContent: "Cancel",
-							})
-						: null
-				)
-			);
-		} else if (status === "Provided") {
+		if (status === "Provided") {
 			bodyNode = el(
 				"div",
 				{ className: "ism-pin-resolved" },
@@ -1407,7 +1360,7 @@ function initBookingApp() {
 					className: "ism-btn ism-btn-secondary",
 					onClick: () => {
 						pendingFocusId = "ism-booking-pin-input";
-						store.setPinEditing(true);
+						store.setPinModalOpen(true);
 					},
 					textContent: "Update PIN",
 				})
@@ -1425,13 +1378,29 @@ function initBookingApp() {
 					className: "ism-btn ism-btn-secondary",
 					onClick: () => {
 						pendingFocusId = "ism-booking-pin-input";
-						store.setPinEditing(true);
+						store.setPinModalOpen(true);
 					},
 					textContent: "Add 4-Digit PIN",
 				})
 			);
 		} else {
-			bodyNode = null;
+			bodyNode = el(
+				"div",
+				{ className: "ism-pin-resolved" },
+				el("p", {
+					className: "ism-pin-note",
+					textContent: "If your vehicle uses PIN-to-Drive, share it securely so our team can move it into the bay.",
+				}),
+				el("button", {
+					type: "button",
+					className: "ism-btn ism-btn-primary",
+					onClick: () => {
+						pendingFocusId = "ism-booking-pin-input";
+						store.setPinModalOpen(true);
+					},
+					textContent: "Set 4-Digit PIN",
+				})
+			);
 		}
 
 		return el(
@@ -1443,10 +1412,7 @@ function initBookingApp() {
 				el("h2", {
 					id: "ism-booking-pin-heading",
 					className: "ism-pin-card__title",
-					textContent:
-						status === "Not Prompted"
-							? "Does Your Vehicle Use PIN-to-Drive?"
-							: "Vehicle PIN-to-Drive",
+					textContent: "Vehicle PIN-to-Drive",
 				}),
 				el("span", {
 					className: `ism-status-badge${status === "Provided" ? " ism-status-badge--ok" : ""}`,
@@ -1454,13 +1420,123 @@ function initBookingApp() {
 				})
 			),
 			el("p", { className: "ism-pin-card__disclaimer", textContent: disclaimer }),
-			pin.error
-				? el("div", { className: "ism-banner ism-banner--error", role: "alert", textContent: pin.error })
-				: null,
 			pin.feedback
 				? el("div", { className: "ism-banner ism-banner--info", role: "status", textContent: pin.feedback })
 				: null,
 			bodyNode
+		);
+	}
+
+	function renderStep5PinModal(state, conf) {
+		const sessionReady = Boolean(conf.portal_handoff && conf.portal_handoff.session_established);
+		const pin = state.pin || {};
+		if (!conf.booking_reference || !sessionReady || !conf.pin_to_drive || !pin.modalOpen) {
+			return null;
+		}
+
+		const status = pin.status || "Not Prompted";
+		const isUpdate = status === "Provided" || status === "Opted Out";
+		const disclaimer =
+			pin.disclaimer ||
+			"Your 4-digit PIN-to-Drive is encrypted at rest, accessible only to authorized shop technicians while your vehicle is in service, and permanently purged as soon as your vehicle is released.";
+
+		return el(
+			"div",
+			{
+				id: "ism-booking-pin-modal",
+				className: "ism-modal-backdrop",
+				role: "dialog",
+				"aria-modal": "true",
+				"aria-labelledby": "ism-booking-pin-modal-heading",
+				onClick: (e) => {
+					if (e.target === e.currentTarget && !pin.submitting) {
+						store.setPinModalOpen(false);
+					}
+				},
+			},
+			el(
+				"div",
+				{ className: "ism-modal" },
+				el(
+					"div",
+					{ className: "ism-pin-card__head" },
+					el("h2", {
+						id: "ism-booking-pin-modal-heading",
+						className: "ism-pin-card__title",
+						textContent: isUpdate ? "Update Vehicle PIN-to-Drive" : "Does Your Vehicle Use PIN-to-Drive?",
+					}),
+					el("button", {
+						type: "button",
+						className: "ism-modal__close",
+						"aria-label": "Close PIN-to-Drive dialog",
+						disabled: Boolean(pin.submitting),
+						onClick: () => store.setPinModalOpen(false),
+						textContent: "×",
+					})
+				),
+				el("p", { className: "ism-pin-card__disclaimer", textContent: disclaimer }),
+				pin.error
+					? el("div", { className: "ism-banner ism-banner--error", role: "alert", textContent: pin.error })
+					: null,
+				el(
+					"form",
+					{
+						className: "ism-pin-form",
+						onSubmit: (e) => {
+							e.preventDefault();
+							handleSaveBookingPin();
+						},
+					},
+					el(
+						"div",
+						{ className: "ism-field" },
+						el("label", {
+							className: "ism-field__label",
+							for: "ism-booking-pin-input",
+							textContent: "4-Digit Numeric PIN-to-Drive",
+						}),
+						el("input", {
+							id: "ism-booking-pin-input",
+							className: "ism-input ism-pin-input",
+							type: "password",
+							inputmode: "numeric",
+							pattern: "\\d{4}",
+							maxlength: "4",
+							autocomplete: "off",
+							placeholder: "••••",
+							value: pin.code || "",
+							disabled: Boolean(pin.submitting),
+							onInput: (e) => store.setPinCode(e.target.value),
+						})
+					),
+					el(
+						"div",
+						{ className: "ism-pin-actions" },
+						el("button", {
+							type: "submit",
+							id: "ism-booking-pin-save-btn",
+							className: "ism-btn ism-btn-primary",
+							disabled: Boolean(pin.submitting) || (pin.code || "").length !== 4,
+							textContent: pin.submitting ? "Encrypting & Saving..." : "Save 4-Digit PIN",
+						}),
+						el("button", {
+							type: "button",
+							id: "ism-booking-pin-optout-btn",
+							className: "ism-btn ism-btn-secondary",
+							disabled: Boolean(pin.submitting),
+							onClick: () => handleOptOutBookingPin(),
+							textContent: "No PIN-to-Drive enabled",
+						}),
+						el("button", {
+							type: "button",
+							className: "ism-btn-link",
+							disabled: Boolean(pin.submitting),
+							onClick: () => store.setPinModalOpen(false),
+							textContent: isUpdate ? "Cancel" : "Skip for now",
+						})
+					)
+				)
+			)
 		);
 	}
 
@@ -1474,7 +1550,11 @@ function initBookingApp() {
 		const badges = [
 			el("span", {
 				className: `ism-status-badge${notes.sms_sent ? " ism-status-badge--ok" : ""}`,
-				textContent: notes.sms_sent ? "SMS Confirmation Sent" : "SMS Confirmation Pending",
+				textContent: notes.sms_sent
+					? "SMS Confirmation Sent"
+					: isDemoMode
+						? "SMS Bypassed (Demo Mode)"
+						: "SMS Confirmation Pending",
 			}),
 		];
 		if (notes.email_requested) {
@@ -1486,94 +1566,97 @@ function initBookingApp() {
 			);
 		}
 
-		return el(
-			"section",
-			{ className: "ism-card", "aria-labelledby": "ism-step5-title" },
-			el("div", { className: "ism-confirm-badge", textContent: "✓ Appointment Confirmed" }),
-			el("h1", { id: "ism-step5-title", className: "ism-card__title", textContent: "You Are All Set" }),
-			el("p", {
-				className: "ism-card__text",
-				textContent: "Your appointment has been reserved. Keep your reference number handy for check-in.",
-			}),
+		return [
 			el(
-				"div",
-				{ className: "ism-confirm-datetime" },
-				el("div", { className: "ism-confirm-datetime__label", textContent: "Confirmed Drop-Off Time" }),
-				el("div", {
-					className: "ism-confirm-datetime__value",
-					textContent: appt.display_datetime || "",
-				})
-			),
-			el(
-				"div",
-				{ className: "ism-receipt-grid" },
+				"section",
+				{ className: "ism-card", "aria-labelledby": "ism-step5-title" },
+				el("div", { className: "ism-confirm-badge", textContent: "✓ Appointment Confirmed" }),
+				el("h1", { id: "ism-step5-title", className: "ism-card__title", textContent: "You Are All Set" }),
+				el("p", {
+					className: "ism-card__text",
+					textContent: "Your appointment has been reserved. Keep your reference number handy for check-in.",
+				}),
 				el(
 					"div",
-					{ className: "ism-receipt-row" },
-					el("span", { className: "ism-receipt-row__label", textContent: "Booking Reference" }),
-					el("span", { className: "ism-receipt-row__value", textContent: conf.booking_reference || "" })
+					{ className: "ism-confirm-datetime" },
+					el("div", { className: "ism-confirm-datetime__label", textContent: "Confirmed Drop-Off Time" }),
+					el("div", {
+						className: "ism-confirm-datetime__value",
+						textContent: appt.display_datetime || "",
+					})
 				),
-				conf.vehicle_info || conf.vehicle_display || state.vehicle.model
+				el(
+					"div",
+					{ className: "ism-receipt-grid" },
+					el(
+						"div",
+						{ className: "ism-receipt-row" },
+						el("span", { className: "ism-receipt-row__label", textContent: "Booking Reference" }),
+						el("span", { className: "ism-receipt-row__value", textContent: conf.booking_reference || "" })
+					),
+					conf.vehicle_info || conf.vehicle_display || state.vehicle.model
+						? el(
+								"div",
+								{ className: "ism-receipt-row" },
+								el("span", { className: "ism-receipt-row__label", textContent: "Vehicle" }),
+								el(
+									"span",
+									{ className: "ism-receipt-row__value" },
+									renderVehicleDisplayNode(conf.vehicle_info || state.vehicle || conf.vehicle_display, {
+										showVin: false,
+									})
+								)
+							)
+						: null,
+					conf.waiter_preference
+						? el(
+								"div",
+								{ className: "ism-receipt-row" },
+								el("span", { className: "ism-receipt-row__label", textContent: "Visit Preference" }),
+								el("span", { className: "ism-receipt-row__value", textContent: conf.waiter_preference })
+							)
+						: null
+				),
+				pkgs.length > 0
 					? el(
-							"div",
-							{ className: "ism-receipt-row" },
-							el("span", { className: "ism-receipt-row__label", textContent: "Vehicle" }),
-							el(
-								"span",
-								{ className: "ism-receipt-row__value" },
-								renderVehicleDisplayNode(conf.vehicle_info || state.vehicle || conf.vehicle_display, {
-									showVin: false,
-								})
+							"ul",
+							{ className: "ism-receipt-services", "aria-label": "Selected services" },
+							pkgs.map((pkg) =>
+								el(
+									"li",
+									{ className: "ism-receipt-services__item" },
+									el("span", { textContent: pkg.title || "" }),
+									pkg.price_display_label
+										? el("span", { textContent: pkg.price_display_label })
+										: null
+								)
 							)
 						)
 					: null,
-				conf.waiter_preference
-					? el(
-							"div",
-							{ className: "ism-receipt-row" },
-							el("span", { className: "ism-receipt-row__label", textContent: "Visit Preference" }),
-							el("span", { className: "ism-receipt-row__value", textContent: conf.waiter_preference })
-						)
-					: null
+				el("div", { className: "ism-status-badges" }, badges),
+				renderStep5PinCard(state, conf),
+				el(
+					"div",
+					{ className: "ism-actions-row" },
+					el("a", {
+						href: handoffUrl,
+						className: "ism-btn ism-btn-primary",
+						textContent: "Manage Your Appointment",
+					}),
+					el("button", {
+						type: "button",
+						className: "ism-btn ism-btn-secondary",
+						onClick: () => {
+							stopResendTimer();
+							step1Attempted = false;
+							store.resetForNewBooking();
+						},
+						textContent: "Book Another Appointment",
+					})
+				)
 			),
-			pkgs.length > 0
-				? el(
-						"ul",
-						{ className: "ism-receipt-services", "aria-label": "Selected services" },
-						pkgs.map((pkg) =>
-							el(
-								"li",
-								{ className: "ism-receipt-services__item" },
-								el("span", { textContent: pkg.title || "" }),
-								pkg.price_display_label
-									? el("span", { textContent: pkg.price_display_label })
-									: null
-							)
-						)
-					)
-				: null,
-			el("div", { className: "ism-status-badges" }, badges),
-			renderStep5PinCard(state, conf),
-			el(
-				"div",
-				{ className: "ism-actions-row" },
-				el("a", {
-					href: handoffUrl,
-					className: "ism-btn ism-btn-primary",
-					textContent: "Manage Your Appointment",
-				}),
-				el("button", {
-					type: "button",
-					className: "ism-btn ism-btn-secondary",
-					onClick: () => {
-						stopResendTimer();
-						step1Attempted = false;
-						store.resetForNewBooking();
-					},
-					textContent: "Book Another Appointment",
-				})
-			)
-		);
+			renderStep5PinModal(state, conf),
+		];
 	}
 
 	function render(state) {

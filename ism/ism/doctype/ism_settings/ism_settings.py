@@ -294,6 +294,7 @@ class ISMSettings(Document):
 
 		if (
 			cint(self.enable_self_serve_booking) == 1
+			and cint(getattr(self, "customer_journey_demo_mode", 0)) != 1
 			and not (frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch)
 			and not getattr(self.flags, "ignore_self_serve_sms_warning", False)
 			and getattr(frappe.session, "user", None) != "Guest"
