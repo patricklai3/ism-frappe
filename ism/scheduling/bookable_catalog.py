@@ -12,6 +12,11 @@ from frappe.utils import cint, flt
 
 from ism.scheduling.capacity import parse_required_tags
 from ism.scheduling.estimation_light import estimate_total_duration
+from ism.utils.tesla_manual import (
+	is_in_generation_range,
+	parse_vehicle_year_month,
+	resolve_generation_entries,
+)
 
 ALLOWED_PRICE_DISPLAY_MODES: Tuple[str, ...] = (
 	"Exact Price",
@@ -82,9 +87,20 @@ def normalize_vehicle_model(vehicle_model: Optional[str]) -> Optional[str]:
 
 def parse_generation_year_bounds(applicable_generation: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
 	"""Extract (min_year, max_year) from Tesla generation strings like 'Model 3 Jun 2017 - Dec 2023'
+	or multi-generation strings like 'Model S Feb 2012 - Mar 2016, Model S Apr 2016 - Jan 2021'
 	or 'Model Y Jan 2020 - Present' (open upper bound -> None)."""
 	if not applicable_generation or not isinstance(applicable_generation, str):
 		return (None, None)
+
+	resolved = resolve_generation_entries(applicable_generation)
+	if resolved:
+		starts = [cint(e["year_from"]) for e in resolved if e.get("year_from")]
+		if starts:
+			min_year = min(starts)
+			if _OPEN_END_PATTERN.search(applicable_generation) or any(e.get("year_to") is None for e in resolved):
+				return (min_year, None)
+			ends = [cint(e["year_to"]) for e in resolved if e.get("year_to")]
+			return (min_year, max(ends) if ends else None)
 
 	years = [int(y) for y in _YEAR_PATTERN.findall(applicable_generation)]
 	if not years:
@@ -97,13 +113,40 @@ def parse_generation_year_bounds(applicable_generation: Optional[str]) -> Tuple[
 	return (min_year, max(years))
 
 
+def _get_generation_compatibility_map(package_names: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
+	"""Batch-fetch Service Package Generation child rows for a list of Service Package names."""
+	names = [n for n in package_names if n]
+	if not names or not frappe.db.exists("DocType", "Service Package Generation"):
+		return {}
+	rows = frappe.get_all(
+		"Service Package Generation",
+		filters={"parenttype": "Service Package", "parent": ["in", names]},
+		fields=[
+			"parent",
+			"applicable_model",
+			"generation_name",
+			"date_range",
+			"year_from",
+			"month_from",
+			"year_to",
+			"month_to",
+		],
+		ignore_permissions=True,
+	)
+	grouped: Dict[str, List[Dict[str, Any]]] = {}
+	for row in rows:
+		grouped.setdefault(row["parent"], []).append(row)
+	return grouped
+
+
 def is_package_eligible_for_vehicle(
 	pkg: Dict[str, Any],
 	vehicle_model: Optional[str] = None,
 	vehicle_year: Optional[int] = None,
+	vehicle_generation: Optional[str] = None,
+	manufactured_month: Optional[str] = None,
 ) -> bool:
-	"""Return True iff pkg matches vehicle_model (exact or 'All Models'/blank) and vehicle_year
-	(explicit applicable_year_from/to if set, else parsed applicable_generation bounds)."""
+	"""Return True iff pkg matches model, generation/month (when specified), and vehicle_year."""
 	req_model = normalize_vehicle_model(vehicle_model)
 	pkg_model = normalize_vehicle_model(pkg.get("applicable_model"))
 
@@ -111,19 +154,76 @@ def is_package_eligible_for_vehicle(
 		if pkg_model and pkg_model != "All Models" and pkg_model != req_model:
 			return False
 
+	compat_rows = list(pkg.get("generation_compatibility") or [])
+	model_entries: List[Dict[str, Any]] = []
+	if compat_rows:
+		if req_model and req_model != "All Models":
+			model_entries = [
+				r
+				for r in compat_rows
+				if not r.get("applicable_model")
+				or normalize_vehicle_model(r.get("applicable_model")) in ("All Models", req_model)
+			]
+			if not model_entries:
+				return False
+		else:
+			model_entries = compat_rows
+	elif pkg.get("applicable_generation"):
+		model_entries = resolve_generation_entries(pkg.get("applicable_generation"), model=pkg_model)
+
+	req_gen = vehicle_generation.strip() if isinstance(vehicle_generation, str) and vehicle_generation.strip() else None
+	if req_gen:
+		pkg_gen_str = (pkg.get("applicable_generation") or "").strip()
+		if model_entries:
+			pkg_gen_names = {
+				str(e.get("generation_name") or "").strip().lower()
+				for e in model_entries
+				if e.get("generation_name")
+			}
+			req_entries = resolve_generation_entries(req_gen, model=req_model)
+			req_gen_names = (
+				{str(e["generation_name"]).strip().lower() for e in req_entries if e.get("generation_name")}
+				or {req_gen.lower()}
+			)
+			if pkg_gen_names and not (pkg_gen_names & req_gen_names):
+				return False
+		elif pkg_gen_str:
+			if req_gen.lower() not in pkg_gen_str.lower() and pkg_gen_str.lower() not in req_gen.lower():
+				return False
+
+	yr_from = cint(pkg.get("applicable_year_from") or 0)
+	yr_to = cint(pkg.get("applicable_year_to") or 0)
+
 	if vehicle_year is not None:
 		try:
 			year = int(vehicle_year)
 		except (TypeError, ValueError):
 			return False
 
-		yr_from = cint(pkg.get("applicable_year_from") or 0)
-		yr_to = cint(pkg.get("applicable_year_to") or 0)
-
 		if yr_from > 0 or yr_to > 0:
 			if yr_from > 0 and year < yr_from:
 				return False
 			if yr_to > 0 and year > yr_to:
+				return False
+		elif manufactured_month and str(manufactured_month).strip() and model_entries:
+			ym = parse_vehicle_year_month(manufactured_month, year)
+			if ym:
+				if not any(
+					is_in_generation_range(
+						ym[0],
+						ym[1],
+						(cint(e["year_from"]), cint(e.get("month_from") or 1)) if e.get("year_from") else None,
+						(cint(e["year_to"]), cint(e.get("month_to") or 12)) if e.get("year_to") else None,
+					)
+					for e in model_entries
+				):
+					return False
+		elif model_entries:
+			if not any(
+				(not e.get("year_from") or year >= cint(e["year_from"]))
+				and (not e.get("year_to") or year <= cint(e["year_to"]))
+				for e in model_entries
+			):
 				return False
 		else:
 			gen_min, gen_max = parse_generation_year_bounds(pkg.get("applicable_generation"))
@@ -131,6 +231,18 @@ def is_package_eligible_for_vehicle(
 				return False
 			if gen_max is not None and year > gen_max:
 				return False
+	elif manufactured_month and str(manufactured_month).strip() and model_entries and yr_from == 0 and yr_to == 0:
+		ym = parse_vehicle_year_month(manufactured_month, None)
+		if ym and not any(
+			is_in_generation_range(
+				ym[0],
+				ym[1],
+				(cint(e["year_from"]), cint(e.get("month_from") or 1)) if e.get("year_from") else None,
+				(cint(e["year_to"]), cint(e.get("month_to") or 12)) if e.get("year_to") else None,
+			)
+			for e in model_entries
+		):
+			return False
 
 	return True
 
@@ -294,6 +406,7 @@ def _build_public_catalog_card(
 		"title": title,
 		"summary": summary,
 		"applicable_model": pkg.get("applicable_model") or "All Models",
+		"applicable_generation": (pkg.get("applicable_generation") or "").strip(),
 		"is_mobile_capable": cint(pkg.get("is_mobile_capable") or 0),
 		"sort_order": cint(sort_order) if sort_order is not None else 100,
 		"price_display_mode": price_info["price_display_mode"],
@@ -308,12 +421,13 @@ def list_bookable_packages(
 	*,
 	vehicle_model: Optional[str] = None,
 	vehicle_year: Optional[int] = None,
+	vehicle_generation: Optional[str] = None,
 	search: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 	"""Return sorted customer-safe catalog cards for Service Packages with allow_self_serve_booking = 1.
 	Each item contains ONLY:
 	{
-	  'package_id', 'title', 'summary', 'applicable_model',
+	  'package_id', 'title', 'summary', 'applicable_model', 'applicable_generation',
 	  'is_mobile_capable', 'sort_order',
 	  'price_display_mode', 'currency', 'price_min', 'price_max', 'price_display_label',
 	}
@@ -331,11 +445,19 @@ def list_bookable_packages(
 
 	search_term = search.strip().lower() if isinstance(search, str) and search.strip() else None
 	settings = _get_catalog_settings()
-	subtotals = _get_default_items_subtotals([r["name"] for r in rows])
+	pkg_names = [r["name"] for r in rows]
+	subtotals = _get_default_items_subtotals(pkg_names)
+	compat_map = _get_generation_compatibility_map(pkg_names)
 
 	cards: List[Dict[str, Any]] = []
 	for pkg in rows:
-		if not is_package_eligible_for_vehicle(pkg, vehicle_model=vehicle_model, vehicle_year=vehicle_year):
+		pkg["generation_compatibility"] = compat_map.get(pkg["name"], [])
+		if not is_package_eligible_for_vehicle(
+			pkg,
+			vehicle_model=vehicle_model,
+			vehicle_year=vehicle_year,
+			vehicle_generation=vehicle_generation,
+		):
 			continue
 
 		card = _build_public_catalog_card(
@@ -393,6 +515,7 @@ def compute_packages_booking_requirements(
 	*,
 	vehicle_model: Optional[str] = None,
 	vehicle_year: Optional[int] = None,
+	vehicle_generation: Optional[str] = None,
 ) -> Dict[str, Any]:
 	"""Server-side resolver validating all package_ids exist, have allow_self_serve_booking = 1,
 	and match vehicle_model/vehicle_year (capped at MAX_PACKAGES_PER_BOOKING).
@@ -424,6 +547,7 @@ def compute_packages_booking_requirements(
 
 	settings = _get_catalog_settings()
 	subtotals = _get_default_items_subtotals(ids)
+	compat_map = _get_generation_compatibility_map(ids)
 
 	override_minutes = 0
 	frt_minutes_list: List[float] = []
@@ -437,6 +561,7 @@ def compute_packages_booking_requirements(
 			frappe.throw(_("Service Package '{0}' was not found.").format(pkg_id))
 		if cint(pkg.get("allow_self_serve_booking") or 0) != 1:
 			frappe.throw(_("Service Package '{0}' is not available for self-serve booking.").format(pkg_id))
+		pkg["generation_compatibility"] = compat_map.get(pkg_id, [])
 
 		card = _build_public_catalog_card(
 			pkg,
@@ -444,7 +569,12 @@ def compute_packages_booking_requirements(
 			default_labor_rate=settings["default_labor_rate"],
 			currency=settings["currency"],
 		)
-		if not is_package_eligible_for_vehicle(pkg, vehicle_model=vehicle_model, vehicle_year=vehicle_year):
+		if not is_package_eligible_for_vehicle(
+			pkg,
+			vehicle_model=vehicle_model,
+			vehicle_year=vehicle_year,
+			vehicle_generation=vehicle_generation,
+		):
 			frappe.throw(
 				_("Service Package '{0}' is not eligible for the selected vehicle.").format(card["title"])
 			)

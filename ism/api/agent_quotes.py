@@ -305,16 +305,79 @@ def _resolve_and_validate_parts(raw_parts: Any) -> List[Dict[str, Any]]:
 	return resolved
 
 
-def _resolve_service_package_name(raw_name: Optional[str]) -> Optional[str]:
+def _resolve_service_package_name(
+	raw_name: Optional[str],
+	vehicle_doc: Any = None,
+) -> Optional[str]:
 	if not raw_name or not isinstance(raw_name, str):
 		return None
 	cleaned = raw_name.strip()
 	if not cleaned:
 		return None
-	return (
-		frappe.db.get_value("Service Package", {"name": cleaned}, "name")
-		or frappe.db.get_value("Service Package", {"package_name": cleaned}, "name")
+	exact_name = frappe.db.get_value("Service Package", {"name": cleaned}, "name")
+	candidates = frappe.db.get_all(
+		"Service Package",
+		filters={"package_name": cleaned},
+		fields=[
+			"name",
+			"applicable_model",
+			"applicable_generation",
+			"applicable_year_from",
+			"applicable_year_to",
+		],
 	)
+	if exact_name and (not vehicle_doc or len(candidates) <= 1):
+		return exact_name
+	if not candidates:
+		return exact_name
+	if len(candidates) == 1:
+		return candidates[0]["name"]
+
+	if vehicle_doc is not None:
+		from ism.scheduling.bookable_catalog import is_package_eligible_for_vehicle
+
+		v_model = getattr(vehicle_doc, "model", None) or (vehicle_doc.get("model") if isinstance(vehicle_doc, dict) else None)
+		v_year = getattr(vehicle_doc, "model_year", None) or (vehicle_doc.get("model_year") if isinstance(vehicle_doc, dict) else None)
+		v_gen = getattr(vehicle_doc, "vehicle_generation", None) or (vehicle_doc.get("vehicle_generation") if isinstance(vehicle_doc, dict) else None)
+		v_month = getattr(vehicle_doc, "manufactured_month", None) or (vehicle_doc.get("manufactured_month") if isinstance(vehicle_doc, dict) else None)
+
+		pkg_names = [c["name"] for c in candidates]
+		compat_by_parent: Dict[str, List[Dict[str, Any]]] = {}
+		for crow in frappe.get_all(
+			"Service Package Generation",
+			filters={"parenttype": "Service Package", "parent": ["in", pkg_names]},
+			fields=["parent", "applicable_model", "generation_name", "year_from", "month_from", "year_to", "month_to"],
+		):
+			compat_by_parent.setdefault(crow["parent"], []).append(crow)
+
+		best_score = -1
+		best_name = None
+		for cand in candidates:
+			cand_with_compat = dict(cand, generation_compatibility=compat_by_parent.get(cand["name"], []))
+			if not is_package_eligible_for_vehicle(
+				cand_with_compat,
+				vehicle_model=v_model,
+				vehicle_year=cint(v_year) or None,
+				vehicle_generation=v_gen,
+				manufactured_month=v_month,
+			):
+				continue
+			c_model = (cand.get("applicable_model") or "").strip()
+			c_gen = (cand.get("applicable_generation") or "").strip()
+			score = 1
+			if c_model and v_model and c_model == v_model:
+				score += 2
+			if c_gen:
+				score += 4
+			if v_gen and c_gen == v_gen:
+				score += 8
+			if score > best_score:
+				best_score = score
+				best_name = cand["name"]
+		if best_name:
+			return best_name
+
+	return exact_name or candidates[0]["name"]
 
 
 def _first_present(mapping: Dict[str, Any], keys: Tuple[str, ...], *, strip_str: bool = False) -> Any:
@@ -357,13 +420,14 @@ def _build_service_row(
 	service_input: Any,
 	default_labor_rate: float,
 	company: Optional[str] = None,
+	vehicle_doc: Any = None,
 ) -> Optional[Dict[str, Any]]:
 	"""Normalize a single service specification into a Repair Order Service row dict."""
 	if isinstance(service_input, str):
 		cleaned_input = service_input.strip()
 		if not cleaned_input:
 			return None
-		pkg_name = _resolve_service_package_name(cleaned_input)
+		pkg_name = _resolve_service_package_name(cleaned_input, vehicle_doc=vehicle_doc)
 		if pkg_name:
 			frappe.has_permission("Service Package", "read", doc=pkg_name, throw=True)
 			pkg = frappe.get_doc("Service Package", pkg_name)
@@ -384,7 +448,7 @@ def _build_service_row(
 	explicit_title = _first_present(service_input, _SERVICE_TITLE_ALIASES, strip_str=True)
 	explicit_hours = _first_present(service_input, _SERVICE_HOURS_ALIASES, strip_str=True)
 	pkg_lookup = optional_str(service_input.get("service_package"), "Service Package") or explicit_title
-	pkg_name = _resolve_service_package_name(pkg_lookup)
+	pkg_name = _resolve_service_package_name(pkg_lookup, vehicle_doc=vehicle_doc)
 
 	if pkg_name:
 		frappe.has_permission("Service Package", "read", doc=pkg_name, throw=True)
@@ -529,8 +593,9 @@ def create_quote(
 	if not parsed_services:
 		parsed_services = [{"service_title": "Initial Inspection & Diagnostics", "labor_hours": 1.0}]
 
+	veh_doc = frappe.get_cached_doc("Repair Vehicle", veh) if veh and frappe.db.exists("Repair Vehicle", veh) else None
 	for item in parsed_services:
-		row = _build_service_row(item, default_labor_rate, company=comp)
+		row = _build_service_row(item, default_labor_rate, company=comp, vehicle_doc=veh_doc)
 		if row:
 			ro.append("services", row)
 
@@ -715,8 +780,13 @@ def amend_quote(
 
 	default_labor_rate = _get_default_labor_rate()
 	if parsed_add:
+		veh_doc = (
+			frappe.get_cached_doc("Repair Vehicle", ro.vehicle)
+			if ro.vehicle and frappe.db.exists("Repair Vehicle", ro.vehicle)
+			else None
+		)
 		for item in parsed_add:
-			row = _build_service_row(item, default_labor_rate, company=ro.company)
+			row = _build_service_row(item, default_labor_rate, company=ro.company, vehicle_doc=veh_doc)
 			if row:
 				ro.append("services", row)
 

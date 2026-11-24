@@ -53,6 +53,7 @@ frappe.ui.form.on('Schedule Entry', {
 		frm.toggle_display('provisional_vehicle_info', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_info));
 		frm.toggle_display('provisional_vehicle_model', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_model));
 		frm.toggle_display('provisional_vehicle_year', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_year));
+		frm.toggle_display('provisional_vehicle_generation', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vehicle_generation));
 		frm.toggle_display('provisional_vin_or_plate', !frm.doc.repair_vehicle || Boolean(frm.doc.provisional_vin_or_plate));
 	},
 

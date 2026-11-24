@@ -9,7 +9,7 @@ from frappe.utils import cint, flt
 
 from ism.api._validation import escape_like
 from ism.ism.doctype.repair_vehicle.vin_decoder import decode_tesla_vin, normalize_vin_string
-from ism.utils.tesla_manual import get_tesla_manual_url_for_vehicle
+from ism.utils.tesla_manual import get_tesla_manual_details_for_vehicle, get_tesla_manual_url_for_vehicle
 
 
 def _ensure_optional_str(value: Any, label: str) -> Optional[str]:
@@ -68,13 +68,15 @@ def build_vehicle_search_results(
 	query: Optional[str] = None,
 	customer: Optional[str] = None,
 	model: Optional[str] = None,
+	generation: Optional[str] = None,
 	limit: int = 20,
 ) -> list[dict[str, Any]]:
-	"""Search vehicles across VIN, license plate, model, primary customer, and co-owners."""
+	"""Search vehicles across VIN, license plate, model, generation, primary customer, and co-owners."""
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
 	query_str = _ensure_optional_str(query, "Search query")
 	customer_str = _ensure_optional_str(customer, "Customer")
 	model_str = _ensure_optional_str(model, "Model")
+	generation_str = _ensure_optional_str(generation, "Generation")
 
 	safe_limit = max(1, min(cint(limit) or 20, 100))
 	conditions: list[str] = []
@@ -98,6 +100,10 @@ def build_vehicle_search_results(
 		conditions.append("LOWER(IFNULL(`tabRepair Vehicle`.model, '')) LIKE LOWER(%s)")
 		params.append(f"%{escape_like(model_str)}%")
 
+	if generation_str:
+		conditions.append("LOWER(IFNULL(`tabRepair Vehicle`.vehicle_generation, '')) LIKE LOWER(%s)")
+		params.append(f"%{escape_like(generation_str)}%")
+
 	if query_str:
 		escaped_q = escape_like(query_str)
 		like_q = f"%{escaped_q}%"
@@ -109,6 +115,7 @@ def build_vehicle_search_results(
 			"OR `tabRepair Vehicle`.vin LIKE %s "
 			"OR IFNULL(`tabRepair Vehicle`.license_plate, '') LIKE %s "
 			"OR IFNULL(`tabRepair Vehicle`.model, '') LIKE %s "
+			"OR IFNULL(`tabRepair Vehicle`.vehicle_generation, '') LIKE %s "
 			"OR IFNULL(`tabRepair Vehicle`.customer, '') LIKE %s "
 			"OR IFNULL(c.customer_name, '') LIKE %s "
 			"OR EXISTS ("
@@ -119,7 +126,7 @@ def build_vehicle_search_results(
 			")"
 			")"
 		)
-		params.extend([like_q, like_q, like_norm, like_q, like_q, like_q, like_q, like_q, like_q])
+		params.extend([like_q, like_q, like_norm, like_q, like_q, like_q, like_q, like_q, like_q, like_q])
 
 	where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 	params.append(safe_limit)
@@ -134,7 +141,8 @@ def build_vehicle_search_results(
 			`tabRepair Vehicle`.body_type, `tabRepair Vehicle`.trim,
 			`tabRepair Vehicle`.drivetrain, `tabRepair Vehicle`.battery_type,
 			`tabRepair Vehicle`.drive_unit, `tabRepair Vehicle`.autopilot_hardware,
-			`tabRepair Vehicle`.manufactured_month, `tabRepair Vehicle`.last_odometer,
+			`tabRepair Vehicle`.manufactured_month, `tabRepair Vehicle`.vehicle_generation,
+			`tabRepair Vehicle`.recommended_manual_url, `tabRepair Vehicle`.last_odometer,
 			`tabRepair Vehicle`.last_service_date, `tabRepair Vehicle`.next_service_odometer,
 			`tabRepair Vehicle`.next_service_date
 		FROM `tabRepair Vehicle`
@@ -150,7 +158,13 @@ def build_vehicle_search_results(
 	results = []
 	for row in rows:
 		item = dict(row)
-		item["recommended_manual_url"] = get_tesla_manual_url_for_vehicle(item)
+		details = get_tesla_manual_details_for_vehicle(item)
+		item["vehicle_generation"] = item.get("vehicle_generation") or details.get("vehicle_generation") or ""
+		item["recommended_manual_url"] = (
+			item.get("recommended_manual_url")
+			or details.get("recommended_manual_url")
+			or get_tesla_manual_url_for_vehicle(item)
+		)
 		results.append(item)
 	return results
 
@@ -165,7 +179,9 @@ def build_vehicle_intelligence(vehicle_identifier: str, history_limit: int = 20)
 	owners = _collect_vehicle_owners(vdoc)
 	service_history = _collect_vehicle_service_history(vdoc.name, safe_limit)
 	deferred_summary = _summarize_deferred_services(vdoc)
-	manual_url = get_tesla_manual_url_for_vehicle(vdoc)
+	generation_info = get_tesla_manual_details_for_vehicle(vdoc)
+	manual_url = vdoc.recommended_manual_url or generation_info.get("recommended_manual_url") or get_tesla_manual_url_for_vehicle(vdoc)
+	vehicle_gen = vdoc.vehicle_generation or generation_info.get("vehicle_generation") or ""
 
 	return {
 		"vehicle": {
@@ -187,13 +203,16 @@ def build_vehicle_intelligence(vehicle_identifier: str, history_limit: int = 20)
 			"production_sequence": vdoc.production_sequence or "",
 			"autopilot_hardware": vdoc.autopilot_hardware or "",
 			"manufactured_month": vdoc.manufactured_month or "",
+			"vehicle_generation": vehicle_gen,
+			"recommended_manual_url": manual_url,
 			"last_odometer": cint(vdoc.last_odometer),
 			"last_service_date": str(vdoc.last_service_date) if vdoc.last_service_date else None,
 			"next_service_odometer": cint(vdoc.next_service_odometer),
 			"next_service_date": str(vdoc.next_service_date) if vdoc.next_service_date else None,
 		},
-		"vin_decode": decode_tesla_vin(vdoc.vin),
+		"vin_decode": decode_tesla_vin(vdoc.vin, manufactured_month=vdoc.manufactured_month),
 		"recommended_manual_url": manual_url,
+		"generation_info": generation_info,
 		"owners": owners,
 		"service_history": service_history,
 		"deferred_services": deferred_summary,

@@ -137,6 +137,8 @@ def build_service_package_row_fields(
 
 	return {
 		"service_package": pkg.name,
+		"applicable_model": getattr(pkg, "applicable_model", None) or "",
+		"applicable_generation": getattr(pkg, "applicable_generation", None) or "",
 		"correction_code": cur_code,
 		"service_title": cur_title,
 		"service_position": cur_side,
@@ -201,6 +203,10 @@ def _auto_expand_service_row(
 		s.service_title = row_fields["service_title"]
 	if _is_unset_scalar(raw_code):
 		s.correction_code = row_fields["correction_code"]
+	if _is_unset_scalar(getattr(s, "applicable_model", None)) and row_fields.get("applicable_model"):
+		s.applicable_model = row_fields["applicable_model"]
+	if _is_unset_scalar(getattr(s, "applicable_generation", None)) and row_fields.get("applicable_generation"):
+		s.applicable_generation = row_fields["applicable_generation"]
 	if raw_pos in (None, "", "None"):
 		s.service_position = row_fields["service_position"]
 	if not cint(getattr(s, "is_flat_rate", 0)) and cint(row_fields.get("is_flat_rate", 0)):
@@ -552,6 +558,8 @@ def duplicate_service_row_opposite_side(ro, service_row_id=None, **kwargs) -> Di
 	is_supp = 1 if (_has_prior_authorization(ro) or getattr(target, "is_supplement", 0)) else 0
 	new_service = ro.append("services", {
 		"service_package": target.service_package,
+		"applicable_model": getattr(target, "applicable_model", None),
+		"applicable_generation": getattr(target, "applicable_generation", None),
 		"correction_code": new_code,
 		"service_title": new_title,
 		"service_position": opposite_pos,
@@ -856,18 +864,53 @@ def save_service_row_as_package(ro, service_row_id=None, package_name=None, **kw
 	if not target:
 		frappe.throw(_("Service row {0} not found.").format(service_row_id))
 
-	pkg_title = package_name or target.service_title
-	if frappe.db.exists("Service Package", pkg_title):
-		frappe.throw(_("A Service Package named '{0}' already exists.").format(pkg_title))
+	from ism.utils.tesla_manual import parse_tesla_manual_url, resolve_vehicle_generation
 
+	pkg_title = package_name or target.service_title
 	parts = _parse_parts_list(target.parts)
-	veh_model = frappe.db.get_value("Repair Vehicle", ro.vehicle, "model") if ro.vehicle else ""
-	app_model = getattr(target, "applicable_model", None) or veh_model or ""
+
+	veh_doc = None
+	if ro.vehicle and frappe.db.exists("Repair Vehicle", ro.vehicle):
+		veh_doc = frappe.db.get_value(
+			"Repair Vehicle",
+			ro.vehicle,
+			["model", "model_year", "manufactured_month", "drive_unit", "vehicle_generation"],
+			as_dict=True,
+		)
+
+	url_meta = parse_tesla_manual_url(getattr(target, "tesla_manual_url", None)) if getattr(target, "tesla_manual_url", None) else {}
+	app_model = (
+		getattr(target, "applicable_model", None)
+		or url_meta.get("applicable_model")
+		or (veh_doc.get("model") if veh_doc else "")
+		or ""
+	).strip()
+	app_gen = (
+		getattr(target, "applicable_generation", None)
+		or url_meta.get("applicable_generation")
+		or url_meta.get("matched_generation")
+		or ((veh_doc.get("vehicle_generation") or resolve_vehicle_generation(veh_doc).get("vehicle_generation")) if veh_doc else "")
+		or ""
+	).strip()
+
+	existing_pkgs = frappe.db.get_all(
+		"Service Package",
+		filters={"package_name": pkg_title},
+		fields=["name", "applicable_model", "applicable_generation"],
+	)
+	for existing_row in existing_pkgs:
+		if (existing_row.applicable_model or "").strip() == app_model and (existing_row.applicable_generation or "").strip() == app_gen:
+			frappe.throw(
+				_("A Service Package named '{0}' already exists for model '{1}' and generation '{2}'.").format(
+					pkg_title, app_model or "Any", app_gen or "Any"
+				)
+			)
 
 	pkg = frappe.get_doc({
 		"doctype": "Service Package",
 		"package_name": pkg_title,
 		"applicable_model": app_model,
+		"applicable_generation": app_gen,
 		"correction_code": getattr(target, "correction_code", None),
 		"is_flat_rate": cint(getattr(target, "is_flat_rate", 0)),
 		"is_mobile_capable": cint(getattr(target, "is_mobile_capable", 0)),
@@ -889,8 +932,17 @@ def save_service_row_as_package(ro, service_row_id=None, package_name=None, **kw
 	pkg.insert()
 
 	target.service_package = pkg.name
+	if app_model and not getattr(target, "applicable_model", None):
+		target.applicable_model = app_model
+	if app_gen and not getattr(target, "applicable_generation", None):
+		target.applicable_generation = app_gen
 	if target.name and not str(target.name).startswith("new-"):
-		frappe.db.set_value("Repair Order Service", target.name, "service_package", pkg.name, update_modified=False)
+		updates = {"service_package": pkg.name}
+		if app_model:
+			updates["applicable_model"] = target.applicable_model
+		if app_gen:
+			updates["applicable_generation"] = target.applicable_generation
+		frappe.db.set_value("Repair Order Service", target.name, updates, update_modified=False)
 
 	return {
 		"status": "success",
@@ -1025,19 +1077,35 @@ def fetch_service_package_details(service_package: str, side: Optional[str] = No
 
 	app_model = getattr(pkg, "applicable_model", None)
 	app_gen = getattr(pkg, "applicable_generation", None)
-	if not app_model and getattr(pkg, "tesla_manual_url", None):
+	if (not app_model or not app_gen) and getattr(pkg, "tesla_manual_url", None):
 		try:
 			u_meta = parse_tesla_manual_url(pkg.tesla_manual_url)
-			app_model = u_meta.get("applicable_model") or ""
+			if not app_model:
+				app_model = u_meta.get("applicable_model") or ""
 			if not app_gen:
-				app_gen = u_meta.get("matched_generation") or ""
+				app_gen = u_meta.get("applicable_generation") or u_meta.get("matched_generation") or ""
 		except Exception:
 			pass
+
+	compat_rows = [
+		{
+			"applicable_model": getattr(r, "applicable_model", "") or "",
+			"generation_name": getattr(r, "generation_name", "") or "",
+			"date_range": getattr(r, "date_range", "") or "",
+			"year_from": getattr(r, "year_from", None),
+			"month_from": getattr(r, "month_from", None),
+			"year_to": getattr(r, "year_to", None),
+			"month_to": getattr(r, "month_to", None),
+			"manual_base_url": getattr(r, "manual_base_url", "") or "",
+		}
+		for r in (getattr(pkg, "generation_compatibility", None) or [])
+	]
 
 	return {
 		"package_name": title,
 		"applicable_model": app_model or "",
 		"applicable_generation": app_gen or "",
+		"generation_compatibility": compat_rows,
 		"correction_code": code,
 		"service_position": pos,
 		"is_symmetrical": is_symm,

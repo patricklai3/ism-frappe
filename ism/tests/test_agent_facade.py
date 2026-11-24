@@ -2397,3 +2397,48 @@ class TestAgentFacade(ISMTestCase):
 		self.assertTrue(res3["success"])
 		self.assertEqual(res3["data"]["added_count"], 1)
 		self.assertIn(f"{TEST_PREFIX}Cabin Air Filter Deferred", [s["service_title"] for s in res3["data"]["services"]])
+
+	def test_generation_scoped_import_and_quote_disambiguation(self):
+		"""Verify Agent Facade imports generation-scoped packages cleanly and create_quote picks the vehicle's generation."""
+		shared_title = f"{TEST_PREFIX}High Voltage Pyrotechnic Fuse"
+		imp_old = import_tesla_procedure(
+			procedure_title=shared_title,
+			correction_code="17019900",
+			labor_hours=1.1,
+			model="Model 3",
+			applicable_generation="Model 3 Jun 2017 - Dec 2023",
+		)
+		imp_new = import_tesla_procedure(
+			procedure_title=shared_title,
+			correction_code="17019900",
+			labor_hours=1.7,
+			model="Model 3",
+			applicable_generation="Model 3 Jan 2024",
+		)
+		self.assertTrue(imp_old["success"])
+		self.assertTrue(imp_new["success"])
+		self.assertNotEqual(imp_old["data"]["name"], imp_new["data"]["name"])
+		self.track("Service Package", imp_old["data"]["name"])
+		self.track("Service Package", imp_new["data"]["name"])
+		self.assertEqual(imp_new["data"]["applicable_generation"], "Model 3 Jan 2024")
+		self.assertTrue(imp_new["data"]["generation_compatibility"])
+
+		highland_veh = self.create_test_vehicle(
+			vin="5YJ3E1EA9RF333444",
+			customer=self.customer,
+			license_plate="HIGH-24",
+			model="Model 3",
+			model_year="2024",
+			manufactured_month="04/24",
+		)
+		quote_res = create_quote(
+			customer_name=self.customer,
+			vehicle_identifier=highland_veh.name,
+			odometer_in=1500,
+			services=[shared_title],
+		)
+		ro_name = self._track_quote_ro(quote_res)
+		ro_doc = frappe.get_doc("Repair Order", ro_name)
+		self.assertEqual(ro_doc.services[0].service_package, imp_new["data"]["name"])
+		self.assertEqual(ro_doc.services[0].applicable_generation, "Model 3 Jan 2024")
+

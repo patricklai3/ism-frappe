@@ -1903,3 +1903,60 @@ class TestRepairOrder(ISMTestCase):
 			if frappe.db.exists("User Permission", user_perm.name):
 				frappe.delete_doc("User Permission", user_perm.name, force=True, ignore_permissions=True)
 
+	def test_applicable_generation_propagates_across_repair_order_service_flows(self):
+		"""Verify applicable_generation propagates on add/expand, opposite-side duplication, and scoped save-as-package."""
+		pkg = frappe.get_doc({
+			"doctype": "Service Package",
+			"package_name": f"{TEST_PREFIX}Front Control Arm LH GenTest",
+			"applicable_model": "Model 3",
+			"applicable_generation": "Model 3 Jan 2024",
+			"is_symmetrical": 1,
+			"standard_labor_hours": 1.4,
+			"hourly_rate": 150.0,
+		}).insert(ignore_permissions=True)
+		self.track(pkg)
+
+		veh = self.create_test_vehicle(
+			vin="5YJ3E1EA1RF777888",
+			customer=self.customer.name,
+			model="Model 3",
+			model_year="2024",
+			manufactured_month="02/24",
+		)
+		ro = frappe.get_doc({
+			"doctype": "Repair Order",
+			"customer": self.customer.name,
+			"vehicle": veh.name,
+			"odometer_in": 12000,
+			"services": [{"service_package": pkg.name}],
+		}).insert(ignore_permissions=True)
+		self.track(ro)
+
+		self.assertEqual(ro.services[0].applicable_model, "Model 3")
+		self.assertEqual(ro.services[0].applicable_generation, "Model 3 Jan 2024")
+
+		details = get_service_package_details(pkg.name)
+		self.assertEqual(details["applicable_generation"], "Model 3 Jan 2024")
+
+		opp = ro.duplicate_service_for_opposite_side(ro.services[0].name)
+		self.assertEqual(opp["status"], "success")
+		ro.reload()
+		self.assertEqual(len(ro.services), 2)
+		self.assertEqual(ro.services[1].applicable_generation, "Model 3 Jan 2024")
+
+		# Save a one-off service with colliding title on a different vehicle generation -> distinct package created
+		ro.append("services", {
+			"service_title": pkg.package_name,
+			"applicable_model": "Model Y",
+			"applicable_generation": "Model Y Feb 2025",
+			"labor_hours": 1.6,
+			"labor_rate": 150.0,
+		})
+		ro.save(ignore_permissions=True)
+		saved = ro.save_service_as_package(service_row_id=ro.services[2].name, package_name=pkg.package_name)
+		self.track("Service Package", saved["package_name"])
+		self.assertNotEqual(saved["package_name"], pkg.name)
+		saved_pkg = frappe.get_doc("Service Package", saved["package_name"])
+		self.assertEqual(saved_pkg.applicable_generation, "Model Y Feb 2025")
+
+

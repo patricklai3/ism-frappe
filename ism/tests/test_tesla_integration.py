@@ -759,4 +759,103 @@ Parts: 1107681-00-A
 				raw_markdown=raw_md,
 			)
 
+	def test_generation_mapping_disambiguation_and_scoped_package_creation(self):
+		"""Verify fixed Model X Palladium URL, full variant bounds, generation ambiguity, and non-overwriting imports."""
+		from ism.utils.tesla.catalog import (
+			get_generation_catalog,
+			resolve_vehicle_generation,
+		)
+
+		# 1. Model X Palladium fixed URL & multi-gen range spans
+		mx_pal_url = "https://service.tesla.com/docs/ModelX/ServiceManual/Palladium/en-us/GUID-MX-PAL.html"
+		parsed_mx = parse_tesla_manual_url(mx_pal_url)
+		self.assertEqual(parsed_mx["applicable_model"], "Model X")
+		self.assertEqual(parsed_mx["matched_generation"], "Model X Mar 2021 - May 2025")
+		self.assertEqual(parsed_mx["applicable_generation"], "Model X Mar 2021 - May 2025, Model X June 2025")
+		self.assertEqual(parsed_mx["gen_start"], "2021-03")
+		self.assertIsNone(parsed_mx["gen_end"])
+
+		ms_classic = parse_tesla_manual_url("https://service.tesla.com/docs/ModelS/ServiceManual/en-us/GUID-MS-CL.html")
+		self.assertEqual(ms_classic["gen_start"], "2012-02")
+		self.assertEqual(ms_classic["gen_end"], "2021-01")
+		self.assertEqual(len(ms_classic["generation_entries"]), 2)
+
+		mx_pal_details = resolve_vehicle_generation({"model": "Model X", "model_year": 2022, "manufactured_month": "04/22"})
+		self.assertEqual(mx_pal_details["vehicle_generation"], "Model X Mar 2021 - May 2025")
+		self.assertEqual(
+			mx_pal_details["recommended_manual_url"],
+			"https://service.tesla.com/docs/ModelX/ServiceManual/Palladium/en-us/",
+		)
+		self.assertFalse(mx_pal_details["generation_ambiguous"])
+
+		# 2. Split transition year without manufactured_month flags ambiguity
+		ms_2021_ambig = resolve_vehicle_generation({"model": "Model S", "model_year": 2021})
+		self.assertTrue(ms_2021_ambig["generation_ambiguous"])
+		self.assertEqual(
+			[e["generation_name"] for e in ms_2021_ambig["candidate_generations"]],
+			["Model S Apr 2016 - Jan 2021", "Model S Feb 2021 - May 2025"],
+		)
+		ms_2021_jan = resolve_vehicle_generation({"model": "Model S", "model_year": 2021, "manufactured_month": "01/21"})
+		self.assertFalse(ms_2021_jan["generation_ambiguous"])
+		self.assertEqual(ms_2021_jan["vehicle_generation"], "Model S Apr 2016 - Jan 2021")
+
+		cat = get_generation_catalog("Model 3")
+		self.assertEqual([c["generation_name"] for c in cat], ["Model 3 Jun 2017 - Dec 2023", "Model 3 Jan 2024"])
+
+		# 3. Importing same procedure/correction code across two distinct generations creates separate Service Packages
+		cust = self.create_test_customer()
+		v_old = self.create_test_vehicle(
+			vin="5YJ3E1EA1KF100001",
+			customer=cust.name,
+			model="Model 3",
+			model_year="2019",
+			manufactured_month="06/19",
+		)
+		v_new = self.create_test_vehicle(
+			vin="5YJ3E1EA1RF200002",
+			customer=cust.name,
+			model="Model 3",
+			model_year="2024",
+			manufactured_month="03/24",
+		)
+		ro_old = self.create_test_repair_order(customer=cust.name, vehicle=v_old.name)
+		ro_new = self.create_test_repair_order(customer=cust.name, vehicle=v_new.name)
+
+		with patch("ism.api.tesla._fetch_tesla_html", side_effect=AssertionError("Network fetch must not run")):
+			r1 = import_tesla_procedure(
+				repair_order=ro_old.name,
+				url="https://service.tesla.com/docs/Model3/ServiceManual/en-us/GUID-GEN-OLD.html",
+				raw_markdown="# Shared Cabin Filter\nCorrection Code: 18109901\nFRT: 0.4\n",
+			)
+			r2 = import_tesla_procedure(
+				repair_order=ro_new.name,
+				url="https://service.tesla.com/docs/Model3/ServiceManual/2024/en-us/GUID-GEN-NEW.html",
+				raw_markdown="# Shared Cabin Filter\nCorrection Code: 18109901\nFRT: 0.6\n",
+			)
+
+		self.assertNotEqual(r1["service_package"], r2["service_package"])
+		self.track("Service Package", r1["service_package"])
+		self.track("Service Package", r2["service_package"])
+
+		pkg1 = frappe.get_doc("Service Package", r1["service_package"])
+		pkg2 = frappe.get_doc("Service Package", r2["service_package"])
+		self.assertEqual(pkg1.applicable_generation, "Model 3 Jun 2017 - Dec 2023")
+		self.assertEqual(pkg2.applicable_generation, "Model 3 Jan 2024")
+		self.assertEqual([row.generation_name for row in pkg1.generation_compatibility], ["Model 3 Jun 2017 - Dec 2023"])
+		self.assertEqual([row.generation_name for row in pkg2.generation_compatibility], ["Model 3 Jan 2024"])
+
+		# 4. Link query filters compatible generation cleanly
+		rows_for_new = tesla_api.query_service_packages_for_vehicle(
+			doctype="Service Package",
+			txt="Shared Cabin Filter",
+			searchfield="name",
+			start=0,
+			page_len=20,
+			filters={"vehicle": v_new.name},
+		)
+		names_for_new = [r[0] for r in rows_for_new]
+		self.assertIn(pkg2.name, names_for_new)
+		self.assertNotIn(pkg1.name, names_for_new)
+
+
 

@@ -1730,6 +1730,68 @@ class TestPartsManagement(ISMTestCase):
 		match = next(a for a in alts if a["item_code"] == item.name)
 		self.assertEqual(flt(match["rate"]), 0.0)
 
+	def test_search_and_quick_create_service_packages_by_generation(self):
+		"""Verify search_service_packages filters by generation and quick_create scopes across generations."""
+		from ism.api.parts_catalog import search_service_packages
+		from ism.setup import backfill_repair_vehicle_generations, backfill_service_package_models
+
+		p_old = quick_create_service_package(
+			package_name=f"{TEST_PREFIX}Scoped Wiper Service",
+			correction_code="17100100",
+			applicable_model="Model 3",
+			applicable_generation="Model 3 Jun 2017 - Dec 2023",
+			standard_labor_hours=0.3,
+		)
+		p_new = quick_create_service_package(
+			package_name=f"{TEST_PREFIX}Scoped Wiper Service",
+			correction_code="17100100",
+			applicable_model="Model 3",
+			applicable_generation="Model 3 Jan 2024",
+			standard_labor_hours=0.5,
+		)
+		self.track("Service Package", p_old["name"])
+		self.track("Service Package", p_new["name"])
+		self.assertNotEqual(p_old["name"], p_new["name"])
+
+		hits_old = search_service_packages(
+			query="Scoped Wiper Service",
+			applicable_model="Model 3",
+			applicable_generation="Model 3 Jun 2017 - Dec 2023",
+		)
+		self.assertEqual([h["name"] for h in hits_old], [p_old["name"]])
+
+		hits_highland = search_service_packages(query="Model 3 Jan 2024")
+		self.assertIn(p_new["name"], [h["name"] for h in hits_highland])
+
+		# Backfill populates multi-gen compatibility rows & Repair Vehicle generations
+		cust = self.create_test_customer()
+		veh = self.create_test_vehicle(
+			vin="7SAXC1E60PF000777",
+			customer=cust.name,
+			model="Model X",
+			model_year="2023",
+			manufactured_month="06/23",
+		)
+		frappe.db.set_value(
+			"Repair Vehicle",
+			veh.name,
+			{
+				"vehicle_generation": None,
+				"recommended_manual_url": "https://service.tesla.com/docs/ModelX/Palladium/ServiceManual/en-us/",
+			},
+			update_modified=False,
+		)
+		backfill_service_package_models()
+		v_updated = backfill_repair_vehicle_generations()
+		self.assertGreaterEqual(v_updated, 1)
+		veh.reload()
+		self.assertEqual(veh.vehicle_generation, "Model X Mar 2021 - May 2025")
+		self.assertEqual(
+			veh.recommended_manual_url,
+			"https://service.tesla.com/docs/ModelX/ServiceManual/Palladium/en-us/",
+		)
+
+
 
 
 

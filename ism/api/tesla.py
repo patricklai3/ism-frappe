@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlparse
 import frappe
 from frappe.utils import cint, flt
 
+from ism.api._validation import escape_like
 from ism.api.parts import get_default_warehouse, quick_create_part
 from ism.ism.doctype.repair_order.repair_order import (
 	_get_default_labor_rate,
@@ -23,9 +24,11 @@ from ism.ism.doctype.repair_vehicle.repair_vehicle import (
 )
 from ism.utils.tesla_manual import (
 	detect_service_side,
+	get_generation_catalog,
 	normalize_tesla_procedure,
 	parse_tesla_procedure_html,
 	parse_tesla_procedure_markdown,
+	resolve_generation_entries,
 	swap_side_in_title,
 	validate_vehicle_compatibility,
 )
@@ -153,6 +156,10 @@ def import_tesla_procedure(
 	existing_pkg_name = _find_existing_service_package_name(
 		proc_data.get("correction_code") or "",
 		proc_data.get("title") or "",
+		applicable_model=proc_data.get("applicable_model") or "",
+		applicable_generation=proc_data.get("applicable_generation") or "",
+		doc_guid=proc_data.get("doc_guid") or "",
+		tesla_manual_url=proc_data.get("tesla_manual_url") or proc_url or "",
 	)
 	existing_pkg = frappe.get_cached_doc("Service Package", existing_pkg_name) if existing_pkg_name else None
 	pre_ops = _resolve_import_operations(proc_data, existing_pkg, side_choice)
@@ -274,12 +281,126 @@ def import_tesla_procedure(
 
 
 @frappe.whitelist()
-def decode_vehicle_vin(vin: str) -> dict[str, Any]:
+def decode_vehicle_vin(vin: str, manufactured_month: Optional[str] = None) -> dict[str, Any]:
 	"""Decode a 17-character Tesla VIN strictly offline using bundled WMI and spec tables."""
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
 	if not isinstance(vin, str):
 		frappe.throw(frappe._("VIN must be a string."), frappe.ValidationError)
-	return decode_tesla_vin(vin)
+	month_str = _optional_str(manufactured_month, "Manufactured Month")
+	return decode_tesla_vin(vin, manufactured_month=month_str)
+
+
+@frappe.whitelist()
+def get_vehicle_generation_catalog(model: Optional[str] = None) -> Any:
+	"""Return canonical Tesla generation metadata for a specific model or all models."""
+	if not (frappe.has_permission("Service Package", "read") or frappe.has_permission("Repair Vehicle", "read")):
+		frappe.throw(frappe._("Not permitted to read Tesla generation catalog."), frappe.PermissionError)
+	model_str = _optional_str(model, "Vehicle Model")
+	return get_generation_catalog(model_str)
+
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def query_service_packages_for_vehicle(
+	doctype: Optional[str] = None,
+	txt: str = "",
+	searchfield: Optional[str] = None,
+	start: int = 0,
+	page_len: int = 20,
+	filters: Optional[Union[dict[str, Any], str]] = None,
+) -> list[list[str]]:
+	"""Filter Service Package link field options by Repair Vehicle model and generation."""
+	from ism.scheduling.bookable_catalog import is_package_eligible_for_vehicle
+
+	frappe.has_permission("Service Package", "read", throw=True)
+	filter_dict = filters
+	if isinstance(filter_dict, str):
+		try:
+			filter_dict = json.loads(filter_dict)
+		except Exception:
+			filter_dict = {}
+	if not isinstance(filter_dict, dict):
+		filter_dict = {}
+
+	vehicle_name = filter_dict.get("vehicle")
+	v_model = None
+	v_year = None
+	v_gen = None
+	v_month = None
+	if vehicle_name and frappe.db.exists("Repair Vehicle", vehicle_name):
+		frappe.has_permission("Repair Vehicle", "read", doc=vehicle_name, throw=True)
+		v_doc = frappe.get_cached_doc("Repair Vehicle", vehicle_name)
+		v_model = getattr(v_doc, "model", None)
+		v_year = cint(getattr(v_doc, "model_year", 0)) or None
+		v_gen = getattr(v_doc, "vehicle_generation", None)
+		v_month = getattr(v_doc, "manufactured_month", None)
+
+	txt_clean = (txt or "").strip()
+	or_filters = None
+	if txt_clean:
+		escaped = escape_like(txt_clean)
+		or_filters = [
+			["name", "like", f"%{escaped}%"],
+			["package_name", "like", f"%{escaped}%"],
+			["correction_code", "like", f"%{escaped}%"],
+			["applicable_model", "like", f"%{escaped}%"],
+			["applicable_generation", "like", f"%{escaped}%"],
+		]
+
+	rows = frappe.get_list(
+		"Service Package",
+		fields=[
+			"name",
+			"package_name",
+			"correction_code",
+			"applicable_model",
+			"applicable_generation",
+			"applicable_year_from",
+			"applicable_year_to",
+			"tesla_manual_url",
+		],
+		or_filters=or_filters,
+		limit=200,
+		order_by="modified desc",
+	)
+
+	names = [r["name"] for r in rows]
+	compat_by_parent: dict[str, list[dict[str, Any]]] = {}
+	if names:
+		compat_rows = frappe.get_all(
+			"Service Package Generation",
+			filters={"parenttype": "Service Package", "parent": ["in", names]},
+			fields=[
+				"parent",
+				"applicable_model",
+				"generation_name",
+				"year_from",
+				"month_from",
+				"year_to",
+				"month_to",
+			],
+		)
+		for crow in compat_rows:
+			compat_by_parent.setdefault(crow["parent"], []).append(crow)
+
+	eligible = []
+	for row in rows:
+		row["generation_compatibility"] = compat_by_parent.get(row["name"], [])
+		if v_model and not is_package_eligible_for_vehicle(
+			row,
+			vehicle_model=v_model,
+			vehicle_year=v_year,
+			vehicle_generation=v_gen,
+			manufactured_month=v_month,
+		):
+			continue
+		meta_parts = [p for p in (row.get("correction_code"), row.get("applicable_model"), row.get("applicable_generation")) if p]
+		desc = " | ".join(meta_parts) if meta_parts else (row.get("package_name") or row["name"])
+		eligible.append([row["name"], desc])
+
+	start_idx = max(0, cint(start))
+	limit_len = max(1, min(cint(page_len) or 20, 100))
+	return eligible[start_idx : start_idx + limit_len]
 
 
 @frappe.whitelist()
@@ -287,13 +408,15 @@ def search_vehicles(
 	query: Optional[str] = None,
 	customer: Optional[str] = None,
 	model: Optional[str] = None,
+	generation: Optional[str] = None,
 	limit: int = 20,
 ) -> list[dict[str, Any]]:
-	"""Search vehicles across VIN, license plate, model, primary owner, and linked co-owners."""
+	"""Search vehicles across VIN, license plate, model, generation, primary owner, and linked co-owners."""
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
 	query = _optional_str(query, "Search query")
 	customer = _optional_str(customer, "Customer")
 	model = _optional_str(model, "Model")
+	generation = _optional_str(generation, "Generation")
 	if isinstance(limit, bool):
 		frappe.throw(frappe._("Search limit cannot be a boolean."), frappe.ValidationError)
 	try:
@@ -301,7 +424,13 @@ def search_vehicles(
 	except (TypeError, ValueError):
 		frappe.throw(frappe._("Search limit must be a positive integer."), frappe.ValidationError)
 
-	results = build_vehicle_search_results(query=query, customer=customer, model=model, limit=safe_limit)
+	results = build_vehicle_search_results(
+		query=query,
+		customer=customer,
+		model=model,
+		generation=generation,
+		limit=safe_limit,
+	)
 	if not results:
 		return []
 
@@ -567,13 +696,78 @@ def _find_matching_ro_service(ro, op_code: str, op_side: str, pkg_name: Optional
 	return None
 
 
-def _find_existing_service_package_name(correction_code: str, title: str) -> Optional[str]:
+def _find_existing_service_package_name(
+	correction_code: str,
+	title: str,
+	applicable_model: str = "",
+	applicable_generation: str = "",
+	doc_guid: str = "",
+	tesla_manual_url: str = "",
+) -> Optional[str]:
+	"""Find an existing Service Package scoped by GUID/URL or (model, generation)."""
+	app_model = (applicable_model or "").strip()
+	app_gen = (applicable_generation or "").strip()
+	target_url = (tesla_manual_url or "").strip()
+
+	def _matches_scope(cand: dict[str, Any]) -> bool:
+		c_model = (cand.get("applicable_model") or "").strip()
+		c_gen = (cand.get("applicable_generation") or "").strip()
+		if app_model and c_model and c_model != app_model:
+			return False
+		if app_gen and c_gen:
+			if c_gen == app_gen:
+				return True
+			in_names = {e["generation_name"] for e in resolve_generation_entries(app_gen, model=app_model, manual_url=target_url)}
+			cand_names = {e["generation_name"] for e in resolve_generation_entries(c_gen, model=c_model)}
+			if in_names and cand_names:
+				return in_names == cand_names
+			return False
+		if app_gen != c_gen:
+			return False
+		if app_model and c_model:
+			return c_model == app_model
+		return not app_model and not c_model
+
+	if doc_guid:
+		by_guid = frappe.db.get_all(
+			"Service Package",
+			filters={"doc_guid": doc_guid},
+			fields=["name", "applicable_model", "applicable_generation"],
+			limit=5,
+		)
+		for cand in by_guid:
+			if not app_model or not (cand.get("applicable_model") or "").strip() or (cand.get("applicable_model") or "").strip() == app_model:
+				return cand["name"]
+
+	if target_url:
+		by_url = frappe.db.get_value("Service Package", {"tesla_manual_url": target_url}, "name")
+		if by_url:
+			return by_url
+
+	candidates = []
 	if correction_code:
-		existing = frappe.db.get_value("Service Package", {"correction_code": correction_code}, "name")
-		if existing:
-			return existing
+		candidates.extend(
+			frappe.db.get_all(
+				"Service Package",
+				filters={"correction_code": correction_code},
+				fields=["name", "applicable_model", "applicable_generation"],
+			)
+		)
 	if title:
-		return frappe.db.get_value("Service Package", {"package_name": title}, "name")
+		seen = {c["name"] for c in candidates}
+		for cand in frappe.db.get_all(
+			"Service Package",
+			filters={"package_name": title},
+			fields=["name", "applicable_model", "applicable_generation"],
+		):
+			if cand["name"] not in seen:
+				candidates.append(cand)
+				seen.add(cand["name"])
+
+	for cand in candidates:
+		if _matches_scope(cand):
+			return cand["name"]
+
 	return None
 
 
@@ -630,10 +824,12 @@ def _apply_operations_to_ro(
 			is_supplement=is_supp,
 		)
 		model_val = getattr(pkg, "applicable_model", None) or proc_data.get("applicable_model", "")
+		gen_val = getattr(pkg, "applicable_generation", None) or proc_data.get("applicable_generation", "")
 		mobile_val = cint(proc_data.get("is_mobile_capable", getattr(pkg, "is_mobile_capable", 0)))
 		parts_total = flt(row_fields.get("parts_total", 0.0), 2)
 		row_fields.update({
 			"applicable_model": model_val,
+			"applicable_generation": gen_val,
 			"labor_hours": labor_hours,
 			"labor_rate": hourly_rate,
 			"labor_amount": labor_amount,
@@ -657,6 +853,7 @@ def _apply_operations_to_ro(
 			existing_service.total_amount = flt(labor_amount + flt(existing_service.parts_total), 2)
 			existing_service.tesla_manual_url = row_fields["tesla_manual_url"]
 			existing_service.applicable_model = model_val
+			existing_service.applicable_generation = gen_val
 			existing_service.is_mobile_capable = mobile_val
 			if advisor_notes:
 				existing_service.advisor_notes = advisor_notes
@@ -723,7 +920,14 @@ def _upsert_service_package(proc_data, proc_url=""):
 	generation = normalized["applicable_generation"]
 	parts = normalized["parts"]
 
-	existing_pkg_name = _find_existing_service_package_name(correction_code, title)
+	existing_pkg_name = _find_existing_service_package_name(
+		correction_code,
+		title,
+		applicable_model=model,
+		applicable_generation=generation,
+		doc_guid=normalized.get("doc_guid") or "",
+		tesla_manual_url=normalized.get("tesla_manual_url") or proc_url or "",
+	)
 
 	if existing_pkg_name:
 		frappe.has_permission("Service Package", "write", throw=True)

@@ -38,6 +38,7 @@
   "last_rescheduled_at",
   "provisional_vehicle_model",
   "provisional_vehicle_year",
+  "provisional_vehicle_generation",
   "provisional_vin_or_plate",
   "booked_packages_json",
   "section_break_portal_link",
@@ -283,6 +284,12 @@
    "fieldname": "provisional_vehicle_year",
    "fieldtype": "Int",
    "label": "Provisional Vehicle Year"
+  },
+  {
+   "depends_on": "eval:!doc.repair_vehicle",
+   "fieldname": "provisional_vehicle_generation",
+   "fieldtype": "Data",
+   "label": "Provisional Vehicle Generation"
   },
   {
    "depends_on": "eval:!doc.repair_vehicle",

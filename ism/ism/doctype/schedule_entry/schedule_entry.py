@@ -121,10 +121,17 @@ class ScheduleEntry(Document):
 		model = (getattr(self, "provisional_vehicle_model", None) or "").strip()
 		if model:
 			parts.append(model)
+		gen = (getattr(self, "provisional_vehicle_generation", None) or "").strip()
 		vin_or_plate = (getattr(self, "provisional_vin_or_plate", None) or "").strip()
 		if parts:
 			label = " ".join(parts)
+			if gen:
+				label = f"{label} ({gen})"
 			return f"{label} ({vin_or_plate})" if vin_or_plate else label
+		if gen and vin_or_plate:
+			return f"{gen} ({vin_or_plate})"
+		if gen:
+			return gen
 		if vin_or_plate:
 			return vin_or_plate
 		return ""
@@ -137,6 +144,7 @@ class ScheduleEntry(Document):
 			"provisional_email",
 			"provisional_vehicle_info",
 			"provisional_vehicle_model",
+			"provisional_vehicle_generation",
 			"provisional_vin_or_plate",
 		):
 			val = getattr(self, fieldname, None)

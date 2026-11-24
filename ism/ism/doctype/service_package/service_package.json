@@ -1,7 +1,6 @@
 {
  "actions": [],
  "allow_rename": 1,
- "autoname": "format:{package_name}",
  "creation": "2026-10-06 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -9,6 +8,7 @@
   "package_name",
   "applicable_model",
   "applicable_generation",
+  "generation_compatibility",
   "correction_code",
   "rh_correction_code",
   "col_break_rates",
@@ -43,8 +43,7 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Service / Job Title",
-   "reqd": 1,
-   "unique": 1
+   "reqd": 1
   },
   {
    "fieldname": "applicable_model",
@@ -58,8 +57,17 @@
   {
    "fieldname": "applicable_generation",
    "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
    "label": "Applicable Generation",
-   "description": "e.g. Model 3 Jun 2017 - Dec 2023, Jan 2024"
+   "search_index": 1,
+   "description": "Canonical Tesla generation(s), e.g. Model 3 Jan 2024 or Model S Feb 2021 - May 2025, Model S June 2025"
+  },
+  {
+   "fieldname": "generation_compatibility",
+   "fieldtype": "Table",
+   "label": "Compatible Generations",
+   "options": "Service Package Generation"
   },
   {
    "fieldname": "correction_code",
@@ -237,7 +245,6 @@
  "modified_by": "Administrator",
  "module": "ISM",
  "name": "Service Package",
- "naming_rule": "Expression (old style)",
  "owner": "Administrator",
  "permissions": [
   {
@@ -305,7 +312,7 @@
   }
  ],
  "row_format": "Dynamic",
- "search_fields": "package_name,correction_code,applicable_model",
+ "search_fields": "package_name,correction_code,applicable_model,applicable_generation",
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": []

@@ -84,7 +84,7 @@ class RepairVehicle(Document):
 			self.clear_vin_fields()
 			return
 
-		decoded = decode_tesla_vin(self.vin)
+		decoded = decode_tesla_vin(self.vin, manufactured_month=self.manufactured_month)
 		if not decoded["is_tesla_wmi"]:
 			self.clear_vin_fields()
 			self.is_valid_vin = 0
@@ -98,6 +98,7 @@ class RepairVehicle(Document):
 			"is_valid_vin", "manufacturer", "model", "model_year", "body_type",
 			"trim", "drivetrain", "battery_type", "drive_unit",
 			"assembly_plant", "production_sequence", "autopilot_hardware",
+			"vehicle_generation", "recommended_manual_url",
 		):
 			setattr(self, field, decoded.get(field))
 
@@ -179,6 +180,7 @@ class RepairVehicle(Document):
 			"is_valid_vin", "manufacturer", "model", "model_year", "body_type",
 			"trim", "drivetrain", "battery_type", "drive_unit",
 			"assembly_plant", "production_sequence", "autopilot_hardware",
+			"vehicle_generation", "recommended_manual_url",
 		]
 		for f in fields:
 			setattr(self, f, None)

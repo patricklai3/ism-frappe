@@ -1168,11 +1168,35 @@ def link_part_to_service_packages(
 
 
 @frappe.whitelist()
-def search_service_packages(query="", limit=25):
-	"""Search for Service Packages by title, correction code, model, or category."""
+def search_service_packages(
+	query="",
+	limit=25,
+	applicable_model=None,
+	applicable_generation=None,
+	vehicle_year=None,
+	vehicle=None,
+):
+	"""Search Service Packages by title, correction code, model, generation, or vehicle."""
+	from ism.scheduling.bookable_catalog import is_package_eligible_for_vehicle
+	from ism.utils.tesla_manual import parse_tesla_manual_url
+
 	frappe.has_permission("Service Package", "read", throw=True)
 	query = optional_str(query, "Search Query") or ""
+	model_filter = optional_str(applicable_model, "Applicable Model")
+	gen_filter = optional_str(applicable_generation, "Applicable Generation")
+	year_filter = optional_int(vehicle_year, "Vehicle Year", min_val=2008, max_val=2100) if vehicle_year not in (None, "") else None
+	vehicle_name = optional_str(vehicle, "Repair Vehicle")
 	resolved_limit = optional_int(limit, "Limit", min_val=1, max_val=100, default=25)
+
+	veh_month = None
+	if vehicle_name and frappe.db.exists("Repair Vehicle", vehicle_name):
+		frappe.has_permission("Repair Vehicle", "read", doc=vehicle_name, throw=True)
+		v_doc = frappe.get_cached_doc("Repair Vehicle", vehicle_name)
+		model_filter = model_filter or getattr(v_doc, "model", None)
+		year_filter = year_filter or (cint(getattr(v_doc, "model_year", 0)) or None)
+		gen_filter = gen_filter or getattr(v_doc, "vehicle_generation", None)
+		veh_month = getattr(v_doc, "manufactured_month", None)
+
 	or_filters = None
 	if query:
 		escaped = escape_like(query)
@@ -1180,7 +1204,11 @@ def search_service_packages(query="", limit=25):
 			["package_name", "like", f"%{escaped}%"],
 			["correction_code", "like", f"%{escaped}%"],
 			["applicable_model", "like", f"%{escaped}%"],
+			["applicable_generation", "like", f"%{escaped}%"],
 		]
+
+	has_compat_filter = bool(model_filter or gen_filter or year_filter)
+	fetch_limit = max(resolved_limit * 4, 100) if has_compat_filter else resolved_limit
 
 	packages = frappe.get_list(
 		"Service Package",
@@ -1189,6 +1217,8 @@ def search_service_packages(query="", limit=25):
 			"package_name",
 			"applicable_model",
 			"applicable_generation",
+			"applicable_year_from",
+			"applicable_year_to",
 			"correction_code",
 			"standard_labor_hours",
 			"hourly_rate",
@@ -1198,20 +1228,55 @@ def search_service_packages(query="", limit=25):
 			"tesla_manual_url",
 		],
 		or_filters=or_filters,
-		limit=resolved_limit,
+		limit=fetch_limit,
 		order_by="modified desc",
 	)
 
-	from ism.utils.tesla_manual import parse_tesla_manual_url
+	pkg_names = [pkg["name"] for pkg in packages]
+	compat_by_parent = {}
+	if pkg_names:
+		compat_rows = frappe.get_all(
+			"Service Package Generation",
+			filters={"parenttype": "Service Package", "parent": ["in", pkg_names]},
+			fields=[
+				"parent",
+				"applicable_model",
+				"generation_name",
+				"date_range",
+				"year_from",
+				"month_from",
+				"year_to",
+				"month_to",
+				"manual_base_url",
+			],
+		)
+		for crow in compat_rows:
+			compat_by_parent.setdefault(crow["parent"], []).append(crow)
 
+	results = []
 	for pkg in packages:
-		if not pkg.get("applicable_model") and pkg.get("tesla_manual_url"):
+		pkg["generation_compatibility"] = compat_by_parent.get(pkg["name"], [])
+		if (not pkg.get("applicable_model") or not pkg.get("applicable_generation")) and pkg.get("tesla_manual_url"):
 			url_meta = parse_tesla_manual_url(pkg["tesla_manual_url"])
-			pkg["applicable_model"] = url_meta.get("applicable_model") or ""
+			if not pkg.get("applicable_model"):
+				pkg["applicable_model"] = url_meta.get("applicable_model") or ""
 			if not pkg.get("applicable_generation"):
-				pkg["applicable_generation"] = url_meta.get("matched_generation") or ""
+				pkg["applicable_generation"] = (
+					url_meta.get("applicable_generation") or url_meta.get("matched_generation") or ""
+				)
+		if has_compat_filter and not is_package_eligible_for_vehicle(
+			pkg,
+			vehicle_model=model_filter,
+			vehicle_year=year_filter,
+			vehicle_generation=gen_filter,
+			manufactured_month=veh_month,
+		):
+			continue
+		results.append(pkg)
+		if len(results) >= resolved_limit:
+			break
 
-	return packages
+	return results
 
 
 @frappe.whitelist()
@@ -1235,12 +1300,33 @@ def quick_create_service_package(
 	hours = 1.0 if not hours_val else hours_val
 	hr_rate = 120.0 if not rate_val else rate_val
 
-	if frappe.db.exists("Service Package", pkg_name):
-		pkg = frappe.get_doc("Service Package", pkg_name)
+	target_model = (applicable_model or "").strip()
+	target_gen = (applicable_generation or "").strip()
+
+	def _find_scoped_package():
+		matches = frappe.db.get_all(
+			"Service Package",
+			filters={"package_name": pkg_name},
+			fields=["name", "applicable_model", "applicable_generation"],
+		)
+		for row in matches:
+			if (row.applicable_model or "").strip() == target_model and (row.applicable_generation or "").strip() == target_gen:
+				return row["name"]
+		return None
+
+	existing_name = _find_scoped_package()
+	if existing_name:
+		pkg = frappe.get_doc("Service Package", existing_name)
 		pkg.check_permission("read")
-		if applicable_model and not pkg.applicable_model:
+		dirty = False
+		if target_model and not pkg.applicable_model:
+			pkg.applicable_model = target_model
+			dirty = True
+		if target_gen and not pkg.applicable_generation:
+			pkg.applicable_generation = target_gen
+			dirty = True
+		if dirty:
 			pkg.check_permission("write")
-			pkg.applicable_model = applicable_model
 			pkg.save()
 		return pkg.as_dict()
 
@@ -1249,8 +1335,8 @@ def quick_create_service_package(
 		{
 			"doctype": "Service Package",
 			"package_name": pkg_name,
-			"applicable_model": applicable_model or "",
-			"applicable_generation": applicable_generation or "",
+			"applicable_model": target_model,
+			"applicable_generation": target_gen,
 			"correction_code": correction_code or None,
 			"standard_labor_hours": hours,
 			"hourly_rate": hr_rate,
@@ -1261,10 +1347,7 @@ def quick_create_service_package(
 	try:
 		pkg.insert()
 	except frappe.DuplicateEntryError:
-		pkg = frappe.get_doc("Service Package", pkg_name)
+		fallback_name = _find_scoped_package() or pkg_name
+		pkg = frappe.get_doc("Service Package", fallback_name)
 		pkg.check_permission("read")
-		if applicable_model and not pkg.applicable_model:
-			pkg.check_permission("write")
-			pkg.applicable_model = applicable_model
-			pkg.save()
 	return pkg.as_dict()

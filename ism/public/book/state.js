@@ -80,12 +80,27 @@ export function createBookingStore(bootConfig) {
 	const maxPackages = Math.max(1, Number(policy.max_packages_per_booking) || 5);
 	const defaultHorizon = Math.max(1, Number(policy.horizon_days) || 30);
 
+	function resolveMatchingGenerations(model, year) {
+		const map = (bootConfig && bootConfig.vehicle_generations) || {};
+		const list = model && Array.isArray(map[model]) ? map[model] : [];
+		if (!list.length) return [];
+		if (!year) return list;
+		return list.filter((entry) => {
+			const yf = entry.year_from ? Number(entry.year_from) : null;
+			const yt = entry.year_to ? Number(entry.year_to) : null;
+			if (yf && year < yf) return false;
+			if (yt && year > yt) return false;
+			return true;
+		});
+	}
+
 	function buildInitialState() {
 		return {
 			step: 1,
 			vehicle: {
 				model: "",
 				year: null,
+				generation: "",
 				vin_or_plate: "",
 			},
 			packagesCatalog: [],
@@ -182,9 +197,11 @@ export function createBookingStore(bootConfig) {
 		setVehicleModel(model) {
 			const clean = String(model || "").trim();
 			if (clean === state.vehicle.model) return;
+			const matches = resolveMatchingGenerations(clean, state.vehicle.year);
+			const autoGen = matches.length === 1 ? String(matches[0].generation_name || "") : "";
 			setState((prev) => ({
 				...prev,
-				vehicle: { ...prev.vehicle, model: clean },
+				vehicle: { ...prev.vehicle, model: clean, generation: autoGen },
 				packagesCatalog: [],
 				packagesLoaded: false,
 				selectedPackageIds: [],
@@ -200,9 +217,28 @@ export function createBookingStore(bootConfig) {
 			const parsed = year ? Number(year) : null;
 			const clean = Number.isInteger(parsed) ? parsed : null;
 			if (clean === state.vehicle.year) return;
+			const matches = resolveMatchingGenerations(state.vehicle.model, clean);
+			const autoGen = matches.length === 1 ? String(matches[0].generation_name || "") : "";
 			setState((prev) => ({
 				...prev,
-				vehicle: { ...prev.vehicle, year: clean },
+				vehicle: { ...prev.vehicle, year: clean, generation: autoGen },
+				packagesCatalog: [],
+				packagesLoaded: false,
+				selectedPackageIds: [],
+				slotsWindow: emptySlotsWindow(defaultHorizon),
+				selectedDate: null,
+				selectedSlot: null,
+				idempotency_key: generateIdempotencyKey(),
+				errorBanner: null,
+			}));
+		},
+
+		setVehicleGeneration(generation) {
+			const clean = String(generation || "").trim();
+			if (clean === state.vehicle.generation) return;
+			setState((prev) => ({
+				...prev,
+				vehicle: { ...prev.vehicle, generation: clean },
 				packagesCatalog: [],
 				packagesLoaded: false,
 				selectedPackageIds: [],

@@ -134,11 +134,28 @@ def serialize_service_package_compact(pkg: Any) -> Dict[str, Any]:
 			"is_default": int(getattr(row, "is_default", 0) or 0),
 		})
 
+	compat = [
+		{
+			"applicable_model": getattr(r, "applicable_model", None),
+			"generation_name": getattr(r, "generation_name", None),
+			"date_range": getattr(r, "date_range", None),
+			"year_from": getattr(r, "year_from", None),
+			"month_from": getattr(r, "month_from", None),
+			"year_to": getattr(r, "year_to", None),
+			"month_to": getattr(r, "month_to", None),
+			"manual_base_url": getattr(r, "manual_base_url", None),
+		}
+		for r in (getattr(pkg, "generation_compatibility", None) or [])
+	]
+
 	return {
 		"name": pkg.name,
 		"package_name": pkg.package_name,
 		"correction_code": getattr(pkg, "correction_code", None),
 		"applicable_model": getattr(pkg, "applicable_model", None),
+		"applicable_generation": getattr(pkg, "applicable_generation", None),
+		"tesla_manual_url": getattr(pkg, "tesla_manual_url", None),
+		"generation_compatibility": compat,
 		"standard_labor_hours": flt(getattr(pkg, "standard_labor_hours", 0.0)),
 		"items_count": len(items),
 		"items": items,
@@ -288,9 +305,14 @@ def build_vin_decode_summary(decoded: Dict[str, Any]) -> str:
 	"""Render an optional markdown summary for offline Tesla VIN decoding."""
 	if decoded.get("error"):
 		return f"### VIN Decode Error (`{decoded.get('vin') or 'N/A'}`)\n- **Error**: {decoded['error']}"
+	gen_line = (
+		f" | **Generation**: `{decoded.get('vehicle_generation')}`"
+		if decoded.get("vehicle_generation")
+		else ""
+	)
 	return "\n".join([
 		f"### Tesla VIN Decoded: `{decoded.get('vin')}`",
-		f"- **Vehicle**: `{decoded.get('model_year')}` `{decoded.get('model')}` ({decoded.get('drivetrain')})",
+		f"- **Vehicle**: `{decoded.get('model_year')}` `{decoded.get('model')}` ({decoded.get('drivetrain')}){gen_line}",
 		f"- **Hardware**: `{decoded.get('autopilot_hardware')}` | **Check Digit Valid**: `{bool(decoded.get('is_valid_vin'))}`",
 		f"- **Manual**: {decoded.get('recommended_manual_url')}",
 	])
@@ -300,9 +322,14 @@ def build_vehicle_intel_summary(intel: Dict[str, Any]) -> str:
 	"""Render an optional markdown summary for full vehicle intelligence."""
 	veh = intel.get("vehicle") or {}
 	deferred = intel.get("deferred_services") or {}
+	gen_line = (
+		f" | **Generation**: `{veh.get('vehicle_generation')}`"
+		if veh.get("vehicle_generation")
+		else ""
+	)
 	return "\n".join([
 		f"### Vehicle Intelligence: `{veh.get('name')}`",
-		f"- **Model**: `{veh.get('model_year')}` `{veh.get('model')}` | **Plate**: `{veh.get('license_plate') or 'N/A'}`",
+		f"- **Model**: `{veh.get('model_year')}` `{veh.get('model')}`{gen_line} | **Plate**: `{veh.get('license_plate') or 'N/A'}`",
 		f"- **Owners**: `{len(intel.get('owners') or [])}` | **Past ROs**: `{len(intel.get('service_history') or [])}`",
 		f"- **Open Deferred**: `{deferred.get('open_count', 0)}` (`${flt(deferred.get('open_estimated_total')):,.2f}`)",
 	])

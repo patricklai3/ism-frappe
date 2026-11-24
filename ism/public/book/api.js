@@ -151,12 +151,13 @@ async function callBookingApi(
 	return payload;
 }
 
-export function fetchPackages({ vehicle_model, vehicle_year, search } = {}) {
+export function fetchPackages({ vehicle_model, vehicle_year, vehicle_generation, search } = {}) {
 	return callBookingApi("get_booking_packages", {
 		httpMethod: "GET",
 		params: {
 			vehicle_model,
 			vehicle_year,
+			vehicle_generation,
 			search,
 		},
 	});
@@ -168,6 +169,7 @@ export function fetchSlots({
 	days_ahead = 14,
 	vehicle_model,
 	vehicle_year,
+	vehicle_generation,
 	max_slots_per_day,
 } = {}) {
 	return callBookingApi("get_booking_slots", {
@@ -178,6 +180,7 @@ export function fetchSlots({
 			days_ahead,
 			vehicle_model,
 			vehicle_year,
+			vehicle_generation,
 			max_slots_per_day,
 		},
 	});

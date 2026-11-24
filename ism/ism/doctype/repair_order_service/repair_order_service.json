@@ -7,6 +7,7 @@
  "field_order": [
   "service_package",
   "applicable_model",
+  "applicable_generation",
   "correction_code",
   "service_title",
   "service_position",
@@ -54,6 +55,16 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Model",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "columns": 2,
+   "fetch_from": "service_package.applicable_generation",
+   "fieldname": "applicable_generation",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Generation",
    "read_only": 1
   },
   {
