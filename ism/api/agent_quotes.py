@@ -88,14 +88,14 @@ def _get_default_company() -> str:
 
 
 def _get_vehicle_meta_for_ro(ro: Any) -> Optional[Dict[str, Any]]:
+	from ism.utils.vehicle_display import VEHICLE_DISPLAY_FIELDS
+
 	veh_name = getattr(ro, "vehicle", None)
 	if not veh_name:
 		return None
-	if getattr(ro, "vin", None) and getattr(ro, "license_plate", None):
-		return None
 	if not frappe.has_permission("Repair Vehicle", "read", doc=veh_name):
 		return None
-	return frappe.db.get_value("Repair Vehicle", veh_name, ["vin", "license_plate"], as_dict=True) or {}
+	return frappe.db.get_value("Repair Vehicle", veh_name, list(VEHICLE_DISPLAY_FIELDS), as_dict=True) or {}
 
 
 def _serialize_ro_compact(ro: Any, vehicle_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -220,29 +220,62 @@ def _serialize_pending_deferred(vehicle: str, ro: Any = None) -> List[Dict[str, 
 	return items
 
 
-def _resolve_vehicle(vehicle_identifier: str, customer_name: str) -> str:
+def _resolve_vehicle(
+	vehicle_identifier: str,
+	customer_name: str,
+	*,
+	vehicle_color: Optional[str] = None,
+	license_plate: Optional[str] = None,
+) -> str:
 	"""Find an existing Repair Vehicle by name, plate, or VIN, or create one safely."""
+	from ism.utils.vehicle_display import (
+		normalize_license_plate,
+		normalize_vehicle_color,
+		require_vehicle_intake_fields,
+	)
+
 	frappe.has_permission("Repair Vehicle", "read", throw=True)
 	cleaned = (vehicle_identifier or "").strip()
 	if not cleaned:
 		cleaned = f"PLATE-{frappe.generate_hash(length=10).upper()}"
 
+	clean_color = normalize_vehicle_color(vehicle_color)
+	clean_plate = normalize_license_plate(license_plate)
+
 	veh = _lookup_vehicle(cleaned)
 	if veh:
 		frappe.has_permission("Repair Vehicle", "read", doc=veh, throw=True)
+		if clean_color or clean_plate:
+			v_doc = frappe.get_doc("Repair Vehicle", veh)
+			v_doc.check_permission("write")
+			changed = False
+			if clean_color and clean_color != normalize_vehicle_color(getattr(v_doc, "color", None)):
+				v_doc.color = clean_color
+				changed = True
+			if clean_plate and clean_plate != normalize_license_plate(getattr(v_doc, "license_plate", None)):
+				v_doc.license_plate = clean_plate
+				changed = True
+			if changed:
+				v_doc.save()
 		return veh
 
 	frappe.has_permission("Repair Vehicle", "create", throw=True)
 	is_vin = len(cleaned) == 17
 	vin = cleaned.upper() if is_vin else f"PLATE-{frappe.generate_hash(length=10).upper()}"
-	plate = "" if is_vin else cleaned
+	plate = clean_plate or ("" if is_vin else normalize_license_plate(cleaned))
+	req_color, req_plate = require_vehicle_intake_fields(
+		color=clean_color,
+		license_plate=plate,
+		context="creating a Repair Vehicle",
+	)
 
 	try:
 		v_doc = frappe.get_doc(
 			{
 				"doctype": "Repair Vehicle",
 				"vin": vin,
-				"license_plate": plate,
+				"color": req_color,
+				"license_plate": req_plate,
 				"customer": customer_name,
 				"manufacturer": "Tesla",
 				"model": "Model 3",
@@ -464,6 +497,9 @@ def create_quote(
 	vehicle_identifier: Optional[str] = None,
 	customer: Optional[str] = None,
 	vehicle: Optional[str] = None,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	services: Optional[Union[List[Any], str]] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
@@ -478,6 +514,8 @@ def create_quote(
 	frappe.has_permission("Repair Order", "create", throw=True)
 	cust_in = optional_str(customer_name, "customer_name") or optional_str(customer, "customer")
 	veh_in = optional_str(vehicle_identifier, "vehicle_identifier") or optional_str(vehicle, "vehicle")
+	color_in = optional_str(vehicle_color, "vehicle_color") or optional_str(color, "color")
+	plate_in = optional_str(license_plate, "license_plate")
 	notes_str = optional_str(notes, "notes")
 	concern_str = optional_str(concern, "concern")
 	notes_in = notes_str if notes_str is not None else concern_str
@@ -513,7 +551,7 @@ def create_quote(
 
 	comp = get_active_company(company)
 	cust = _resolve_customer(cust_in, phone=phone_in, email=email_in)
-	veh = _resolve_vehicle(veh_in, cust)
+	veh = _resolve_vehicle(veh_in, cust, vehicle_color=color_in, license_plate=plate_in)
 
 	ro = frappe.new_doc("Repair Order")
 	ro.company = comp

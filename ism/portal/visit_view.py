@@ -46,6 +46,11 @@ from ism.portal.pin_vault import (
 )
 from ism.scheduling.arrival_policy import format_customer_appointment_display
 from ism.scheduling.self_serve import evaluate_reschedule_eligibility
+from ism.utils.vehicle_display import (
+	VEHICLE_DISPLAY_FIELDS,
+	build_vehicle_display_dict,
+	format_vehicle_display,
+)
 
 __all__ = [
 	"build_portal_hub_payload",
@@ -171,56 +176,76 @@ def _build_vehicle_section(ro_doc: Any, se_doc: Any) -> dict[str, Any]:
 		row = frappe.db.get_value(
 			"Repair Vehicle",
 			vehicle_name,
-			["model_year", "manufacturer", "model", "license_plate", "vin"],
+			list(VEHICLE_DISPLAY_FIELDS),
 			as_dict=True,
 		)
 		if row:
-			year = row.get("model_year") or None
-			manufacturer = (row.get("manufacturer") or "").strip() or None
-			model = (row.get("model") or "").strip() or None
-			plate = (row.get("license_plate") or "").strip() or None
-			vin = (row.get("vin") or "").strip() or None
-			label_parts = [str(year) if year else "", manufacturer or "", model or ""]
-			base_label = " ".join(part for part in label_parts if part).strip() or vehicle_name
-			label = f"{base_label} ({plate})" if plate else base_label
+			info = build_vehicle_display_dict(row, fallback=vehicle_name)
+			label = format_vehicle_display(row, fallback=vehicle_name)
+			compact_label = format_vehicle_display(row, compact=True, fallback=label)
 			return {
-				"model_year": year,
-				"manufacturer": manufacturer,
-				"make": manufacturer,
-				"model": model,
-				"license_plate": plate,
-				"vin": vin,
+				"model_year": info.get("model_year"),
+				"manufacturer": info.get("manufacturer"),
+				"make": info.get("manufacturer"),
+				"model": info.get("model"),
+				"color": info.get("color"),
+				"license_plate": info.get("license_plate"),
+				"vin": info.get("vin"),
+				"display": label,
+				"compact_display": compact_label,
 				"label": label,
+				"compact_label": compact_label,
 			}
 
 	if se_doc is not None:
 		prov_year = _field(se_doc, "provisional_vehicle_year") or None
 		prov_model = (_field(se_doc, "provisional_vehicle_model") or "").strip() or None
-		prov_info = (_field(se_doc, "provisional_vehicle_info") or "").strip() or None
-		prov_plate = (_field(se_doc, "provisional_vin_or_plate") or "").strip() or None
-		display_label = (
-			se_doc.get_display_vehicle()
-			if hasattr(se_doc, "get_display_vehicle")
-			else " ".join(part for part in [str(prov_year) if prov_year else "", prov_model or prov_info or ""] if part)
+		prov_color = (_field(se_doc, "provisional_vehicle_color") or "").strip() or None
+		prov_plate = (
+			(_field(se_doc, "provisional_license_plate") or "").strip()
+			or (_field(se_doc, "provisional_vin_or_plate") or "").strip()
+			or None
 		)
+		prov_vin_or_plate = (_field(se_doc, "provisional_vin_or_plate") or "").strip() or None
+		prov_vin = prov_vin_or_plate if (prov_vin_or_plate and len(prov_vin_or_plate) == 17) else None
+		prov_info = (_field(se_doc, "provisional_vehicle_info") or "").strip() or None
+		prov_dict = {
+			"model_year": prov_year,
+			"model": prov_model,
+			"color": prov_color,
+			"license_plate": prov_plate if prov_plate != prov_vin else None,
+			"vin": prov_vin,
+		}
+		fallback_label = prov_info or _("Vehicle")
+		label = format_vehicle_display(prov_dict, fallback=fallback_label)
+		compact_label = format_vehicle_display(prov_dict, compact=True, fallback=label)
 		return {
 			"model_year": prov_year,
 			"manufacturer": None,
 			"make": None,
 			"model": prov_model or prov_info,
-			"license_plate": prov_plate,
-			"vin": None,
-			"label": (display_label or "").strip() or _("Vehicle"),
+			"color": prov_color,
+			"license_plate": prov_dict["license_plate"],
+			"vin": prov_vin,
+			"display": label,
+			"compact_display": compact_label,
+			"label": label,
+			"compact_label": compact_label,
 		}
 
+	fallback = _("Vehicle")
 	return {
 		"model_year": None,
 		"manufacturer": None,
 		"make": None,
 		"model": None,
+		"color": None,
 		"license_plate": None,
 		"vin": None,
-		"label": _("Vehicle"),
+		"display": fallback,
+		"compact_display": fallback,
+		"label": fallback,
+		"compact_label": fallback,
 	}
 
 
@@ -519,6 +544,16 @@ def build_portal_hub_payload(
 			"repair_order": rec["repair_order"],
 			"schedule_entry": rec["schedule_entry"],
 			"vehicle_label": rec["vehicle"]["label"],
+			"vehicle_compact_label": rec["vehicle"]["compact_label"],
+			"vehicle_info": {
+				"model_year": rec["vehicle"].get("model_year"),
+				"model": rec["vehicle"].get("model"),
+				"color": rec["vehicle"].get("color"),
+				"license_plate": rec["vehicle"].get("license_plate"),
+				"vin": rec["vehicle"].get("vin"),
+				"display": rec["vehicle"].get("display"),
+				"compact_display": rec["vehicle"].get("compact_display"),
+			},
 			"status_code": rec["status"]["code"],
 			"status_label": rec["status"]["label"],
 			"is_read_only": rec["is_read_only"],

@@ -9,6 +9,10 @@ from typing import Any
 import frappe
 
 from ism.ism.doctype.shop_action_item.clearing import CLEARING_CONDITION_DESCRIPTIONS
+from ism.utils.vehicle_display import (
+	build_vehicle_display_dict,
+	get_vehicle_display_map,
+)
 
 DEAD_LIFT_MINUTES_THRESHOLD = 30
 COLD_QUOTE_MINUTES_THRESHOLD = 120
@@ -260,6 +264,85 @@ def build_cockpit_view(
 	raw_action_items = data.get("action_items") if isinstance(data.get("action_items"), list) else []
 	health_snapshots = data.get("health_snapshots") if isinstance(data.get("health_snapshots"), dict) else {}
 
+	# Batch-load vehicle display info for all active ROs and schedule entries in a single DB query
+	_all_vehicle_names: list[str] = []
+	for _ro in active_ros:
+		if isinstance(_ro, dict) and _ro.get("vehicle"):
+			_all_vehicle_names.append(str(_ro["vehicle"]))
+	for _se in schedule_entries:
+		if isinstance(_se, dict):
+			_veh = _se.get("vehicle") or _se.get("repair_vehicle")
+			if _veh:
+				_all_vehicle_names.append(str(_veh))
+	try:
+		vehicle_display_map = get_vehicle_display_map(_all_vehicle_names) if _all_vehicle_names else {}
+	except Exception:
+		vehicle_display_map = {}
+
+	def _resolve_ro_vehicle_info(ro_row: dict[str, Any]) -> dict[str, Any]:
+		v_name = str(ro_row.get("vehicle") or "").strip()
+		if v_name and v_name in vehicle_display_map:
+			return vehicle_display_map[v_name]
+		if any(
+			ro_row.get(k)
+			for k in ("model_year", "model", "color", "license_plate", "vehicle_display")
+		):
+			return build_vehicle_display_dict(
+				{
+					"name": v_name or None,
+					"vin": ro_row.get("vin") or v_name or None,
+					"model_year": ro_row.get("model_year"),
+					"manufacturer": ro_row.get("manufacturer"),
+					"model": ro_row.get("model"),
+					"color": ro_row.get("color"),
+					"license_plate": ro_row.get("license_plate"),
+					"display_title": ro_row.get("vehicle_display"),
+				},
+				fallback=ro_row.get("vehicle_display") or v_name or "Vehicle",
+			)
+		return build_vehicle_display_dict(
+			{"name": v_name, "vin": v_name} if v_name else None,
+			fallback=v_name or "Vehicle",
+		)
+
+	ro_vehicle_info_map: dict[str, dict[str, Any]] = {}
+	for _ro in active_ros:
+		if isinstance(_ro, dict) and _ro.get("name"):
+			ro_vehicle_info_map[str(_ro["name"])] = _resolve_ro_vehicle_info(_ro)
+
+	def _resolve_entry_vehicle_info(raw_entry: dict[str, Any]) -> dict[str, Any]:
+		v_name = str(raw_entry.get("vehicle") or raw_entry.get("repair_vehicle") or "").strip()
+		if v_name and v_name in vehicle_display_map:
+			return vehicle_display_map[v_name]
+		ro_id = str(raw_entry.get("repair_order") or "").strip()
+		if ro_id and ro_id in ro_vehicle_info_map:
+			return ro_vehicle_info_map[ro_id]
+		if any(
+			raw_entry.get(k)
+			for k in (
+				"provisional_vehicle_year",
+				"provisional_vehicle_model",
+				"provisional_vehicle_color",
+				"provisional_license_plate",
+				"provisional_vehicle_info",
+			)
+		):
+			return build_vehicle_display_dict(
+				{
+					"model_year": raw_entry.get("provisional_vehicle_year"),
+					"model": raw_entry.get("provisional_vehicle_model"),
+					"color": raw_entry.get("provisional_vehicle_color"),
+					"license_plate": raw_entry.get("provisional_license_plate"),
+					"vin": raw_entry.get("provisional_vin_or_plate"),
+					"display_title": raw_entry.get("provisional_vehicle_info"),
+				},
+				fallback=raw_entry.get("provisional_vehicle_info") or v_name or raw_entry.get("customer") or "",
+			)
+		return build_vehicle_display_dict(
+			{"name": v_name, "vin": v_name} if v_name else None,
+			fallback=v_name or raw_entry.get("customer") or "",
+		)
+
 	# 1. Sync overlay maps from Shop Action Item records
 	snoozed_keys: dict[str, str] = {}
 	dismissed_keys: set[str] = set()
@@ -315,7 +398,14 @@ def build_cockpit_view(
 		ro_status = str(ro.get("status") or "")
 		approval_status = str(ro.get("approval_status") or "")
 		customer = str(ro.get("customer") or "Customer")
-		vehicle = str(ro.get("vehicle") or "Vehicle")
+		vehicle_info = ro_vehicle_info_map.get(ro_name) or _resolve_ro_vehicle_info(ro)
+		vehicle = str(vehicle_info.get("display") or ro.get("vehicle") or "Vehicle")
+		vehicle_compact = str(vehicle_info.get("compact_display") or vehicle)
+		vehicle_fields = {
+			"vehicle_display": vehicle,
+			"vehicle_compact_display": vehicle_compact,
+			"vehicle_info": vehicle_info,
+		}
 		desk_url = str(ro.get("desk_url") or "")
 		parts_summary = ro.get("parts_summary") if isinstance(ro.get("parts_summary"), dict) else {}
 		in_bay = (ro.get("vehicle_location") == "In Bay / Being Serviced") or (ro_name in ro_active_bay)
@@ -339,6 +429,7 @@ def build_cockpit_view(
 				"deep_link": desk_url,
 				"can_snooze": True,
 				"can_dismiss": False,
+				**vehicle_fields,
 			})
 
 		# Rule 2: Follow Up Cold Quote (Pending Authorization)
@@ -364,6 +455,7 @@ def build_cockpit_view(
 					"deep_link": desk_url,
 					"can_snooze": True,
 					"can_dismiss": False,
+					**vehicle_fields,
 				})
 
 		# Rule 3: Order Missing Parts (persistent while uncovered deficit remains)
@@ -398,6 +490,7 @@ def build_cockpit_view(
 				"deep_link": desk_url,
 				"can_snooze": True,
 				"can_dismiss": False,
+				**vehicle_fields,
 			})
 
 		# Rule 4: Parts Ready — Resume RO
@@ -422,6 +515,7 @@ def build_cockpit_view(
 				"deep_link": desk_url,
 				"can_snooze": True,
 				"can_dismiss": False,
+				**vehicle_fields,
 			})
 
 		# Rule 5: Dead Lift (> 30m in active bay while waiting on parts or approval)
@@ -451,6 +545,7 @@ def build_cockpit_view(
 					"deep_link": desk_url,
 					"can_snooze": True,
 					"can_dismiss": False,
+					**vehicle_fields,
 				}
 				dead_lift_items_raw.append(dl_item)
 				derived_items.append(dl_item)
@@ -486,6 +581,7 @@ def build_cockpit_view(
 				"deep_link": desk_url,
 				"can_snooze": True,
 				"can_dismiss": False,
+				**vehicle_fields,
 			})
 
 		# Rule 7: Checkout & Release Completed Work
@@ -512,6 +608,7 @@ def build_cockpit_view(
 					"deep_link": desk_url,
 					"can_snooze": True,
 					"can_dismiss": False,
+					**vehicle_fields,
 				})
 
 	emitted_derived_keys = {it["dedup_key"] for it in derived_items}
@@ -548,7 +645,7 @@ def build_cockpit_view(
 			clearing_desc = CLEARING_CONDITION_DESCRIPTIONS.get(ctype, "")
 
 		row_name = str(row.get("name") or "")
-		all_candidates.append({
+		synced_item: dict[str, Any] = {
 			"id": row_name or d_key,
 			"action_item_name": row_name,
 			"action_item": row_name,
@@ -569,7 +666,13 @@ def build_cockpit_view(
 			"deep_link": str(row.get("desk_url") or urls.get("action_items") or ""),
 			"can_snooze": True,
 			"can_dismiss": True,
-		})
+		}
+		if ref_dt == "Repair Order" and ref_nm and str(ref_nm) in ro_vehicle_info_map:
+			sv_info = ro_vehicle_info_map[str(ref_nm)]
+			synced_item["vehicle_display"] = sv_info.get("display") or ""
+			synced_item["vehicle_compact_display"] = sv_info.get("compact_display") or ""
+			synced_item["vehicle_info"] = sv_info
+		all_candidates.append(synced_item)
 
 	action_queue: list[dict[str, Any]] = []
 	suppressed_count = 0
@@ -756,11 +859,13 @@ def build_cockpit_view(
 			state = "scheduled"
 
 		main_label = str(ro_id or raw.get("entry_type") or p["name"])
-		veh = str(raw.get("vehicle") or raw.get("customer") or "").strip()
+		v_info = _resolve_entry_vehicle_info(raw)
+		veh_display = str(v_info.get("display") or raw.get("provisional_vehicle_info") or raw.get("vehicle") or raw.get("customer") or "").strip()
+		veh_compact = str(v_info.get("compact_display") or veh_display)
 		sublabel_parts = [
 			part
 			for part in (
-				veh,
+				veh_display,
 				counterpart_label,
 				f"{_minutes_to_clock(p['start_min'])}–{_minutes_to_clock(p['end_min'])}",
 			)
@@ -774,6 +879,9 @@ def build_cockpit_view(
 			"state": state,
 			"label": main_label,
 			"sublabel": " · ".join(sublabel_parts),
+			"vehicle_display": veh_display,
+			"vehicle_compact_display": veh_compact,
+			"vehicle_info": v_info,
 			"start_clock": _minutes_to_clock(p["start_min"]),
 			"end_clock": _minutes_to_clock(p["end_min"]),
 			"left_pct": left_pct,
@@ -827,10 +935,14 @@ def build_cockpit_view(
 			and str(ro.get("name") or "") not in ro_active_bay
 		):
 			ro_id = str(ro["name"])
+			v_info = ro_vehicle_info_map.get(ro_id) or _resolve_ro_vehicle_info(ro)
 			row_data = {
 				"name": ro_id,
 				"status": str(ro.get("status") or ""),
 				"vehicle": str(ro.get("vehicle") or ""),
+				"vehicle_display": str(v_info.get("display") or ro.get("vehicle") or ""),
+				"vehicle_compact_display": str(v_info.get("compact_display") or v_info.get("display") or ""),
+				"vehicle_info": v_info,
 				"desk_url": str(ro.get("desk_url") or ""),
 				"is_dead_lift": ro_id in dead_lift_ros,
 			}

@@ -94,9 +94,24 @@ def serialize_repair_order_compact(
 			"total_amount": flt(getattr(svc, "total_amount", 0.0), 2),
 		})
 
-	meta = vehicle_meta or {}
-	vin = getattr(ro, "vin", None) or meta.get("vin")
-	license_plate = getattr(ro, "license_plate", None) or meta.get("license_plate")
+	meta = dict(vehicle_meta or {})
+	if getattr(ro, "vehicle", None) and not meta.get("name"):
+		meta["name"] = ro.vehicle
+	if getattr(ro, "vin", None) and not meta.get("vin"):
+		meta["vin"] = ro.vin
+	if getattr(ro, "license_plate", None) and not meta.get("license_plate"):
+		meta["license_plate"] = ro.license_plate
+	if getattr(ro, "vehicle_display", None) and not meta.get("display_title"):
+		meta["display_title"] = ro.vehicle_display
+
+	from ism.utils.vehicle_display import build_vehicle_display_dict
+
+	v_info = build_vehicle_display_dict(
+		meta if meta else None,
+		fallback=getattr(ro, "vehicle_display", None) or getattr(ro, "vehicle", None),
+	)
+	vin = getattr(ro, "vin", None) or v_info.get("vin")
+	license_plate = getattr(ro, "license_plate", None) or v_info.get("license_plate")
 
 	return {
 		"name": ro.name,
@@ -105,7 +120,12 @@ def serialize_repair_order_compact(
 		"customer": ro.customer,
 		"vehicle": ro.vehicle,
 		"vin": vin,
+		"model_year": v_info.get("model_year"),
+		"model": v_info.get("model"),
+		"color": v_info.get("color"),
 		"license_plate": license_plate,
+		"vehicle_display": v_info.get("display") or getattr(ro, "vehicle_display", None) or ro.vehicle,
+		"vehicle_compact_display": v_info.get("compact_display") or v_info.get("display") or "",
 		"vehicle_location": getattr(ro, "vehicle_location", None),
 		"total_bay_hours": flt(getattr(ro, "total_bay_hours", 0.0), 2),
 		"net_total": flt(getattr(ro, "net_total", 0.0), 2),
@@ -152,10 +172,16 @@ def build_quote_summary(
 	deferred_services: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
 	"""Render an optional markdown quote summary card."""
+	from ism.utils.vehicle_display import format_vehicle_display
+
 	urls = build_ro_urls(ro.name)
+	vehicle_label = (
+		getattr(ro, "vehicle_display", None)
+		or format_vehicle_display(getattr(ro, "vehicle", None), fallback=getattr(ro, "vehicle", None))
+	)
 	lines = [
 		f"### {title_prefix} #{ro.name}",
-		f"**Customer**: `{ro.customer}` | **Vehicle**: `{ro.vehicle}`",
+		f"**Customer**: `{ro.customer}` | **Vehicle**: `{vehicle_label}`",
 		f"**Status**: `{ro.status}` | **Est. Shop Time**: `{duration_min} mins`",
 		"",
 		"| Service Operation | Hours | Labor ($) | Parts ($) | Line Total ($) |",
@@ -298,11 +324,14 @@ def build_vin_decode_summary(decoded: Dict[str, Any]) -> str:
 
 def build_vehicle_intel_summary(intel: Dict[str, Any]) -> str:
 	"""Render an optional markdown summary for full vehicle intelligence."""
+	from ism.utils.vehicle_display import format_vehicle_display
+
 	veh = intel.get("vehicle") or {}
 	deferred = intel.get("deferred_services") or {}
+	vehicle_label = format_vehicle_display(veh, fallback=veh.get("name") or "Vehicle")
 	return "\n".join([
-		f"### Vehicle Intelligence: `{veh.get('name')}`",
-		f"- **Model**: `{veh.get('model_year')}` `{veh.get('model')}` | **Plate**: `{veh.get('license_plate') or 'N/A'}`",
+		f"### Vehicle Intelligence: `{vehicle_label}`",
+		f"- **Vehicle**: `{veh.get('model_year') or ''}` `{veh.get('color') or ''}` `{veh.get('model') or ''}` | **Plate**: `{veh.get('license_plate') or 'N/A'}`",
 		f"- **Owners**: `{len(intel.get('owners') or [])}` | **Past ROs**: `{len(intel.get('service_history') or [])}`",
 		f"- **Open Deferred**: `{deferred.get('open_count', 0)}` (`${flt(deferred.get('open_estimated_total')):,.2f}`)",
 	])
@@ -311,9 +340,11 @@ def build_vehicle_intel_summary(intel: Dict[str, Any]) -> str:
 def build_inspection_summary(payload: Dict[str, Any], heading: str = "Check-In Inspection") -> str:
 	"""Render an optional markdown summary for Repair Order check-in inspection state."""
 	summary = payload.get("summary") or {}
+	vehicle_label = payload.get("vehicle_display") or payload.get("vehicle") or "N/A"
 	return "\n".join([
 		f"### {heading}: `{payload.get('repair_order')}`",
-		f"- **Template**: `{payload.get('inspection_template') or 'Custom'}` | **Odometer**: `{payload.get('odometer_in')}`",
+		f"- **Vehicle**: `{vehicle_label}` | **Odometer**: `{payload.get('odometer_in')}`",
+		f"- **Template**: `{payload.get('inspection_template') or 'Custom'}`",
 		f"- **Items**: `{summary.get('completed', 0)}/{summary.get('total', 0)}` completed "
 		f"(Pass: `{summary.get('pass', 0)}`, Attention: `{summary.get('attention', 0)}`, Fail: `{summary.get('fail', 0)}`)",
 	])

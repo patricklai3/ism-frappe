@@ -139,29 +139,44 @@ def get_calendar_events(start, end, filters=None):
 	end_date = getdate(end)
 	query_filters, or_filters = _build_calendar_query_filters(start_date, end_date, filters)
 
+	from ism.utils.vehicle_display import build_vehicle_display_dict, get_vehicle_display_map
+
+	query_fields = [
+		"name",
+		"title",
+		"scheduled_date",
+		"scheduled_time",
+		"estimated_duration",
+		"completion_date",
+		"completion_time",
+		"status",
+		"service_bay",
+		"assigned_technician",
+		"repair_order",
+		"entry_type",
+		"customer",
+		"provisional_customer_name",
+		"repair_vehicle",
+		"provisional_vehicle_info",
+		"provisional_vehicle_year",
+		"provisional_vehicle_model",
+		"provisional_vin_or_plate",
+	]
+	if frappe.db.has_column("Schedule Entry", "provisional_vehicle_color"):
+		query_fields.append("provisional_vehicle_color")
+	if frappe.db.has_column("Schedule Entry", "provisional_license_plate"):
+		query_fields.append("provisional_license_plate")
+
 	entries = frappe.get_list(
 		"Schedule Entry",
 		filters=query_filters,
 		or_filters=or_filters,
-		fields=[
-			"name",
-			"title",
-			"scheduled_date",
-			"scheduled_time",
-			"estimated_duration",
-			"completion_date",
-			"completion_time",
-			"status",
-			"service_bay",
-			"assigned_technician",
-			"repair_order",
-			"entry_type",
-			"customer",
-			"provisional_customer_name",
-			"repair_vehicle",
-			"provisional_vehicle_info",
-		],
+		fields=query_fields,
 		order_by="scheduled_date asc, scheduled_time asc",
+	)
+
+	vehicle_map = get_vehicle_display_map(
+		[entry.get("repair_vehicle") for entry in entries if entry.get("repair_vehicle")]
 	)
 
 	events = []
@@ -188,6 +203,22 @@ def get_calendar_events(start, end, filters=None):
 		color = STATUS_COLORS.get(entry.status, "#2196f3")
 		title = entry.title or f"{entry.name} ({entry.entry_type or 'Appointment'})"
 
+		veh_name = entry.get("repair_vehicle")
+		if veh_name and veh_name in vehicle_map:
+			v_info = vehicle_map[veh_name]
+		else:
+			v_info = build_vehicle_display_dict(
+				{
+					"model_year": entry.get("provisional_vehicle_year"),
+					"model": entry.get("provisional_vehicle_model"),
+					"color": entry.get("provisional_vehicle_color"),
+					"license_plate": entry.get("provisional_license_plate"),
+					"vin": entry.get("provisional_vin_or_plate"),
+					"display_title": entry.get("provisional_vehicle_info"),
+				},
+				fallback=entry.get("provisional_vehicle_info") or veh_name or "",
+			)
+
 		events.append({
 			"name": entry.name,
 			"title": title,
@@ -200,6 +231,9 @@ def get_calendar_events(start, end, filters=None):
 			"assigned_technician": entry.assigned_technician,
 			"repair_order": entry.repair_order,
 			"entry_type": entry.entry_type,
+			"vehicle_display": v_info.get("display") or "",
+			"vehicle_compact_display": v_info.get("compact_display") or "",
+			"vehicle_info": v_info,
 		})
 
 	return events

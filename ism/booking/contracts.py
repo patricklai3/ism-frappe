@@ -130,6 +130,7 @@ class BookingConfirmationPayload:
 	notifications: dict[str, Any]
 	shop: dict[str, Any]
 	pin_to_drive: dict[str, Any] | None = None
+	vehicle_info: dict[str, Any] | None = None
 
 	def to_dict(self) -> dict[str, Any]:
 		return asdict(self)

@@ -3,6 +3,7 @@
 {% block head_include %}
 <meta name="referrer" content="no-referrer" />
 <meta name="ism-csrf-token" content="{{ csrf_token }}">
+<link rel="stylesheet" href="/assets/ism/shared/vehicle_display.css?v={{ asset_version or '1' }}">
 <link rel="stylesheet" href="/assets/ism/portal/portal.css?v={{ asset_version or '1' }}">
 {% endblock %}
 
@@ -21,6 +22,15 @@
 			<p class="portal-ssr-ref">
 				{{ _("Estimate Reference") }}: <strong>{{ approval_data.repair_order.name }}</strong>
 			</p>
+			{% if approval_data.vehicle and (approval_data.vehicle.display or approval_data.vehicle.model or approval_data.vehicle.vin) %}
+			<p class="portal-ssr-vehicle ism-vd">
+				{% if approval_data.vehicle.model_year %}<span class="ism-vd-year">{{ approval_data.vehicle.model_year }}</span>{% endif %}
+				{% if approval_data.vehicle.color %}<span class="ism-vd-color">{{ approval_data.vehicle.color }}</span>{% endif %}
+				{% if approval_data.vehicle.model %}<span class="ism-vd-model">{{ approval_data.vehicle.model }}</span>{% endif %}
+				{% if approval_data.vehicle.license_plate %}<span class="ism-vd-plate">({{ approval_data.vehicle.license_plate }})</span>{% endif %}
+				{% if approval_data.vehicle.vin %}<span class="ism-vd-vin">{{ approval_data.vehicle.vin }}</span>{% endif %}
+			</p>
+			{% endif %}
 			{% if approval_data.already_submitted %}
 			<div class="portal-alert portal-alert--success" role="status">
 				{{ _("Estimate authorization confirmed.") }}

@@ -186,6 +186,9 @@ def create_quote(
 	vehicle_identifier: Optional[str] = None,
 	customer: Optional[str] = None,
 	vehicle: Optional[str] = None,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	services: Optional[Union[List[Any], str]] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
@@ -202,6 +205,9 @@ def create_quote(
 		vehicle_identifier=vehicle_identifier,
 		customer=customer,
 		vehicle=vehicle,
+		vehicle_color=vehicle_color,
+		color=color,
+		license_plate=license_plate,
 		services=services,
 		parts=parts,
 		notes=notes,
@@ -857,6 +863,9 @@ def intake_and_find_slots(
 	vehicle_identifier: Optional[str] = None,
 	customer: Optional[str] = None,
 	vehicle: Optional[str] = None,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	services: Optional[Union[List[Any], str]] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
@@ -884,6 +893,9 @@ def intake_and_find_slots(
 		vehicle_identifier=vehicle_identifier,
 		customer=customer,
 		vehicle=vehicle,
+		vehicle_color=vehicle_color,
+		color=color,
+		license_plate=license_plate,
 		services=services,
 		parts=parts,
 		notes=notes,
@@ -927,12 +939,18 @@ def update_appointment_status(
 def create_ro_from_appointment(
 	schedule_entry: str,
 	odometer_in: Optional[int] = None,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Convert a pre-intake or diagnostic Schedule Entry into a Checked In Repair Order."""
 	return _create_ro_from_appointment_impl(
 		schedule_entry=schedule_entry,
 		odometer_in=odometer_in,
+		vehicle_color=vehicle_color,
+		color=color,
+		license_plate=license_plate,
 		include_summary=include_summary,
 	)
 
@@ -1074,6 +1092,9 @@ def record_check_in_inspection(
 	customer_concern: Optional[str] = None,
 	template_name: Optional[str] = None,
 	auto_apply_template: Any = False,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Record or update check-in intake fields and inspection findings on a Repair Order."""
@@ -1085,5 +1106,8 @@ def record_check_in_inspection(
 		customer_concern=customer_concern,
 		template_name=template_name,
 		auto_apply_template=auto_apply_template,
+		vehicle_color=vehicle_color,
+		color=color,
+		license_plate=license_plate,
 		include_summary=include_summary,
 	)

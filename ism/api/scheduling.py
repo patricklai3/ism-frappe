@@ -1079,16 +1079,35 @@ def _resolve_provisional_customer_for_entry(provisional_name: Optional[str]) -> 
 	return None
 
 
-def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Optional[str]) -> Optional[str]:
+def _resolve_provisional_vehicle_for_entry(
+	customer: str,
+	provisional_info: Optional[str],
+	*,
+	provisional_plate: Optional[str] = None,
+	provisional_color: Optional[str] = None,
+) -> Optional[str]:
 	"""Resolve provisional vehicle info against Repair Vehicles owned by or linked to customer."""
 	from ism.ism.doctype.repair_vehicle.vehicle_queries import build_vehicle_search_results
+	from ism.utils.vehicle_display import normalize_license_plate, normalize_vehicle_color
 
 	vehicles = build_vehicle_search_results(customer=customer, limit=50)
 	if not vehicles:
 		return None
 
+	norm_plate = normalize_license_plate(provisional_plate)
+	norm_color = normalize_vehicle_color(provisional_color)
+	if norm_plate:
+		plate_matches = [
+			v["name"]
+			for v in vehicles
+			if normalize_license_plate(v.get("license_plate")) == norm_plate
+		]
+		if len(plate_matches) == 1:
+			frappe.has_permission("Repair Vehicle", "read", doc=plate_matches[0], throw=True)
+			return plate_matches[0]
+
 	cleaned = (provisional_info or "").strip()
-	if not cleaned:
+	if not cleaned and not norm_color:
 		return vehicles[0]["name"] if len(vehicles) == 1 else None
 
 	lowered = cleaned.lower()
@@ -1099,7 +1118,8 @@ def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Opti
 				frappe.has_permission("Repair Vehicle", "read", doc=v["name"], throw=True)
 				return v["name"]
 
-	info_tokens = [tok for tok in re.split(r"[^a-z0-9]+", lowered) if tok]
+	search_blob = " ".join(part for part in (lowered, (norm_color or "").lower(), (norm_plate or "").lower()) if part)
+	info_tokens = [tok for tok in re.split(r"[^a-z0-9]+", search_blob) if tok]
 	scored: list[tuple[int, str]] = []
 	for v in vehicles:
 		haystack_parts = [
@@ -1107,6 +1127,7 @@ def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Opti
 			str(v.get("manufacturer") or ""),
 			str(v.get("model") or ""),
 			str(v.get("trim") or ""),
+			str(v.get("color") or ""),
 			str(v.get("vin") or ""),
 			str(v.get("license_plate") or ""),
 			str(v.get("name") or ""),
@@ -1115,6 +1136,9 @@ def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Opti
 		score = sum(1 for tok in info_tokens if tok in haystack_tokens)
 		model_val = str(v.get("model") or "").strip().lower()
 		if model_val and model_val in lowered:
+			score += 2
+		color_val = str(v.get("color") or "").strip().lower()
+		if norm_color and color_val and color_val == norm_color.lower():
 			score += 2
 		if score > 0:
 			scored.append((score, v["name"]))
@@ -1127,7 +1151,7 @@ def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Opti
 			return top_matches[0]
 		frappe.throw(
 			_("Ambiguous Repair Vehicle for Customer '{0}' matching '{1}': {2}.").format(
-				customer, cleaned, ", ".join(top_matches[:5])
+				customer, cleaned or norm_plate or norm_color, ", ".join(top_matches[:5])
 			),
 			frappe.ValidationError,
 		)
@@ -1142,12 +1166,20 @@ def _resolve_provisional_vehicle_for_entry(customer: str, provisional_info: Opti
 def create_repair_order_from_schedule_entry(
 	schedule_entry: str,
 	odometer_in: Optional[int] = None,
+	vehicle_color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 ) -> Dict[str, Any]:
 	"""Create a new Repair Order from a pre-intake Schedule Entry.
 
 	Carries forward Schedule Entry notes into Repair Order customer_concern,
-	and links the records together.
+	enforces vehicle color and license plate on check-in, and links the records together.
 	"""
+	from ism.utils.vehicle_display import (
+		normalize_license_plate,
+		normalize_vehicle_color,
+		validate_repair_vehicle_ready_for_check_in,
+	)
+
 	frappe.has_permission("Schedule Entry", "write", throw=True)
 	frappe.has_permission("Repair Order", "create", throw=True)
 	if not schedule_entry or not isinstance(schedule_entry, str) or not frappe.db.exists("Schedule Entry", schedule_entry):
@@ -1208,7 +1240,10 @@ def create_repair_order_from_schedule_entry(
 
 	if not se.repair_vehicle:
 		resolved_vehicle = _resolve_provisional_vehicle_for_entry(
-			se.customer, getattr(se, "provisional_vehicle_info", None)
+			se.customer,
+			getattr(se, "provisional_vehicle_info", None),
+			provisional_plate=getattr(se, "provisional_license_plate", None),
+			provisional_color=getattr(se, "provisional_vehicle_color", None),
 		)
 		if resolved_vehicle:
 			se.repair_vehicle = resolved_vehicle
@@ -1226,6 +1261,35 @@ def create_repair_order_from_schedule_entry(
 
 	if resolved_updates:
 		se.db_set(resolved_updates)
+
+	# Fill missing or updated vehicle color & license plate on Repair Vehicle before check-in validation
+	clean_color = normalize_vehicle_color(vehicle_color)
+	clean_plate = normalize_license_plate(license_plate)
+	veh_row = frappe.db.get_value(
+		"Repair Vehicle",
+		se.repair_vehicle,
+		["color", "license_plate"],
+		as_dict=True,
+	) or {}
+	existing_color = normalize_vehicle_color(veh_row.get("color"))
+	existing_plate = normalize_license_plate(veh_row.get("license_plate"))
+	fallback_color = normalize_vehicle_color(getattr(se, "provisional_vehicle_color", None))
+	fallback_plate = normalize_license_plate(getattr(se, "provisional_license_plate", None))
+
+	target_color = clean_color or (fallback_color if not existing_color else None)
+	target_plate = clean_plate or (fallback_plate if not existing_plate else None)
+	needs_color_update = bool(target_color and target_color != existing_color)
+	needs_plate_update = bool(target_plate and target_plate != existing_plate)
+	if needs_color_update or needs_plate_update:
+		veh_doc = frappe.get_doc("Repair Vehicle", se.repair_vehicle)
+		veh_doc.check_permission("write")
+		if needs_color_update:
+			veh_doc.color = target_color
+		if needs_plate_update:
+			veh_doc.license_plate = target_plate
+		veh_doc.save()
+
+	vehicle_info = validate_repair_vehicle_ready_for_check_in(se.repair_vehicle)
 
 	ro_data["customer"] = se.customer
 	ro_data["vehicle"] = se.repair_vehicle
@@ -1251,4 +1315,6 @@ def create_repair_order_from_schedule_entry(
 		"schedule_entry": se.name,
 		"odometer_in": ro.odometer_in,
 		"customer_concern": ro.customer_concern,
+		"vehicle_display": vehicle_info.get("display") or "",
+		"vehicle_info": vehicle_info,
 	}

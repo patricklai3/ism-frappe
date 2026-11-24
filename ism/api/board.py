@@ -47,6 +47,10 @@ from ism.ism.doctype.shop_action_item.clearing import (
 	CLEARING_CONDITION_DESCRIPTIONS,
 	sweep_open_action_items,
 )
+from ism.utils.vehicle_display import (
+	build_vehicle_display_dict,
+	get_vehicle_display_map,
+)
 
 
 def _parse_json_safe(raw: Any, default: Any) -> Any:
@@ -167,18 +171,44 @@ def _clearing_description_from_row(row: dict[str, Any]) -> tuple[str, dict[str, 
 	return ctype, enriched, desc
 
 
-def _serialize_thread(row: dict[str, Any] | Any) -> dict[str, Any]:
+def _serialize_thread(
+	row: dict[str, Any] | Any,
+	*,
+	vehicle_map: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
 	get = row.get if isinstance(row, dict) else lambda k, d=None: getattr(row, k, d)
 	thread_key = get("thread_key") or get("name")
 	encoded_key = quote(str(thread_key), safe="")
+	vehicle_name = get("vehicle")
+	vin = get("vin")
+	stored_display = get("vehicle_display")
+	v_info: dict[str, Any] | None = None
+	if vehicle_name:
+		if vehicle_map is not None:
+			v_info = vehicle_map.get(vehicle_name)
+		else:
+			v_info = get_vehicle_display_map([vehicle_name]).get(vehicle_name)
+	if not v_info:
+		v_info = build_vehicle_display_dict(
+			{"name": vehicle_name, "vin": vin} if (vehicle_name or vin) else None,
+			fallback=stored_display or vehicle_name or vin,
+		)
+	vehicle_display = v_info.get("display") or stored_display or ""
 	return {
 		"name": thread_key,
 		"thread_key": thread_key,
 		"thread_type": get("thread_type") or "REPAIR_ORDER",
 		"title": get("title"),
 		"repair_order": get("repair_order"),
-		"vehicle": get("vehicle"),
-		"vin": get("vin"),
+		"vehicle": vehicle_name,
+		"vin": vin or v_info.get("vin"),
+		"vehicle_display": vehicle_display,
+		"vehicle_compact_display": v_info.get("compact_display") or vehicle_display,
+		"vehicle_year": v_info.get("model_year"),
+		"vehicle_model": v_info.get("model"),
+		"vehicle_color": v_info.get("color"),
+		"license_plate": v_info.get("license_plate"),
+		"vehicle_info": v_info,
 		"customer": get("customer"),
 		"bay": get("bay"),
 		"assigned_technician": get("assigned_technician"),
@@ -198,6 +228,7 @@ def _serialize_event(
 	row: dict[str, Any] | Any,
 	*,
 	action_items_map: dict[str, dict[str, Any]] | None = None,
+	thread_vehicle_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 	get = row.get if isinstance(row, dict) else lambda k, d=None: getattr(row, k, d)
 	ev_name = get("name")
@@ -283,6 +314,19 @@ def _serialize_event(
 
 		card_schema = schema_dict
 
+	metadata = _parse_json_safe(get("metadata_json"), {})
+	if isinstance(metadata, dict) and thread_vehicle_info and (
+		metadata.get("vin") or metadata.get("repair_order") or get("repair_order")
+	):
+		metadata = dict(metadata)
+		metadata.setdefault("vehicle_display", thread_vehicle_info.get("display") or "")
+		metadata.setdefault("vehicle_compact_display", thread_vehicle_info.get("compact_display") or "")
+		metadata.setdefault("vehicle_year", thread_vehicle_info.get("model_year"))
+		metadata.setdefault("vehicle_model", thread_vehicle_info.get("model"))
+		metadata.setdefault("vehicle_color", thread_vehicle_info.get("color"))
+		metadata.setdefault("license_plate", thread_vehicle_info.get("license_plate"))
+		metadata.setdefault("vehicle_info", thread_vehicle_info)
+
 	return {
 		"name": ev_name,
 		"thread": get("thread"),
@@ -298,7 +342,7 @@ def _serialize_event(
 		"transcript": get("transcript"),
 		"action_item": action_item,
 		"confidence_score": flt(get("confidence_score")) if get("confidence_score") is not None else None,
-		"metadata": _parse_json_safe(get("metadata_json"), {}),
+		"metadata": metadata,
 		"media_attachments": media_list,
 		"card_schema": card_schema,
 		"resolution_state": resolution_state,
@@ -369,12 +413,20 @@ def _get_ro_summary(repair_order: str | None) -> dict[str, Any] | None:
 	)
 	if not ro:
 		return None
+	v_info = (
+		get_vehicle_display_map([ro.vehicle]).get(ro.vehicle)
+		if ro.vehicle
+		else build_vehicle_display_dict(None)
+	) or build_vehicle_display_dict(None, fallback=ro.vehicle)
 	return {
 		"name": ro.name,
 		"status": ro.status,
 		"approval_status": ro.approval_status,
 		"customer": ro.customer,
 		"vehicle": ro.vehicle,
+		"vehicle_display": v_info.get("display") or "",
+		"vehicle_compact_display": v_info.get("compact_display") or "",
+		"vehicle_info": v_info,
 		"odometer_in": ro.odometer_in,
 		"odometer_out": ro.odometer_out,
 		"progress_percent": flt(ro.progress_percent, 1),
@@ -553,19 +605,28 @@ def list_board_threads(
 		conditions.append("assigned_technician = %s")
 		values.append(emp_name)
 
+	has_vehicle_display_col = bool(frappe.db.has_column("Shop Board Thread", "vehicle_display"))
 	if clean_query:
 		like_val = f"%{escape_like(clean_query)}%"
-		conditions.append(
-			"(thread_key LIKE %s OR title LIKE %s OR repair_order LIKE %s OR vin LIKE %s "
-			"OR customer LIKE %s OR bay LIKE %s OR last_event_preview LIKE %s)"
-		)
-		values.extend([like_val] * 7)
+		if has_vehicle_display_col:
+			conditions.append(
+				"(thread_key LIKE %s OR title LIKE %s OR repair_order LIKE %s OR vin LIKE %s "
+				"OR vehicle_display LIKE %s OR customer LIKE %s OR bay LIKE %s OR last_event_preview LIKE %s)"
+			)
+			values.extend([like_val] * 8)
+		else:
+			conditions.append(
+				"(thread_key LIKE %s OR title LIKE %s OR repair_order LIKE %s OR vin LIKE %s "
+				"OR customer LIKE %s OR bay LIKE %s OR last_event_preview LIKE %s)"
+			)
+			values.extend([like_val] * 7)
 
 	where_sql = " AND ".join(conditions)
 	values.append(safe_limit)
+	vehicle_display_select = ", vehicle_display" if has_vehicle_display_col else ""
 	rows = frappe.db.sql(
 		f"""
-		SELECT name, thread_key, thread_type, title, repair_order, vehicle, vin, customer,
+		SELECT name, thread_key, thread_type, title, repair_order, vehicle, vin{vehicle_display_select}, customer,
 		       bay, assigned_technician, board_status, blocked_reason, blocked_since,
 		       open_action_count, open_action_card_ids, last_event_at, last_event_preview,
 		       projection_version
@@ -580,7 +641,8 @@ def list_board_threads(
 		as_dict=True,
 	)
 
-	threads = [_serialize_thread(r) for r in rows]
+	vehicle_map = get_vehicle_display_map([r.get("vehicle") for r in rows if r.get("vehicle")])
+	threads = [_serialize_thread(r, vehicle_map=vehicle_map) for r in rows]
 	return {
 		"ok": True,
 		"actor_role": actor_role,
@@ -664,8 +726,17 @@ def get_board_thread(
 		)
 
 		action_items_map = _fetch_action_items_map(page_rows + open_card_rows)
-		events = [_serialize_event(r, action_items_map=action_items_map) for r in page_rows]
-		open_cards = [_serialize_event(r, action_items_map=action_items_map) for r in open_card_rows]
+		thread_vehicle_map = get_vehicle_display_map([thread_doc.vehicle]) if thread_doc.vehicle else {}
+		serialized_thread = _serialize_thread(thread_doc, vehicle_map=thread_vehicle_map)
+		thread_vehicle_info = serialized_thread.get("vehicle_info")
+		events = [
+			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
+			for r in page_rows
+		]
+		open_cards = [
+			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
+			for r in open_card_rows
+		]
 		next_before_event = events[0]["name"] if (has_more and events) else None
 
 		ro_for_pin = thread_doc.repair_order
@@ -681,7 +752,7 @@ def get_board_thread(
 		"can_approve": actor_role == "MANAGER",
 		"can_post": can_post,
 		"read_only_reason": read_only_reason,
-		"thread": _serialize_thread(thread_doc),
+		"thread": serialized_thread,
 		"events": events,
 		"open_cards": open_cards,
 		"has_more": has_more,
@@ -830,9 +901,21 @@ def get_thread_delta(
 		)
 
 		action_items_map = _fetch_action_items_map(raw_rows + open_card_rows + ordered_updated_rows)
-		new_events = [_serialize_event(r, action_items_map=action_items_map) for r in raw_rows]
-		open_cards = [_serialize_event(r, action_items_map=action_items_map) for r in open_card_rows]
-		updated_cards = [_serialize_event(r, action_items_map=action_items_map) for r in ordered_updated_rows]
+		thread_vehicle_map = get_vehicle_display_map([thread_doc.vehicle]) if thread_doc.vehicle else {}
+		serialized_thread = _serialize_thread(thread_doc, vehicle_map=thread_vehicle_map)
+		thread_vehicle_info = serialized_thread.get("vehicle_info")
+		new_events = [
+			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
+			for r in raw_rows
+		]
+		open_cards = [
+			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
+			for r in open_card_rows
+		]
+		updated_cards = [
+			_serialize_event(r, action_items_map=action_items_map, thread_vehicle_info=thread_vehicle_info)
+			for r in ordered_updated_rows
+		]
 
 		ro_for_pin = thread_doc.repair_order
 		ro_status = frappe.db.get_value("Repair Order", ro_for_pin, "status") if ro_for_pin else None
@@ -849,7 +932,7 @@ def get_thread_delta(
 		"thread_key": canonical_key,
 		"projection_version": current_ver,
 		"changed": changed,
-		"thread": _serialize_thread(thread_doc),
+		"thread": serialized_thread,
 		"events": new_events,
 		"open_cards": open_cards,
 		"updated_cards": updated_cards,

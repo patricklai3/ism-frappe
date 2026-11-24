@@ -341,6 +341,11 @@ def get_cockpit_snapshot(
 			"provisional_customer_name",
 			"repair_vehicle",
 			"provisional_vehicle_info",
+			"provisional_vehicle_year",
+			"provisional_vehicle_model",
+			"provisional_vin_or_plate",
+			*(["provisional_vehicle_color"] if frappe.db.has_column("Schedule Entry", "provisional_vehicle_color") else []),
+			*(["provisional_license_plate"] if frappe.db.has_column("Schedule Entry", "provisional_license_plate") else []),
 			"service_bay",
 			"assigned_technician",
 			"items_summary",
@@ -375,7 +380,13 @@ def get_cockpit_snapshot(
 		order_by="creation asc, name asc",
 	)
 
+	from ism.utils.vehicle_display import get_vehicle_display_map
+
 	active_ro_names = [r["name"] for r in active_ros_raw]
+	vehicle_display_map = get_vehicle_display_map(
+		[r.get("vehicle") for r in active_ros_raw if r.get("vehicle")]
+		+ [e.get("repair_vehicle") for e in raw_entries if e.get("repair_vehicle")]
+	)
 	ro_services_meta: Dict[str, Dict[str, Any]] = {
 		name: {
 			"total_services": 0,
@@ -485,11 +496,19 @@ def get_cockpit_snapshot(
 			else ro.get("modified")
 		)
 		urls = build_ro_urls(ro_id)
+		v_name = ro.get("vehicle")
+		v_info = vehicle_display_map.get(v_name) if v_name else None
 		active_repair_orders.append({
 			"name": ro_id,
 			"company": ro.get("company"),
 			"customer": ro.get("customer"),
-			"vehicle": ro.get("vehicle"),
+			"vehicle": v_name,
+			"vehicle_display": (v_info or {}).get("display") or v_name or "",
+			"vehicle_compact_display": (v_info or {}).get("compact_display") or "",
+			"model_year": (v_info or {}).get("model_year"),
+			"model": (v_info or {}).get("model"),
+			"color": (v_info or {}).get("color"),
+			"license_plate": (v_info or {}).get("license_plate"),
 			"status": ro.get("status"),
 			"approval_status": ro.get("approval_status"),
 			"vehicle_location": ro.get("vehicle_location"),
@@ -518,6 +537,8 @@ def get_cockpit_snapshot(
 	schedule_entries: List[Dict[str, Any]] = []
 	for entry in raw_entries:
 		ro_id = entry.get("repair_order")
+		se_veh = entry.get("repair_vehicle")
+		se_v_info = vehicle_display_map.get(se_veh) if se_veh else None
 		schedule_entries.append({
 			"name": entry["name"],
 			"entry_type": entry.get("entry_type"),
@@ -529,7 +550,15 @@ def get_cockpit_snapshot(
 			"completion_time": _fmt_time(entry.get("completion_time")),
 			"repair_order": ro_id,
 			"customer": entry.get("customer") or entry.get("provisional_customer_name"),
-			"vehicle": entry.get("repair_vehicle") or entry.get("provisional_vehicle_info"),
+			"vehicle": se_veh or entry.get("provisional_vehicle_info"),
+			"vehicle_display": (se_v_info or {}).get("display") or entry.get("provisional_vehicle_info") or se_veh or "",
+			"vehicle_compact_display": (se_v_info or {}).get("compact_display") or "",
+			"provisional_vehicle_year": entry.get("provisional_vehicle_year"),
+			"provisional_vehicle_model": entry.get("provisional_vehicle_model"),
+			"provisional_vehicle_color": entry.get("provisional_vehicle_color"),
+			"provisional_license_plate": entry.get("provisional_license_plate"),
+			"provisional_vin_or_plate": entry.get("provisional_vin_or_plate"),
+			"provisional_vehicle_info": entry.get("provisional_vehicle_info"),
 			"service_bay": entry.get("service_bay"),
 			"assigned_technician": entry.get("assigned_technician"),
 			"items_summary": entry.get("items_summary"),

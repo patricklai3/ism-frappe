@@ -166,13 +166,44 @@ def record_check_in_inspection(
 	customer_concern: str | None = None,
 	template_name: str | None = None,
 	auto_apply_template: bool | int | str = False,
+	vehicle_color: str | None = None,
+	color: str | None = None,
+	license_plate: str | None = None,
 ) -> dict:
 	"""Record or update vehicle check-in intake fields and inspection item findings."""
+	from ism.utils.vehicle_display import (
+		normalize_license_plate,
+		normalize_vehicle_color,
+		validate_repair_vehicle_ready_for_check_in,
+	)
+
 	ro = _get_repair_order(repair_order, "write")
 	if template_name is not None and not isinstance(template_name, str):
 		frappe.throw(_("Inspection Template name must be a string."))
 	if customer_concern is not None and not isinstance(customer_concern, str):
 		frappe.throw(_("Customer concern must be a string."))
+	raw_color = vehicle_color if vehicle_color is not None else color
+	if raw_color is not None and not isinstance(raw_color, str):
+		frappe.throw(_("Vehicle color must be a string."))
+	if license_plate is not None and not isinstance(license_plate, str):
+		frappe.throw(_("License plate must be a string."))
+
+	if getattr(ro, "vehicle", None):
+		clean_color = normalize_vehicle_color(raw_color)
+		clean_plate = normalize_license_plate(license_plate)
+		if clean_color or clean_plate:
+			veh_doc = frappe.get_doc("Repair Vehicle", ro.vehicle)
+			veh_doc.check_permission("write")
+			changed = False
+			if clean_color and clean_color != normalize_vehicle_color(getattr(veh_doc, "color", None)):
+				veh_doc.color = clean_color
+				changed = True
+			if clean_plate and clean_plate != normalize_license_plate(getattr(veh_doc, "license_plate", None)):
+				veh_doc.license_plate = clean_plate
+				changed = True
+			if changed:
+				veh_doc.save()
+		validate_repair_vehicle_ready_for_check_in(ro.vehicle)
 
 	if _as_bool(auto_apply_template):
 		frappe.has_permission("Inspection Template", "read", throw=True)
@@ -506,11 +537,23 @@ def _build_inspection_payload(ro) -> dict:
 			"inspected_at": str(row.inspected_at) if getattr(row, "inspected_at", None) else None,
 		})
 
+	from ism.utils.vehicle_display import build_vehicle_display_dict, get_vehicle_display_map
+
+	veh_name = getattr(ro, "vehicle", None)
+	v_info = (
+		get_vehicle_display_map([veh_name]).get(veh_name)
+		if veh_name
+		else build_vehicle_display_dict(None)
+	) or build_vehicle_display_dict(None, fallback=veh_name)
+
 	total = len(items)
 	completed = total - counts["pending"]
 	return {
 		"repair_order": ro.name,
 		"status": ro.status,
+		"vehicle": veh_name,
+		"vehicle_display": v_info.get("display") or "",
+		"vehicle_info": v_info,
 		"odometer_in": ro.odometer_in,
 		"customer_concern": ro.customer_concern,
 		"check_in_date": str(ro.check_in_date) if ro.check_in_date else None,

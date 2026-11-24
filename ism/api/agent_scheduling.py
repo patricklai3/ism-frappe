@@ -580,6 +580,9 @@ def intake_and_find_slots(
 	vehicle_identifier: Optional[str] = None,
 	customer: Optional[str] = None,
 	vehicle: Optional[str] = None,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	services: Optional[Union[List[Any], str]] = None,
 	parts: Optional[Union[List[Any], str]] = None,
 	notes: Optional[str] = None,
@@ -615,6 +618,9 @@ def intake_and_find_slots(
 		vehicle_identifier=vehicle_identifier,
 		customer=customer,
 		vehicle=vehicle,
+		vehicle_color=vehicle_color,
+		color=color,
+		license_plate=license_plate,
 		services=services,
 		parts=parts,
 		notes=notes,
@@ -727,6 +733,9 @@ def update_appointment_status(
 def create_ro_from_appointment(
 	schedule_entry: str,
 	odometer_in: Optional[int] = None,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Convert a pre-intake or diagnostic Schedule Entry into a Checked In Repair Order."""
@@ -737,8 +746,15 @@ def create_ro_from_appointment(
 		frappe.throw(_("Schedule Entry {0} does not exist.").format(schedule_entry), frappe.DoesNotExistError)
 	frappe.has_permission("Schedule Entry", "write", doc=schedule_entry, throw=True)
 	validated_odometer_in = require_int(odometer_in, "Odometer In", min_val=0)
+	resolved_color = optional_str(vehicle_color, "vehicle_color") or optional_str(color, "color")
+	resolved_plate = optional_str(license_plate, "license_plate")
 
-	res = create_repair_order_from_schedule_entry(schedule_entry, odometer_in=validated_odometer_in)
+	res = create_repair_order_from_schedule_entry(
+		schedule_entry,
+		odometer_in=validated_odometer_in,
+		vehicle_color=resolved_color,
+		license_plate=resolved_plate,
+	)
 	ro_name = res["repair_order"]
 	urls = build_ro_urls(ro_name)
 	urls["calendar"] = f"{get_url()}/app/schedule-entry/view/calendar"

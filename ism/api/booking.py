@@ -269,6 +269,9 @@ def request_booking_otp(
 	email: Any = None,
 	vehicle_model: Any = None,
 	vehicle_year: Any = None,
+	vehicle_color: Any = None,
+	license_plate: Any = None,
+	vin: Any = None,
 	vin_or_plate: Any = None,
 	notes: Any = None,
 	waiter_preference: Any = None,
@@ -295,6 +298,9 @@ def request_booking_otp(
 			clean_email = optional_str(email, "email")
 			clean_model = optional_str(vehicle_model, "vehicle_model")
 			clean_year = optional_int(vehicle_year, "vehicle_year", min_val=VEHICLE_MIN_YEAR, max_val=2100)
+			clean_color = optional_str(vehicle_color, "vehicle_color")
+			clean_plate = optional_str(license_plate, "license_plate")
+			clean_vin = optional_str(vin, "vin")
 			clean_vin_or_plate = optional_str(vin_or_plate, "vin_or_plate")
 			clean_notes = optional_str(notes, "notes")
 			clean_waiter = optional_str(waiter_preference, "waiter_preference")
@@ -313,6 +319,9 @@ def request_booking_otp(
 			email=clean_email,
 			vehicle_model=clean_model,
 			vehicle_year=clean_year,
+			vehicle_color=clean_color,
+			license_plate=clean_plate,
+			vin=clean_vin,
 			vin_or_plate=clean_vin_or_plate,
 			notes=clean_notes,
 			waiter_preference=clean_waiter,
@@ -338,6 +347,9 @@ def confirm_self_serve_booking(
 	email: Any = None,
 	vehicle_model: Any = None,
 	vehicle_year: Any = None,
+	vehicle_color: Any = None,
+	license_plate: Any = None,
+	vin: Any = None,
 	vin_or_plate: Any = None,
 	notes: Any = None,
 	waiter_preference: Any = None,
@@ -367,6 +379,9 @@ def confirm_self_serve_booking(
 			clean_email = optional_str(email, "email")
 			clean_model = optional_str(vehicle_model, "vehicle_model")
 			clean_year = optional_int(vehicle_year, "vehicle_year", min_val=VEHICLE_MIN_YEAR, max_val=2100)
+			clean_color = optional_str(vehicle_color, "vehicle_color")
+			clean_plate = optional_str(license_plate, "license_plate")
+			clean_vin = optional_str(vin, "vin")
 			clean_vin_or_plate = optional_str(vin_or_plate, "vin_or_plate")
 			clean_notes = optional_str(notes, "notes")
 			clean_waiter = optional_str(waiter_preference, "waiter_preference")
@@ -388,6 +403,9 @@ def confirm_self_serve_booking(
 			email=clean_email,
 			vehicle_model=clean_model,
 			vehicle_year=clean_year,
+			vehicle_color=clean_color,
+			license_plate=clean_plate,
+			vin=clean_vin,
 			vin_or_plate=clean_vin_or_plate,
 			notes=clean_notes,
 			waiter_preference=clean_waiter,

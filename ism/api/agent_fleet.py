@@ -493,7 +493,7 @@ def search_vehicles(
 			f"### Vehicle Search ({len(vehicles)} match(es))\n"
 			+ (
 				"\n".join(
-					f"- `{v.get('name')}` | {v.get('model_year') or ''} {v.get('model') or ''} "
+					f"- {v.get('display_title') or ' '.join(str(p) for p in (v.get('model_year'), v.get('color'), v.get('model')) if p) or v.get('name')} "
 					f"| Plate: `{v.get('license_plate') or '-'}` "
 					f"| Owner: `{v.get('customer_name') or v.get('customer') or '-'}`"
 					for v in vehicles[:15]
@@ -713,6 +713,9 @@ def record_check_in_inspection(
 	customer_concern: Optional[str] = None,
 	template_name: Optional[str] = None,
 	auto_apply_template: Any = False,
+	vehicle_color: Optional[str] = None,
+	color: Optional[str] = None,
+	license_plate: Optional[str] = None,
 	include_summary: Any = False,
 ) -> Dict[str, Any]:
 	"""Record or update check-in intake fields and inspection findings on a Repair Order."""
@@ -720,6 +723,8 @@ def record_check_in_inspection(
 	repair_order = ro.name
 	template_name = optional_str(template_name, "Inspection Template")
 	customer_concern = optional_str(customer_concern, "Customer Concern")
+	resolved_color = optional_str(vehicle_color, "vehicle_color") or optional_str(color, "color")
+	resolved_plate = optional_str(license_plate, "license_plate")
 	validated_odometer_in = optional_int(odometer_in, "Odometer In", min_val=0)
 	validated_odometer = optional_int(odometer, "Odometer", min_val=0)
 	parsed_items = (
@@ -745,6 +750,8 @@ def record_check_in_inspection(
 		customer_concern=customer_concern,
 		template_name=template_name,
 		auto_apply_template=auto_apply,
+		vehicle_color=resolved_color,
+		license_plate=resolved_plate,
 	)
 	return build_agent_envelope(
 		success=True,

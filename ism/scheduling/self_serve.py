@@ -37,6 +37,12 @@ from ism.scheduling.entry_queries import (
 	is_employee_on_leave_for_date,
 	span_datetimes,
 )
+from ism.utils.vehicle_display import (
+	build_vehicle_display_dict,
+	format_vehicle_display,
+	normalize_license_plate,
+	normalize_vehicle_color,
+)
 from ism.scheduling.time_utils import (
 	calculate_working_span,
 	effective_end_time,
@@ -139,21 +145,29 @@ def _normalize_phone(phone: str) -> str:
 def _compose_provisional_vehicle_info(
 	vehicle_year: Optional[int],
 	vehicle_model: Optional[str],
-	vin_or_plate: Optional[str],
+	vin_or_plate: Optional[str] = None,
+	*,
+	vehicle_color: Optional[str] = None,
+	license_plate: Optional[str] = None,
+	vin: Optional[str] = None,
 ) -> Optional[str]:
-	parts: List[str] = []
-	if vehicle_year:
-		parts.append(str(vehicle_year))
-	if vehicle_model:
-		parts.append(vehicle_model)
-	label = " ".join(parts).strip()
-	if label and vin_or_plate:
-		return f"{label} ({vin_or_plate})"
-	if label:
-		return label
-	if vin_or_plate:
-		return vin_or_plate
-	return None
+	resolved_plate = license_plate
+	resolved_vin = vin
+	if not resolved_plate and vin_or_plate and len(vin_or_plate.strip()) != 17:
+		resolved_plate = vin_or_plate
+	if not resolved_vin and vin_or_plate and len(vin_or_plate.strip()) == 17:
+		resolved_vin = vin_or_plate
+	formatted = format_vehicle_display(
+		{
+			"model_year": vehicle_year,
+			"model": vehicle_model,
+			"color": vehicle_color,
+			"license_plate": resolved_plate,
+			"vin": resolved_vin,
+		},
+		fallback="",
+	)
+	return formatted or None
 
 
 def _get_entry_field(entry: Any, fieldname: str, default: Any = None) -> Any:
@@ -1049,6 +1063,9 @@ def normalize_provisional_intake(
 	email: Optional[str] = None,
 	vehicle_model: Optional[str] = None,
 	vehicle_year: Optional[int] = None,
+	vehicle_color: Optional[str] = None,
+	license_plate: Optional[str] = None,
+	vin: Optional[str] = None,
 	vin_or_plate: Optional[str] = None,
 	notes: Optional[str] = None,
 	waiter_preference: Optional[str] = None,
@@ -1089,14 +1106,47 @@ def normalize_provisional_intake(
 			frappe.throw(_("Vehicle year must be between 2008 and 2100."), frappe.ValidationError)
 		clean_year = parsed_year
 
-	clean_vin_or_plate: Optional[str] = None
+	if vehicle_color is not None and not isinstance(vehicle_color, str):
+		frappe.throw(_("Invalid vehicle color."), frappe.ValidationError)
+	clean_color = normalize_vehicle_color(vehicle_color)
+	if not clean_color:
+		frappe.throw(_("Vehicle color is required."), frappe.ValidationError)
+	if len(clean_color) > 60:
+		frappe.throw(_("Vehicle color cannot exceed 60 characters."), frappe.ValidationError)
+
+	clean_raw_vin_or_plate: Optional[str] = None
 	if vin_or_plate is not None and str(vin_or_plate).strip() != "":
 		if not isinstance(vin_or_plate, str):
 			frappe.throw(_("Invalid VIN or license plate."), frappe.ValidationError)
 		candidate_vp = re.sub(r"\s+", " ", vin_or_plate.strip()).upper()
 		if len(candidate_vp) > 32:
 			frappe.throw(_("VIN or license plate cannot exceed 32 characters."), frappe.ValidationError)
-		clean_vin_or_plate = candidate_vp
+		clean_raw_vin_or_plate = candidate_vp
+
+	if vin is not None and not isinstance(vin, str):
+		frappe.throw(_("Invalid VIN."), frappe.ValidationError)
+	clean_vin: Optional[str] = None
+	if vin is not None and vin.strip():
+		candidate_vin = re.sub(r"\s+", "", vin.strip()).upper()
+		if len(candidate_vin) > 32:
+			frappe.throw(_("VIN cannot exceed 32 characters."), frappe.ValidationError)
+		clean_vin = candidate_vin
+	elif clean_raw_vin_or_plate and len(clean_raw_vin_or_plate.replace(" ", "")) == 17:
+		clean_vin = clean_raw_vin_or_plate.replace(" ", "")
+
+	if license_plate is not None and not isinstance(license_plate, str):
+		frappe.throw(_("Invalid license plate."), frappe.ValidationError)
+	plate_source = license_plate
+	if (not plate_source or not plate_source.strip()) and clean_raw_vin_or_plate:
+		if len(clean_raw_vin_or_plate.replace(" ", "")) != 17:
+			plate_source = clean_raw_vin_or_plate
+	clean_plate = normalize_license_plate(plate_source)
+	if not clean_plate:
+		frappe.throw(_("License plate is required."), frappe.ValidationError)
+	if len(clean_plate) < 2 or len(clean_plate) > 20:
+		frappe.throw(_("License plate must be between 2 and 20 characters."), frappe.ValidationError)
+
+	clean_vin_or_plate: Optional[str] = clean_vin or clean_plate
 
 	clean_notes: Optional[str] = None
 	if notes is not None and str(notes).strip() != "":
@@ -1127,6 +1177,19 @@ def normalize_provisional_intake(
 		clean_year,
 		clean_model,
 		clean_vin_or_plate,
+		vehicle_color=clean_color,
+		license_plate=clean_plate,
+		vin=clean_vin,
+	)
+	vehicle_info = build_vehicle_display_dict(
+		{
+			"model_year": clean_year,
+			"model": clean_model,
+			"color": clean_color,
+			"license_plate": clean_plate,
+			"vin": clean_vin,
+		},
+		fallback=provisional_vehicle_info or "",
 	)
 
 	return {
@@ -1135,8 +1198,12 @@ def normalize_provisional_intake(
 		"email": clean_email,
 		"vehicle_model": clean_model,
 		"vehicle_year": clean_year,
+		"vehicle_color": clean_color,
+		"license_plate": clean_plate,
+		"vin": clean_vin,
 		"vin_or_plate": clean_vin_or_plate,
 		"provisional_vehicle_info": provisional_vehicle_info,
+		"vehicle_info": vehicle_info,
 		"notes": clean_notes,
 		"waiter_preference": clean_waiter,
 	}
@@ -1152,6 +1219,9 @@ def create_provisional_booking(
 	email: Optional[str] = None,
 	vehicle_model: Optional[str] = None,
 	vehicle_year: Optional[int] = None,
+	vehicle_color: Optional[str] = None,
+	license_plate: Optional[str] = None,
+	vin: Optional[str] = None,
 	vin_or_plate: Optional[str] = None,
 	notes: Optional[str] = None,
 	waiter_preference: Optional[str] = None,
@@ -1174,6 +1244,9 @@ def create_provisional_booking(
 		email=email,
 		vehicle_model=vehicle_model,
 		vehicle_year=vehicle_year,
+		vehicle_color=vehicle_color,
+		license_plate=license_plate,
+		vin=vin,
 		vin_or_plate=vin_or_plate,
 		notes=notes,
 		waiter_preference=waiter_preference,
@@ -1253,6 +1326,8 @@ def create_provisional_booking(
 			"provisional_email": intake["email"],
 			"provisional_vehicle_model": intake["vehicle_model"],
 			"provisional_vehicle_year": intake["vehicle_year"],
+			"provisional_vehicle_color": intake["vehicle_color"],
+			"provisional_license_plate": intake["license_plate"],
 			"provisional_vin_or_plate": intake["vin_or_plate"],
 			"provisional_vehicle_info": intake["provisional_vehicle_info"],
 			"items_summary": reqs["items_summary"],
@@ -1305,6 +1380,7 @@ def create_provisional_booking(
 		"packages": reqs["packages"],
 		"waiter_preference": intake["waiter_preference"],
 		"vehicle_display": intake["provisional_vehicle_info"] or se.get_display_vehicle(),
+		"vehicle_info": intake["vehicle_info"],
 	}
 
 

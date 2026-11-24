@@ -21,6 +21,11 @@ from ism.board.contracts import (
 	parse_ro_from_thread_key,
 	ro_thread_key,
 )
+from ism.utils.vehicle_display import (
+	VEHICLE_DISPLAY_FIELDS,
+	build_vehicle_display_dict,
+	format_vehicle_display,
+)
 
 
 def _board_tables_ready() -> bool:
@@ -85,26 +90,28 @@ def _build_ro_thread_metadata(ro_name: str) -> dict[str, Any]:
 
 	vehicle_name = ro.get("vehicle") or None
 	vin = None
-	vehicle_label = None
+	vehicle_display = None
+	vehicle_info: dict[str, Any] | None = None
 	if vehicle_name:
 		veh = frappe.db.get_value(
 			"Repair Vehicle",
 			vehicle_name,
-			["vin", "model_year", "model", "manufacturer"],
+			list(VEHICLE_DISPLAY_FIELDS),
 			as_dict=True,
 		)
 		if veh:
 			vin = veh.get("vin") or vehicle_name
-			parts = [str(veh.get("model_year") or "").strip(), str(veh.get("model") or "").strip()]
-			vehicle_label = (
-				" ".join(p for p in parts if p) or str(veh.get("manufacturer") or "").strip() or vehicle_name
-			)
+			vehicle_info = build_vehicle_display_dict(veh, fallback=vehicle_name)
+			vehicle_display = vehicle_info.get("display") or format_vehicle_display(veh, fallback=vehicle_name)
+		else:
+			vehicle_info = build_vehicle_display_dict(None, fallback=vehicle_name)
+			vehicle_display = vehicle_info.get("display") or vehicle_name
 
 	bay, technician = _get_active_schedule_assignment(ro_name)
 
 	title_parts = [ro_name]
-	if vehicle_label:
-		title_parts.append(vehicle_label)
+	if vehicle_display:
+		title_parts.append(vehicle_display)
 	if bay:
 		title_parts.append(bay)
 	title = _truncate(" · ".join(title_parts), 140)
@@ -114,6 +121,8 @@ def _build_ro_thread_metadata(ro_name: str) -> dict[str, Any]:
 		"title": title,
 		"vehicle": vehicle_name,
 		"vin": vin,
+		"vehicle_display": vehicle_display,
+		"vehicle_info": vehicle_info,
 		"customer": ro.get("customer") or None,
 		"bay": bay,
 		"assigned_technician": technician,
@@ -147,6 +156,7 @@ def ensure_thread_for_ro(ro_name: str) -> str:
 				"repair_order": canonical_ro,
 				"vehicle": meta.get("vehicle"),
 				"vin": meta.get("vin"),
+				"vehicle_display": meta.get("vehicle_display"),
 				"customer": meta.get("customer"),
 				"bay": meta.get("bay"),
 				"assigned_technician": meta.get("assigned_technician"),
@@ -275,6 +285,8 @@ def recompute_thread_projection(thread_key: str, *, publish: bool = True) -> dic
 			"blocked_reason": blocked_reason,
 		}
 	)
+	if frappe.db.has_column("Shop Board Thread", "vehicle_display"):
+		updates["vehicle_display"] = meta.get("vehicle_display")
 
 	prev_status = thread.board_status or "ACTIVE"
 	prev_blocked_since = thread.blocked_since
@@ -292,6 +304,11 @@ def recompute_thread_projection(thread_key: str, *, publish: bool = True) -> dic
 
 	thread.db_set(updates, update_modified=True)
 
+	vehicle_info = meta.get("vehicle_info") or build_vehicle_display_dict(
+		None, fallback=updates.get("vehicle", thread.vehicle) or updates.get("vin", thread.vin)
+	)
+	vehicle_display = meta.get("vehicle_display") or vehicle_info.get("display") or ""
+
 	payload = {
 		"thread_key": canonical_key,
 		"thread_type": "REPAIR_ORDER",
@@ -299,6 +316,13 @@ def recompute_thread_projection(thread_key: str, *, publish: bool = True) -> dic
 		"repair_order": ro_name,
 		"vehicle": updates.get("vehicle", thread.vehicle),
 		"vin": updates.get("vin", thread.vin),
+		"vehicle_display": vehicle_display,
+		"vehicle_compact_display": vehicle_info.get("compact_display") or "",
+		"vehicle_year": vehicle_info.get("model_year"),
+		"vehicle_model": vehicle_info.get("model"),
+		"vehicle_color": vehicle_info.get("color"),
+		"license_plate": vehicle_info.get("license_plate"),
+		"vehicle_info": vehicle_info,
 		"customer": updates.get("customer", thread.customer),
 		"bay": updates.get("bay", thread.bay),
 		"assigned_technician": updates.get("assigned_technician", thread.assigned_technician),
@@ -420,6 +444,17 @@ def project_external_domain_event(
 		body_text = f"{body_text}\n{details}"
 
 	metadata = {"event_type": event_type, **data}
+	if target_ro or metadata.get("vin"):
+		ro_meta = _build_ro_thread_metadata(target_ro) if target_ro else {}
+		v_info = ro_meta.get("vehicle_info")
+		if isinstance(v_info, dict):
+			metadata.setdefault("vehicle_display", v_info.get("display") or "")
+			metadata.setdefault("vehicle_compact_display", v_info.get("compact_display") or "")
+			metadata.setdefault("vehicle_year", v_info.get("model_year"))
+			metadata.setdefault("vehicle_model", v_info.get("model"))
+			metadata.setdefault("vehicle_color", v_info.get("color"))
+			metadata.setdefault("license_plate", v_info.get("license_plate"))
+			metadata.setdefault("vehicle_info", v_info)
 
 	try:
 		ev = frappe.get_doc(

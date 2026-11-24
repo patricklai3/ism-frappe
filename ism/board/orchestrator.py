@@ -227,20 +227,16 @@ def gather_ro_comms_context(thread_doc: Any, event_doc: Any) -> dict[str, Any]:
 
 				vehicle_name = ro.get("vehicle") or context["vehicle"]
 				if vehicle_name and frappe.db.exists("Repair Vehicle", vehicle_name):
+					from ism.utils.vehicle_display import VEHICLE_DISPLAY_FIELDS, format_vehicle_display
+
 					veh = frappe.db.get_value(
 						"Repair Vehicle",
 						vehicle_name,
-						["model_year", "manufacturer", "model"],
+						list(VEHICLE_DISPLAY_FIELDS),
 						as_dict=True,
 					)
 					if veh:
-						parts = [
-							str(veh.get("model_year") or "").strip(),
-							str(veh.get("manufacturer") or "").strip(),
-							str(veh.get("model") or "").strip(),
-						]
-						label = " ".join(p for p in parts if p)
-						context["vehicle"] = label or vehicle_name
+						context["vehicle"] = format_vehicle_display(veh, fallback=vehicle_name)
 					else:
 						context["vehicle"] = vehicle_name
 				else:

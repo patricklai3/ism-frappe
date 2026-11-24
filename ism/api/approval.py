@@ -397,13 +397,9 @@ def _normalize_dispatch_channel(channel: str | None) -> str:
 
 def _format_vehicle_display(vehicle_name: str | None) -> str:
 	"""Build a readable label for notification messages."""
-	if not vehicle_name:
-		return _("Vehicle")
-	v_info = frappe.db.get_value("Repair Vehicle", vehicle_name, ["model", "license_plate"], as_dict=True)
-	if not v_info:
-		return vehicle_name
-	parts = [v_info.model, f"({v_info.license_plate})" if v_info.license_plate else ""]
-	return " ".join(p for p in parts if p).strip() or vehicle_name
+	from ism.utils.vehicle_display import format_vehicle_display
+
+	return format_vehicle_display(vehicle_name, fallback=_("Vehicle"))
 
 
 def _dispatch_sms_approval(
@@ -530,22 +526,28 @@ def _dispatch_email_approval(
 
 def _get_vehicle_payload(vehicle_name: str | None) -> dict:
 	"""Fetch vehicle metadata for the approval portal."""
+	from ism.utils.vehicle_display import VEHICLE_DISPLAY_FIELDS, build_vehicle_display_dict
+
 	if not vehicle_name:
 		return {}
 	vehicle = frappe.db.get_value(
 		"Repair Vehicle",
 		vehicle_name,
-		["name", "manufacturer", "model", "model_year", "license_plate", "vin"],
+		list(VEHICLE_DISPLAY_FIELDS),
 		as_dict=True,
 	)
 	if not vehicle:
 		return {}
+	info = build_vehicle_display_dict(vehicle, fallback=vehicle_name)
 	return {
-		"make": vehicle.manufacturer or "Tesla",
-		"model": vehicle.model,
-		"model_year": vehicle.model_year,
-		"license_plate": vehicle.license_plate,
-		"vin": vehicle.vin,
+		"make": info.get("manufacturer") or "Tesla",
+		"model": info.get("model"),
+		"model_year": info.get("model_year"),
+		"color": info.get("color"),
+		"license_plate": info.get("license_plate"),
+		"vin": info.get("vin"),
+		"display": info.get("display"),
+		"compact_display": info.get("compact_display"),
 	}
 
 
