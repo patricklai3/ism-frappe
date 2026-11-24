@@ -37,6 +37,8 @@ from ism.permissions import (
 	get_employee_for_user,
 	is_ro_visible_to_user,
 )
+from ism.utils.tesla_manual import get_tesla_manual_details_for_vehicle
+from ism.utils.vehicle_display import build_vehicle_display_dict
 
 ACTIVE_RO_STATUSES: tuple[str, ...] = ("Authorized - In Progress",)
 COMPLETED_RO_STATUSES: tuple[str, ...] = ("Work Completed", "Billed / Paid")
@@ -60,10 +62,12 @@ def _parse_json_safe(raw: Any, default: Any) -> Any:
 	return default
 
 
-def _format_vehicle_from_row(veh: dict[str, Any] | None) -> dict[str, str]:
+def _format_vehicle_from_row(veh: dict[str, Any] | None) -> dict[str, Any]:
 	if not isinstance(veh, dict):
+		empty_info = build_vehicle_display_dict(None)
 		return {
 			"vehicle_display": "",
+			"vehicle_compact_display": "",
 			"vehicle_color": "",
 			"license_plate": "",
 			"vin": "",
@@ -72,42 +76,92 @@ def _format_vehicle_from_row(veh: dict[str, Any] | None) -> dict[str, str]:
 			"model": "",
 			"trim": "",
 			"drivetrain": "",
+			"vehicle_generation": "",
+			"recommended_manual_url": "",
+			"vehicle_info": empty_info,
 		}
-	color = str(veh.get("color") or "").strip()
-	model_year = str(veh.get("model_year") or "").strip()
-	manufacturer = str(veh.get("manufacturer") or "").strip()
-	model = str(veh.get("model") or "").strip()
-	plate = str(veh.get("license_plate") or "").strip()
-	vin = str(veh.get("vin") or "").strip()
-	parts = [p for p in (color, model_year, manufacturer, model) if p]
+	v_info = build_vehicle_display_dict(veh)
+	vehicle_gen = str(veh.get("vehicle_generation") or "").strip()
+	manual_url = str(veh.get("recommended_manual_url") or "").strip()
+	if (not vehicle_gen or not manual_url) and (veh.get("model") or vehicle_gen):
+		details = get_tesla_manual_details_for_vehicle(veh)
+		vehicle_gen = vehicle_gen or str(details.get("vehicle_generation") or "").strip()
+		manual_url = manual_url or str(details.get("recommended_manual_url") or "").strip()
 	return {
-		"vehicle_display": " ".join(parts),
-		"vehicle_color": color,
-		"license_plate": plate,
-		"vin": vin,
-		"model_year": model_year,
-		"manufacturer": manufacturer,
-		"model": model,
+		"vehicle_display": v_info.get("display") or str(veh.get("display_title") or "").strip(),
+		"vehicle_compact_display": v_info.get("compact_display") or "",
+		"vehicle_color": v_info.get("color") or "",
+		"license_plate": v_info.get("license_plate") or "",
+		"vin": v_info.get("vin") or "",
+		"model_year": str(v_info.get("model_year") or ""),
+		"manufacturer": str(v_info.get("manufacturer") or ""),
+		"model": str(v_info.get("model") or ""),
 		"trim": str(veh.get("trim") or "").strip(),
 		"drivetrain": str(veh.get("drivetrain") or "").strip(),
+		"vehicle_generation": vehicle_gen,
+		"recommended_manual_url": manual_url,
+		"vehicle_info": v_info,
 	}
 
 
-def _format_provisional_vehicle(se: dict[str, Any] | Any) -> dict[str, str]:
+def _format_provisional_vehicle(se: dict[str, Any] | Any) -> dict[str, Any]:
 	get = se.get if isinstance(se, dict) else lambda k, d=None: getattr(se, k, d)
-	year = str(get("provisional_vehicle_year") or "").strip()
+	year = get("provisional_vehicle_year")
 	model = str(get("provisional_vehicle_model") or "").strip()
+	color = str(get("provisional_vehicle_color") or "").strip()
+	plate = str(get("provisional_license_plate") or "").strip()
 	info = str(get("provisional_vehicle_info") or "").strip()
 	vin_or_plate = str(get("provisional_vin_or_plate") or "").strip()
+	generation = str(get("provisional_vehicle_generation") or "").strip()
 
-	display = " ".join(p for p in (year, model) if p).strip() or info
-	vin = vin_or_plate if len(vin_or_plate) == 17 else ""
-	plate = "" if vin else vin_or_plate
+	v_info = build_vehicle_display_dict(
+		{
+			"provisional_vehicle_year": year,
+			"provisional_vehicle_model": model,
+			"provisional_vehicle_color": color,
+			"provisional_license_plate": plate,
+			"provisional_vin_or_plate": vin_or_plate,
+		},
+		fallback=info,
+	)
+	manual_url = ""
+	if model or generation:
+		details = get_tesla_manual_details_for_vehicle(
+			{
+				"model": model,
+				"model_year": year,
+				"vehicle_generation": generation,
+			}
+		)
+		generation = generation or str(details.get("vehicle_generation") or "").strip()
+		manual_url = str(details.get("recommended_manual_url") or "").strip()
+
+	has_real_fields = any(
+		[
+			v_info.get("model_year"),
+			v_info.get("color"),
+			v_info.get("model"),
+			v_info.get("license_plate"),
+			v_info.get("vin"),
+			info,
+		]
+	)
+	display = v_info.get("display") if has_real_fields else ""
+	compact = v_info.get("compact_display") if has_real_fields else ""
 	return {
-		"vehicle_display": display,
-		"vehicle_color": "",
-		"license_plate": plate,
-		"vin": vin,
+		"vehicle_display": display or "",
+		"vehicle_compact_display": compact or "",
+		"vehicle_color": v_info.get("color") or "",
+		"license_plate": v_info.get("license_plate") or "",
+		"vin": v_info.get("vin") or "",
+		"model_year": str(v_info.get("model_year") or ""),
+		"manufacturer": str(v_info.get("manufacturer") or ""),
+		"model": str(v_info.get("model") or ""),
+		"trim": "",
+		"drivetrain": "",
+		"vehicle_generation": generation,
+		"recommended_manual_url": manual_url,
+		"vehicle_info": v_info,
 	}
 
 
@@ -278,6 +332,11 @@ def _matches_query(card: dict[str, Any], needle: str) -> bool:
 	haystacks = (
 		card.get("id"),
 		card.get("vehicle_display"),
+		card.get("vehicle_compact_display"),
+		card.get("vehicle_color"),
+		card.get("model_year"),
+		card.get("model"),
+		card.get("vehicle_generation"),
 		card.get("license_plate"),
 		card.get("vin"),
 		card.get("customer_name"),
@@ -376,7 +435,7 @@ def _fetch_thread_and_message_maps(ro_names: list[str]) -> tuple[dict[str, dict[
 	return thread_map, msg_map
 
 
-def _fetch_vehicle_map(vehicle_names: list[str]) -> dict[str, dict[str, str]]:
+def _fetch_vehicle_map(vehicle_names: list[str]) -> dict[str, dict[str, Any]]:
 	unique_names = list(dict.fromkeys(v for v in vehicle_names if v))
 	if not unique_names:
 		return {}
@@ -385,6 +444,7 @@ def _fetch_vehicle_map(vehicle_names: list[str]) -> dict[str, dict[str, str]]:
 		filters={"name": ["in", unique_names]},
 		fields=[
 			"name",
+			"display_title",
 			"color",
 			"model_year",
 			"manufacturer",
@@ -393,6 +453,10 @@ def _fetch_vehicle_map(vehicle_names: list[str]) -> dict[str, dict[str, str]]:
 			"vin",
 			"trim",
 			"drivetrain",
+			"drive_unit",
+			"manufactured_month",
+			"vehicle_generation",
+			"recommended_manual_url",
 		],
 	)
 	return {str(r["name"]): _format_vehicle_from_row(r) for r in rows if r.get("name")}
@@ -534,7 +598,8 @@ def list_my_jobs(
 			f"""
 			SELECT name, status, entry_type, waiter_preference, repair_vehicle, customer,
 			       provisional_customer_name, provisional_vehicle_info, provisional_vehicle_model,
-			       provisional_vehicle_year, provisional_vin_or_plate, service_bay,
+			       provisional_vehicle_year, provisional_vehicle_color, provisional_license_plate,
+			       provisional_vehicle_generation, provisional_vin_or_plate, service_bay,
 			       scheduled_date, scheduled_time, estimated_duration, pin_to_drive_status, modified
 			FROM `tabSchedule Entry`
 			WHERE {se_where}
@@ -593,9 +658,16 @@ def list_my_jobs(
 			"lifecycle_state": lifecycle_state,
 			"vehicle_location": ro.get("vehicle_location") or "In Customer Lot",
 			"vehicle_display": v_meta["vehicle_display"],
+			"vehicle_compact_display": v_meta["vehicle_compact_display"],
 			"vehicle_color": v_meta["vehicle_color"],
 			"license_plate": v_meta["license_plate"],
 			"vin": v_meta["vin"],
+			"model_year": v_meta["model_year"],
+			"manufacturer": v_meta["manufacturer"],
+			"model": v_meta["model"],
+			"vehicle_generation": v_meta["vehicle_generation"],
+			"recommended_manual_url": v_meta["recommended_manual_url"],
+			"vehicle_info": v_meta["vehicle_info"],
 			"customer_name": customer_map.get(str(ro.get("customer") or ""), str(ro.get("customer") or "")),
 			"bay": sched.get("service_bay") or "",
 			"scheduled_date": str(sched["scheduled_date"]) if sched.get("scheduled_date") else None,
@@ -637,9 +709,16 @@ def list_my_jobs(
 			"entry_type": se.get("entry_type") or "",
 			"waiter_preference": se.get("waiter_preference") or "",
 			"vehicle_display": v_meta["vehicle_display"],
+			"vehicle_compact_display": v_meta["vehicle_compact_display"],
 			"vehicle_color": v_meta["vehicle_color"],
 			"license_plate": v_meta["license_plate"],
 			"vin": v_meta["vin"],
+			"model_year": v_meta["model_year"],
+			"manufacturer": v_meta["manufacturer"],
+			"model": v_meta["model"],
+			"vehicle_generation": v_meta["vehicle_generation"],
+			"recommended_manual_url": v_meta["recommended_manual_url"],
+			"vehicle_info": v_meta["vehicle_info"],
 			"customer_name": cust_name,
 			"bay": se.get("service_bay") or "",
 			"scheduled_date": str(se["scheduled_date"]) if se.get("scheduled_date") else None,
@@ -701,6 +780,7 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 				ro.vehicle,
 				[
 					"name",
+					"display_title",
 					"color",
 					"model_year",
 					"manufacturer",
@@ -709,6 +789,10 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 					"vin",
 					"trim",
 					"drivetrain",
+					"drive_unit",
+					"manufactured_month",
+					"vehicle_generation",
+					"recommended_manual_url",
 				],
 				as_dict=True,
 			)
@@ -775,6 +859,7 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 					"completed_by": getattr(row, "completed_by", None) or None,
 					"is_supplement": cint(getattr(row, "is_supplement", 0)),
 					"advisor_notes": getattr(row, "advisor_notes", None) or "",
+					"applicable_generation": getattr(row, "applicable_generation", None) or "",
 					"tesla_manual_url": getattr(row, "tesla_manual_url", None) or "",
 					"parts": _parse_service_parts_no_price(getattr(row, "parts", None)),
 				}
@@ -845,6 +930,7 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 			"lifecycle_state": lifecycle_state,
 			"vehicle_location": ro.vehicle_location or "In Customer Lot",
 			"vehicle_display": v_meta["vehicle_display"],
+			"vehicle_compact_display": v_meta["vehicle_compact_display"],
 			"vehicle_color": v_meta["vehicle_color"],
 			"license_plate": v_meta["license_plate"],
 			"vin": v_meta["vin"],
@@ -853,6 +939,9 @@ def get_tech_repair_order(repair_order: str) -> dict[str, Any]:
 			"model": v_meta["model"],
 			"trim": v_meta["trim"],
 			"drivetrain": v_meta["drivetrain"],
+			"vehicle_generation": v_meta["vehicle_generation"],
+			"recommended_manual_url": v_meta["recommended_manual_url"],
+			"vehicle_info": v_meta["vehicle_info"],
 			"customer_name": customer_name,
 			"bay": sched.get("service_bay") or "",
 			"scheduled_date": str(sched["scheduled_date"]) if sched.get("scheduled_date") else None,
@@ -909,7 +998,22 @@ def get_tech_schedule_entry(schedule_entry: str) -> dict[str, Any]:
 			frappe.db.get_value(
 				"Repair Vehicle",
 				se.repair_vehicle,
-				["name", "color", "model_year", "manufacturer", "model", "license_plate", "vin"],
+				[
+					"name",
+					"display_title",
+					"color",
+					"model_year",
+					"manufacturer",
+					"model",
+					"license_plate",
+					"vin",
+					"trim",
+					"drivetrain",
+					"drive_unit",
+					"manufactured_month",
+					"vehicle_generation",
+					"recommended_manual_url",
+				],
 				as_dict=True,
 			)
 			if se.repair_vehicle
@@ -936,9 +1040,16 @@ def get_tech_schedule_entry(schedule_entry: str) -> dict[str, Any]:
 			"status": se.status or "",
 			"waiter_preference": getattr(se, "waiter_preference", None) or "",
 			"vehicle_display": v_meta["vehicle_display"],
+			"vehicle_compact_display": v_meta["vehicle_compact_display"],
 			"vehicle_color": v_meta["vehicle_color"],
 			"license_plate": v_meta["license_plate"],
 			"vin": v_meta["vin"],
+			"model_year": v_meta["model_year"],
+			"manufacturer": v_meta["manufacturer"],
+			"model": v_meta["model"],
+			"vehicle_generation": v_meta["vehicle_generation"],
+			"recommended_manual_url": v_meta["recommended_manual_url"],
+			"vehicle_info": v_meta["vehicle_info"],
 			"customer_name": customer_name,
 			"bay": se.service_bay or "",
 			"scheduled_date": str(se.scheduled_date) if se.scheduled_date else None,

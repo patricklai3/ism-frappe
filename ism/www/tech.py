@@ -23,6 +23,8 @@ from ism.utils.web_security import apply_page_security_headers, compute_asset_ve
 no_cache = 1
 
 _TECH_ASSET_PATHS: tuple[str, ...] = (
+	"shared/vehicle_display.css",
+	"shared/vehicle_display.js",
 	"board/vendor/socket.io.min.js",
 	"board/board.css",
 	"board/api.js",

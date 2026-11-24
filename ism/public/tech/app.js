@@ -268,6 +268,22 @@ function isWaiterValue(val) {
 	return s === "waiter" || s === "waiting" || s === "yes" || s === "true";
 }
 
+function renderVehicleDisplayHtml(
+	obj,
+	{ showVin = false, extraClass = "ism-veh--responsive-tight", fallback = "" } = {}
+) {
+	if (window.ISMVehicleDisplay && typeof window.ISMVehicleDisplay.renderHtml === "function") {
+		const html = window.ISMVehicleDisplay.renderHtml(obj, {
+			showVin,
+			extraClass,
+			fallback,
+		});
+		if (html) return html;
+	}
+	const text = (obj && (obj.vehicle_display || obj.display)) || fallback || "";
+	return escapeHtml(text);
+}
+
 function updateLiveTimers() {
 	// Layer 2B In Bay elapsed timer
 	const bayTimerEl = document.getElementById("ro-bay-timer");
@@ -516,10 +532,19 @@ function getFilteredJobs() {
 	const q = state.searchQuery.trim().toLowerCase();
 	if (!q) return state.jobs;
 	return state.jobs.filter((job) => {
+		if (
+			window.ISMVehicleDisplay &&
+			typeof window.ISMVehicleDisplay.matchesSearch === "function" &&
+			window.ISMVehicleDisplay.matchesSearch(job, q)
+		) {
+			return true;
+		}
 		const hay = [
 			job.id,
 			job.name,
 			job.vehicle_display,
+			job.vehicle_compact_display,
+			job.vehicle_generation,
 			job.license_plate,
 			job.vin,
 			job.bay,
@@ -576,15 +601,17 @@ function buildJobCard(job) {
 
 	const openIssues = Number(job.open_exception_count || 0);
 	const hasPin = Boolean(job.has_pin);
-	const vehicleDisplay = job.vehicle_display || id;
+	const vehicleHtml = renderVehicleDisplayHtml(job, {
+		showVin: false,
+		extraClass: "ism-veh--responsive-tight",
+		fallback: id,
+	});
 
 	const topMetaParts = [];
 	if (job.bay) topMetaParts.push(job.bay);
 	if (job.scheduled_time) topMetaParts.push(formatScheduleTime(job.scheduled_time));
 
-	const subMetaParts = [];
-	if (job.license_plate) subMetaParts.push(`Plate ${job.license_plate}`);
-	subMetaParts.push(id);
+	const subMetaParts = [id];
 	if (kind === "SCHEDULE_ENTRY" && isWaiterValue(job.waiter_preference)) {
 		subMetaParts.push("Waiter");
 	}
@@ -637,7 +664,7 @@ function buildJobCard(job) {
 				${openIssues > 0 ? `<span class="tech-pill tech-pill--issue" title="${openIssues} open exception(s)">${openIssues}</span>` : ""}
 			</div>
 		</div>
-		<div class="job-card__vehicle">${escapeHtml(vehicleDisplay)}</div>
+		<div class="job-card__vehicle">${vehicleHtml}</div>
 		<div class="job-card__meta">${escapeHtml(subMetaParts.join(" · "))}</div>
 		${footerHtml}
 	`;
@@ -748,6 +775,12 @@ function renderScheduleEntryView() {
 	const bookedItems = Array.isArray(se.booked_packages) ? se.booked_packages : [];
 	const notesText = (se.notes || "").trim();
 	const itemsSummaryText = (se.items_summary || "").trim();
+	const seVehicleHtml = renderVehicleDisplayHtml(se, {
+		showVin: false,
+		extraClass: "ism-veh--responsive-tight",
+		fallback: se.name,
+	});
+	const safeSeManualUrl = safeHttpUrl(se.recommended_manual_url);
 
 	el.seView.innerHTML = `
 		<div class="tech-mobile-subbar">
@@ -765,8 +798,8 @@ function renderScheduleEntryView() {
 
 			<div class="tech-hero__top">
 				<div class="tech-hero__vehicle-row">
-					<h2 class="tech-hero__vehicle-title">${escapeHtml(se.vehicle_display || se.name)}</h2>
-					${se.license_plate ? `<span class="plate-badge">${escapeHtml(se.license_plate)}</span>` : ""}
+					<h2 class="tech-hero__vehicle-title">${seVehicleHtml}</h2>
+					${!window.ISMVehicleDisplay && se.license_plate ? `<span class="plate-badge">${escapeHtml(se.license_plate)}</span>` : ""}
 				</div>
 				<div class="tech-hero__actions">
 					<span id="se-pin-slot" class="pin-pill-slot"></span>
@@ -778,6 +811,12 @@ function renderScheduleEntryView() {
 				${se.bay ? `<span class="tech-meta-chip">${escapeHtml(se.bay)}</span>` : ""}
 				${dateTimeChip.trim() ? `<span class="tech-meta-chip">${escapeHtml(dateTimeChip.trim())}</span>` : ""}
 				${se.customer_name ? `<span class="tech-meta-chip">Customer: ${escapeHtml(se.customer_name)}</span>` : ""}
+				${se.vehicle_generation ? `<span class="tech-meta-chip">${escapeHtml(se.vehicle_generation)}</span>` : ""}
+				${
+					safeSeManualUrl
+						? `<a class="tech-meta-chip tech-meta-chip--link" href="${escapeHtml(safeSeManualUrl)}" target="_blank" rel="noopener noreferrer">Tesla Service Manual &#8599;</a>`
+						: ""
+				}
 				${se.vin ? `<span class="tech-meta-chip">VIN: ${escapeHtml(se.vin)}</span>` : ""}
 			</div>
 		</section>
@@ -1243,6 +1282,13 @@ function renderRepairOrderView() {
 		`
 			: "";
 
+	const roVehicleHtml = renderVehicleDisplayHtml(ro, {
+		showVin: false,
+		extraClass: "ism-veh--responsive-tight",
+		fallback: ro.name,
+	});
+	const safeRoManualUrl = safeHttpUrl(ro.recommended_manual_url);
+
 	el.roView.innerHTML = `
 		<div class="tech-mobile-subbar">
 			<button type="button" class="btn btn-sm btn-ghost js-back-to-jobs">&larr; My Jobs</button>
@@ -1253,8 +1299,8 @@ function renderRepairOrderView() {
 		<section class="tech-hero tech-hero--ro">
 			<div class="tech-hero__top">
 				<div class="tech-hero__vehicle-row">
-					<h2 class="tech-hero__vehicle-title">${escapeHtml(ro.vehicle_display || ro.name)}</h2>
-					${ro.license_plate ? `<span class="plate-badge">${escapeHtml(ro.license_plate)}</span>` : ""}
+					<h2 class="tech-hero__vehicle-title">${roVehicleHtml}</h2>
+					${!window.ISMVehicleDisplay && ro.license_plate ? `<span class="plate-badge">${escapeHtml(ro.license_plate)}</span>` : ""}
 				</div>
 				<div class="tech-hero__actions">
 					<span id="ro-pin-slot" class="pin-pill-slot"></span>
@@ -1274,6 +1320,12 @@ function renderRepairOrderView() {
 				}
 				${ro.odometer_in ? `<span class="tech-meta-chip">Odo In: ${escapeHtml(formatNumber(ro.odometer_in))} km</span>` : ""}
 				${ro.customer_name ? `<span class="tech-meta-chip">${escapeHtml(ro.customer_name)}</span>` : ""}
+				${ro.vehicle_generation ? `<span class="tech-meta-chip">${escapeHtml(ro.vehicle_generation)}</span>` : ""}
+				${
+					safeRoManualUrl
+						? `<a class="tech-meta-chip tech-meta-chip--link" href="${escapeHtml(safeRoManualUrl)}" target="_blank" rel="noopener noreferrer">Tesla Service Manual &#8599;</a>`
+						: ""
+				}
 			</div>
 		</section>
 
@@ -1666,11 +1718,21 @@ function renderLayer3Header() {
 		el.l3Title.textContent = roName ? `Exception Board · ${roName}` : "Exception Board";
 	}
 	if (el.l3Subtitle) {
-		const parts = [];
-		if (ro && ro.vehicle_display) parts.push(ro.vehicle_display);
-		if (ro && ro.license_plate) parts.push(`Plate ${ro.license_plate}`);
-		if ((ro && ro.bay) || (t && t.bay)) parts.push((ro && ro.bay) || (t && t.bay));
-		el.l3Subtitle.textContent = parts.join(" · ");
+		const vehSource = ro && (ro.vehicle_info || ro.vehicle_display) ? ro : t;
+		const vehHtml = vehSource
+			? renderVehicleDisplayHtml(vehSource, {
+					showVin: false,
+					extraClass: "ism-veh--responsive-tight",
+					fallback: "",
+			  })
+			: "";
+		const bay = (ro && ro.bay) || (t && t.bay) || "";
+		const gen = (ro && ro.vehicle_generation) || "";
+		const bits = [];
+		if (vehHtml) bits.push(`<span class="tech-l3-subtitle__veh">${vehHtml}</span>`);
+		if (gen) bits.push(`<span>${escapeHtml(gen)}</span>`);
+		if (bay) bits.push(`<span>${escapeHtml(bay)}</span>`);
+		el.l3Subtitle.innerHTML = bits.join('<span aria-hidden="true"> · </span>');
 	}
 	if (el.l3StatusBadge) {
 		const status = (t && t.board_status) || "ACTIVE";

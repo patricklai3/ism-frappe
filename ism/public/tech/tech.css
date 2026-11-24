@@ -585,6 +585,19 @@
 	font-weight: 700;
 }
 
+.tech-meta-chip--link {
+	border-color: rgba(56, 189, 248, 0.45);
+	background: rgba(56, 189, 248, 0.12);
+	color: var(--shop-sky);
+	font-weight: 600;
+	text-decoration: none;
+}
+
+.tech-meta-chip--link:hover {
+	background: rgba(56, 189, 248, 0.22);
+	text-decoration: underline;
+}
+
 /* Exception Board / Report Issue button */
 .tech-exception-btn {
 	min-height: 40px;
@@ -1264,6 +1277,7 @@
 }
 
 .tech-l3-header__titles {
+	flex: 1 1 auto;
 	min-width: 0;
 }
 
@@ -1276,12 +1290,24 @@
 }
 
 .tech-l3-subtitle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: nowrap;
+	min-width: 0;
 	font-size: 0.8rem;
 	color: var(--shop-text-muted);
 	margin-top: 2px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+.tech-l3-subtitle__veh {
+	display: inline-flex;
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
 }
 
 .tech-l3-header__right {

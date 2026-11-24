@@ -100,7 +100,10 @@
 .event-card,
 .portal-card,
 .portal-ssr-card,
-.ism-ro-vehicle-intro {
+.ism-ro-vehicle-intro,
+.job-card,
+.tech-hero,
+.tech-l3-header__titles {
 	container-type: inline-size;
 }
 

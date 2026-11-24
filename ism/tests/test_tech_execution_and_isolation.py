@@ -414,7 +414,7 @@ class TestTechExecutionAndIsolation(ISMTestCase):
 	def test_happy_path_execution_zero_pricing_and_mandatory_odometer(self):
 		"""Test full 4-state lifecycle, zero pricing leak, and mandatory odometer_out on every lot park."""
 		tech_user, tech_emp = self._create_user_with_roles("tech_exec", ["ISM Technician"], link_employee=True)
-		ro, _, _ = self._create_ro(
+		ro, _, veh = self._create_ro(
 			status="Authorized - In Progress",
 			approval_status="Approved",
 			odometer_in=41200,
@@ -430,10 +430,24 @@ class TestTechExecutionAndIsolation(ISMTestCase):
 		frappe.set_user(tech_user)
 		jobs = tech_api.list_my_jobs()
 		self.assertEqual(_find_keys_recursive(jobs, FORBIDDEN_PRICING_KEYS), [])
+		ro_cards = [j for j in jobs["jobs"] if j["kind"] == "REPAIR_ORDER" and j["id"] == ro.name]
+		self.assertEqual(len(ro_cards), 1)
+		expected_display = f"{veh.model_year} {veh.color} {veh.model} ({veh.license_plate})"
+		self.assertEqual(ro_cards[0]["vehicle_display"], expected_display)
+		self.assertEqual(ro_cards[0]["vehicle_compact_display"], f"{veh.color} {veh.model}")
+		self.assertEqual(ro_cards[0]["vehicle_info"]["display"], expected_display)
+		self.assertEqual(ro_cards[0]["vehicle_generation"], veh.vehicle_generation or "")
+		self.assertEqual(ro_cards[0]["recommended_manual_url"], veh.recommended_manual_url or "")
 
 		detail_1 = tech_api.get_tech_repair_order(ro.name)
 		self.assertEqual(_find_keys_recursive(detail_1, FORBIDDEN_PRICING_KEYS), [])
 		self.assertEqual(detail_1["repair_order"]["lifecycle_state"], "READY_FOR_PICKUP")
+		self.assertEqual(detail_1["repair_order"]["vehicle_display"], expected_display)
+		self.assertEqual(detail_1["repair_order"]["vehicle_info"]["display"], expected_display)
+		self.assertTrue(detail_1["repair_order"]["vehicle_generation"])
+		self.assertTrue(
+			detail_1["repair_order"]["recommended_manual_url"].startswith("https://service.tesla.com/")
+		)
 
 		# Pick up car into bay
 		picked = tech_api.pick_up_vehicle(ro.name)
@@ -589,6 +603,8 @@ class TestTechExecutionAndIsolation(ISMTestCase):
 		self.assertEqual(resp.status_code, 200)
 		html = resp.get_data(as_text=True)
 		self.assertIn("window.ISM_TECH_BOOT =", html)
+		self.assertIn("/assets/ism/shared/vehicle_display.css?v=", html)
+		self.assertIn("/assets/ism/shared/vehicle_display.js?v=", html)
 		self.assertIn("/assets/ism/tech/tech.css?v=", html)
 		self.assertIn("/assets/ism/tech/app.js?v=", html)
 
