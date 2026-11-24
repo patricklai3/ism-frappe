@@ -185,18 +185,25 @@ def emit_portal_quote_approved_event(
 		"Customer approval submitted by {0} via portal. Approval Status: {1}. Order Status: {2}."
 	).format(clean_signer, ro_doc.approval_status, ro_doc.status)
 
+	clearing_statuses = [
+		"Work Completed",
+		"Billed / Paid",
+		"Closed / Released",
+		"Cancelled",
+	]
+	if getattr(ro_doc, "status", None) != "Authorized - In Progress":
+		clearing_statuses.insert(0, "Authorized - In Progress")
+
 	clearing_type, clearing_params = build_clearing_condition_for_ro(
 		"ro_status_in",
 		ro_doc.name,
 		overrides={
-			"statuses": [
-				"Authorized - In Progress",
-				"Work Completed",
-				"Billed / Paid",
-				"Closed / Released",
-				"Cancelled",
-			],
-			"description": "When work starts, completes, or RO closes",
+			"statuses": clearing_statuses,
+			"description": (
+				"When work completes or RO closes"
+				if "Authorized - In Progress" not in clearing_statuses
+				else "When work starts, completes, or RO closes"
+			),
 		},
 	)
 

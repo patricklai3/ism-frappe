@@ -631,3 +631,73 @@ class TestTechExecutionAndIsolation(ISMTestCase):
 		with self.assertRaises(frappe.Redirect):
 			tech_page.get_context(ctx_se)
 		self.assertEqual(frappe.local.flags.redirect_location, f"/tech?ro={ro.name}")
+
+	def test_shop_action_item_isolation_and_standalone_self_service(self):
+		"""Scoped technicians see only assigned RO/SE items and their own standalone Shop Action Items."""
+		from ism.ism.doctype.shop_action_item.shop_action_item import (
+			create_shop_action_item,
+			resolve_action_item,
+		)
+
+		mgr_email, _ = self._create_user_with_roles("tech_sai_mgr", ["ISM Manager"], link_employee=False)
+		tech_a, emp_a = self._create_user_with_roles("tech_sai_a", ["ISM Technician"], link_employee=True)
+		tech_b, emp_b = self._create_user_with_roles("tech_sai_b", ["ISM Technician"], link_employee=True)
+
+		frappe.set_user(mgr_email)
+		mgr_sai = create_shop_action_item(title=f"{TEST_PREFIX}Manager Standalone SAI")
+		self.track("Shop Action Item", mgr_sai)
+
+		ro_b, cust_b, _ = self._create_ro(status="Authorized - In Progress", approval_status="Approved")
+		self.create_test_schedule_entry(
+			repair_order=ro_b.name,
+			assigned_technician=emp_b,
+			status="Confirmed",
+			entry_type="Repair",
+		)
+		ro_b_sai = create_shop_action_item(
+			title=f"{TEST_PREFIX}Tech B RO SAI",
+			reference_doctype="Repair Order",
+			reference_name=ro_b.name,
+		)
+		self.track("Shop Action Item", ro_b_sai)
+
+		# Tech A cannot see/read manager's standalone SAI or Tech B's RO-linked SAI
+		frappe.set_user(tech_a)
+		visible_for_a = set(frappe.get_list("Shop Action Item", pluck="name"))
+		self.assertNotIn(mgr_sai, visible_for_a)
+		self.assertNotIn(ro_b_sai, visible_for_a)
+		self.assertFalse(frappe.has_permission("Shop Action Item", "read", doc=mgr_sai))
+		self.assertFalse(frappe.has_permission("Shop Action Item", "read", doc=ro_b_sai))
+
+		# Tech A cannot spoof reported_by or attach non-RO/SE Customer reference
+		with self.assertRaises(frappe.PermissionError):
+			frappe.get_doc({
+				"doctype": "Shop Action Item",
+				"title": f"{TEST_PREFIX}Spoofed SAI",
+				"reported_by": mgr_email,
+			}).insert()
+
+		non_ro_sai = frappe.get_doc({
+			"doctype": "Shop Action Item",
+			"title": f"{TEST_PREFIX}Customer Ref SAI",
+			"reference_doctype": "Customer",
+			"reference_name": cust_b.name,
+		})
+		self.assertFalse(frappe.has_permission("Shop Action Item", "create", doc=non_ro_sai, user=tech_a))
+
+		# Tech A can create, list, and resolve its own standalone Shop Action Item
+		tech_a_sai = create_shop_action_item(title=f"{TEST_PREFIX}Tech A Bay Compressor")
+		self.track("Shop Action Item", tech_a_sai)
+		self.assertIn(tech_a_sai, set(frappe.get_list("Shop Action Item", pluck="name")))
+
+		resolved = resolve_action_item(tech_a_sai, resolution_notes="Compressor breaker reset")
+		self.assertEqual(resolved["status"], "success")
+		self.assertEqual(frappe.db.get_value("Shop Action Item", tech_a_sai, "status"), "Resolved")
+
+		# Tech B cannot see or read Tech A's standalone SAI (but can see ro_b_sai)
+		frappe.set_user(tech_b)
+		visible_for_b = set(frappe.get_list("Shop Action Item", pluck="name"))
+		self.assertIn(ro_b_sai, visible_for_b)
+		self.assertNotIn(tech_a_sai, visible_for_b)
+		self.assertNotIn(mgr_sai, visible_for_b)
+		self.assertFalse(frappe.has_permission("Shop Action Item", "read", doc=tech_a_sai))

@@ -71,10 +71,12 @@ def is_technician_scoped_user(user: str | None = None) -> bool:
 		return True
 
 	# Check DocPerm role permissions directly (never invokes controller has_permission hooks).
+	# Roles with Repair Order create permission (e.g., Service Advisor / Sales User) are intake/advisor
+	# roles rather than restricted technician-scoped readers.
 	try:
 		if frappe.db.exists("DocType", "Repair Order"):
 			role_perms = get_role_permissions(frappe.get_meta("Repair Order"), user=target_user)
-			if role_perms.get("read"):
+			if role_perms.get("read") and not role_perms.get("create"):
 				return True
 	except Exception:
 		return False
@@ -527,21 +529,42 @@ def shop_board_event_has_permission(doc: Any, ptype: str | None = None, user: st
 
 
 def shop_action_item_permission_query_conditions(user: str | None = None) -> str:
-	should_scope, emp = _get_scoped_employee_for_query(user)
+	target_user = _resolve_user(user)
+	should_scope, emp = _get_scoped_employee_for_query(target_user)
 	if not should_scope:
 		return ""
-	if not emp:
-		return "1=0"
-	return (
-		"(`tabShop Action Item`.`reference_doctype` = 'Repair Order' "
-		"AND EXISTS (SELECT 1 FROM `tabRepair Order` _ro "
-		"WHERE _ro.`name` = `tabShop Action Item`.`reference_name` "
-		f"AND {_ro_eligible_sql('_ro', emp)}))"
-	)
+	escaped_user = frappe.db.escape(target_user)
+	clauses = [
+		"("
+		"IFNULL(`tabShop Action Item`.`reference_doctype`, '') = '' "
+		"AND IFNULL(`tabShop Action Item`.`reference_name`, '') = '' "
+		"AND ("
+		f"`tabShop Action Item`.`reported_by` = {escaped_user} "
+		f"OR `tabShop Action Item`.`owner` = {escaped_user}"
+		")"
+		")"
+	]
+	if emp:
+		clauses.append(
+			"("
+			"`tabShop Action Item`.`reference_doctype` = 'Repair Order' "
+			"AND EXISTS (SELECT 1 FROM `tabRepair Order` _ro "
+			"WHERE _ro.`name` = `tabShop Action Item`.`reference_name` "
+			f"AND {_ro_eligible_sql('_ro', emp)})"
+			")"
+		)
+		clauses.append(
+			"("
+			"`tabShop Action Item`.`reference_doctype` = 'Schedule Entry' "
+			"AND EXISTS (SELECT 1 FROM `tabSchedule Entry` _se "
+			"WHERE _se.`name` = `tabShop Action Item`.`reference_name` "
+			f"AND _se.`assigned_technician` = {frappe.db.escape(emp)})"
+			")"
+		)
+	return "(" + " OR ".join(clauses) + ")"
 
 
 def shop_action_item_has_permission(doc: Any, ptype: str | None = None, user: str | None = None) -> bool:
-	_ = ptype
 	target_user = _resolve_user(user)
 	if not target_user or target_user == "Guest":
 		return False
@@ -554,16 +577,34 @@ def shop_action_item_has_permission(doc: Any, ptype: str | None = None, user: st
 		row = frappe.db.get_value(
 			"Shop Action Item",
 			doc,
-			["reference_doctype", "reference_name"],
+			["reference_doctype", "reference_name", "reported_by", "owner"],
 			as_dict=True,
 		)
-		ref_dt = row.get("reference_doctype") if row else None
-		ref_name = row.get("reference_name") if row else None
+		if not row:
+			return False
+		ref_dt = str(row.get("reference_doctype") or "").strip()
+		ref_name = str(row.get("reference_name") or "").strip()
+		reported_by = str(row.get("reported_by") or "").strip()
+		owner = str(row.get("owner") or "").strip()
 	else:
-		ref_dt = getattr(doc, "reference_doctype", None)
-		ref_name = getattr(doc, "reference_name", None)
+		ref_dt = str(getattr(doc, "reference_doctype", None) or "").strip()
+		ref_name = str(getattr(doc, "reference_name", None) or "").strip()
+		reported_by = str(getattr(doc, "reported_by", None) or "").strip()
+		owner = str(getattr(doc, "owner", None) or "").strip()
 
-	return bool(ref_dt == "Repair Order" and ref_name and is_ro_visible_to_user(ref_name, target_user))
+	if ref_dt == "Repair Order":
+		return bool(ref_name and is_ro_visible_to_user(ref_name, target_user))
+	if ref_dt == "Schedule Entry":
+		return bool(ref_name and is_schedule_entry_assigned_to_user(ref_name, target_user))
+	if not ref_dt and not ref_name:
+		if ptype == "create":
+			if reported_by and reported_by != target_user:
+				return False
+			if owner and owner != target_user:
+				return False
+			return True
+		return bool(reported_by == target_user or owner == target_user)
+	return False
 
 
 __all__ = [
