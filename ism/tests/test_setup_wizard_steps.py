@@ -381,6 +381,8 @@ class TestSetupWizardSteps(ISMTestCase):
 		self.assertEqual(creds.get("user"), agent_email)
 		self.assertTrue(creds.get("api_key"))
 		self.assertTrue(creds.get("api_secret"))
+		# result.handoff must not leak plaintext api_secret
+		self.assertNotIn(creds["api_secret"], json.dumps(agent_res.get("result") or {}))
 		agent_verify = setup_wizard_api.verify_step("agent_os_setup", options={"email": agent_email})
 		self.assertTrue(agent_verify["passed"], f"agent_os_setup verify failed: {agent_verify}")
 
