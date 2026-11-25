@@ -11,6 +11,7 @@ from typing import Any
 import frappe
 from frappe.utils import cint, getdate, today
 
+from ism.api.parts_stock import _find_company_warehouse, _get_stock_settings_default_warehouse
 from ism.scheduling.capacity import ShopCapacityWindow
 from ism.setup_wizard.base import build_desk_link, normalize_records_list
 from ism.setup_wizard.contracts import (
@@ -99,6 +100,22 @@ def _normalize_equipment_tag_names(raw: Any) -> list[str]:
 	return out
 
 
+def _resolve_default_warehouse(company: str | None) -> tuple[str, str]:
+	"""Resolve default warehouse via Stock Settings (if field exists) or active company Warehouse fallback."""
+	stock_wh = (_get_stock_settings_default_warehouse() or "").strip()
+	if stock_wh:
+		return stock_wh, "Stock Settings.default_warehouse"
+	comp_wh = (_find_company_warehouse(company) or "").strip() if company else ""
+	if comp_wh:
+		return comp_wh, "Company Warehouse"
+	fallback_wh = (
+		frappe.db.get_value("Warehouse", {"is_group": 0, "disabled": 0}, "name") or ""
+	).strip()
+	if fallback_wh:
+		return fallback_wh, "Warehouse"
+	return "", ""
+
+
 def _ensure_equipment_tag(tag_name: str, description: str = "") -> str:
 	"""Upsert Equipment Tag and return 'created', 'updated', or 'unchanged'."""
 	if not frappe.db.exists("Equipment Tag", tag_name):
@@ -176,7 +193,7 @@ class WorkshopBaysAndBinsStep(SettingsSectionStep):
 
 	def get_schema(self, ctx: SetupContext) -> dict[str, Any]:
 		schema = super().get_schema(ctx)
-		default_wh = (frappe.db.get_single_value("Stock Settings", "default_warehouse") or "").strip()
+		default_wh, _wh_src = _resolve_default_warehouse(ctx.company)
 		schema["fields"].extend([
 			{
 				"fieldname": "default_warehouse",
@@ -248,7 +265,7 @@ class WorkshopBaysAndBinsStep(SettingsSectionStep):
 				)
 			)
 
-		default_wh = (frappe.db.get_single_value("Stock Settings", "default_warehouse") or "").strip()
+		default_wh, wh_source = _resolve_default_warehouse(ctx.company)
 		valid_wh = bool(
 			default_wh
 			and frappe.db.exists("Warehouse", {"name": default_wh, "is_group": 0, "disabled": 0})
@@ -258,7 +275,7 @@ class WorkshopBaysAndBinsStep(SettingsSectionStep):
 				CheckResult(
 					code="default_warehouse",
 					level=CHECK_PASS,
-					message=f"Stock Settings.default_warehouse is '{default_wh}'.",
+					message=f"Default parts warehouse is '{default_wh}' (via {wh_source}).",
 				)
 			)
 		else:
@@ -267,11 +284,11 @@ class WorkshopBaysAndBinsStep(SettingsSectionStep):
 					code="default_warehouse",
 					level=CHECK_FAIL,
 					message=(
-						f"Stock Settings.default_warehouse '{default_wh}' is invalid or disabled."
+						f"Configured default warehouse '{default_wh}' is invalid or disabled."
 						if default_wh
-						else "Stock Settings.default_warehouse is not set."
+						else "No active non-group Warehouse is configured."
 					),
-					remediation="Configure a valid active non-group Default Warehouse in Stock Settings.",
+					remediation="Configure a valid active non-group Warehouse for the Company.",
 				)
 			)
 
@@ -365,7 +382,9 @@ class WorkshopBaysAndBinsStep(SettingsSectionStep):
 		# 1. Optional default_warehouse
 		req_wh = str(payload.get("default_warehouse") or "").strip()
 		if req_wh:
-			if frappe.db.exists("Warehouse", {"name": req_wh, "is_group": 0, "disabled": 0}):
+			if not frappe.db.exists("Warehouse", {"name": req_wh, "is_group": 0, "disabled": 0}):
+				warnings.append(f"Warehouse '{req_wh}' does not exist or is disabled; skipped.")
+			elif frappe.db.exists("DocType", "Stock Settings") and frappe.get_meta("Stock Settings").has_field("default_warehouse"):
 				stock_settings = frappe.get_single("Stock Settings")
 				if (stock_settings.default_warehouse or "").strip() != req_wh:
 					stock_settings.default_warehouse = req_wh
@@ -373,10 +392,19 @@ class WorkshopBaysAndBinsStep(SettingsSectionStep):
 					updated.append(f"Stock Settings.default_warehouse={req_wh}")
 				else:
 					unchanged.append(f"Stock Settings.default_warehouse={req_wh}")
+			elif ctx.company and frappe.db.has_column("Company", "default_warehouse"):
+				cur_wh = (frappe.db.get_value("Company", ctx.company, "default_warehouse") or "").strip()
+				if cur_wh != req_wh:
+					frappe.db.set_value("Company", ctx.company, "default_warehouse", req_wh)
+					updated.append(f"Company.default_warehouse={req_wh}")
+				else:
+					unchanged.append(f"Company.default_warehouse={req_wh}")
 			else:
-				warnings.append(f"Warehouse '{req_wh}' does not exist or is disabled; skipped.")
+				unchanged.append(f"Warehouse: {req_wh}")
 
-		default_wh = (frappe.db.get_single_value("Stock Settings", "default_warehouse") or "").strip()
+		default_wh, _wh_src = _resolve_default_warehouse(ctx.company)
+		if req_wh and frappe.db.exists("Warehouse", {"name": req_wh, "is_group": 0, "disabled": 0}):
+			default_wh = req_wh
 
 		# 2. Upsert Equipment Tags
 		if payload.get("equipment_tags"):

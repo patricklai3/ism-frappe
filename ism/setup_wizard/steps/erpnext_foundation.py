@@ -10,6 +10,7 @@ from typing import Any
 import frappe
 from frappe.utils import cint, getdate, today
 
+from ism.api.parts_stock import _find_company_warehouse, _get_stock_settings_default_warehouse
 from ism.setup_tasks.seed import ensure_square_bank_account_and_mop, setup_parts_item_group
 from ism.setup_tasks.taxes import (
 	_get_existing_company_tax_template,
@@ -42,6 +43,28 @@ CORE_BILLING_ITEMS: tuple[tuple[str, str, str], ...] = (
 	("ENV-DISPOSAL-FEE", "Environmental Disposal Fee", "Unit"),
 	("CUST-SUPPLIED-PART", "Customer Supplied Part", "Nos"),
 )
+
+
+def _safe_get_single_value(doctype: str, fieldname: str) -> Any:
+	if frappe.db.exists("DocType", doctype) and frappe.get_meta(doctype).has_field(fieldname):
+		return frappe.db.get_single_value(doctype, fieldname)
+	return None
+
+
+def _resolve_default_warehouse(company: str | None) -> tuple[str, str]:
+	"""Resolve default warehouse via Stock Settings (if field exists) or active company Warehouse fallback."""
+	stock_wh = (_get_stock_settings_default_warehouse() or "").strip()
+	if stock_wh:
+		return stock_wh, "Stock Settings.default_warehouse"
+	comp_wh = (_find_company_warehouse(company) or "").strip() if company else ""
+	if comp_wh:
+		return comp_wh, "Company Warehouse"
+	fallback_wh = (
+		frappe.db.get_value("Warehouse", {"is_group": 0, "disabled": 0}, "name") or ""
+	).strip()
+	if fallback_wh:
+		return fallback_wh, "Warehouse"
+	return "", ""
 
 
 def _resolve_active_fiscal_years(target_date: Any) -> list[str]:
@@ -142,8 +165,8 @@ class ERPNextFoundationStep(BaseSetupStep):
 		return urls
 
 	def get_schema(self, ctx: SetupContext) -> dict[str, Any]:
-		default_warehouse = frappe.db.get_single_value("Stock Settings", "default_warehouse")
-		selling_price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+		default_warehouse, _wh_src = _resolve_default_warehouse(ctx.company)
+		selling_price_list = _safe_get_single_value("Selling Settings", "selling_price_list")
 		return {
 			"step_id": self.meta.id,
 			"meta": self.meta.to_dict(),
@@ -217,7 +240,7 @@ class ERPNextFoundationStep(BaseSetupStep):
 		checks: list[CheckResult] = []
 
 		# 1. Global Defaults.default_company
-		default_company = (frappe.db.get_single_value("Global Defaults", "default_company") or "").strip()
+		default_company = (_safe_get_single_value("Global Defaults", "default_company") or "").strip()
 		company_name = default_company or (ctx.company or "")
 		if not default_company:
 			checks.append(
@@ -361,7 +384,7 @@ class ERPNextFoundationStep(BaseSetupStep):
 
 		# 4. Selling & Buying Settings
 		selling_price_list = (
-			frappe.db.get_single_value("Selling Settings", "selling_price_list") or ""
+			_safe_get_single_value("Selling Settings", "selling_price_list") or ""
 		).strip()
 		if selling_price_list:
 			checks.append(
@@ -382,7 +405,7 @@ class ERPNextFoundationStep(BaseSetupStep):
 			)
 
 		buying_price_list = (
-			frappe.db.get_single_value("Buying Settings", "buying_price_list") or ""
+			_safe_get_single_value("Buying Settings", "buying_price_list") or ""
 		).strip()
 		checks.append(
 			CheckResult(
@@ -396,8 +419,8 @@ class ERPNextFoundationStep(BaseSetupStep):
 			)
 		)
 
-		# 5. Stock Settings.default_warehouse
-		default_wh = (frappe.db.get_single_value("Stock Settings", "default_warehouse") or "").strip()
+		# 5. Default Warehouse (Stock Settings.default_warehouse if field exists, else active Company Warehouse)
+		default_wh, wh_source = _resolve_default_warehouse(company_name or ctx.company)
 		valid_wh = bool(
 			default_wh
 			and frappe.db.exists("Warehouse", {"name": default_wh, "is_group": 0, "disabled": 0})
@@ -407,7 +430,7 @@ class ERPNextFoundationStep(BaseSetupStep):
 				CheckResult(
 					code="default_warehouse",
 					level=CHECK_PASS,
-					message=f"Stock Settings.default_warehouse is '{default_wh}'.",
+					message=f"Default parts warehouse is '{default_wh}' (via {wh_source}).",
 				)
 			)
 		else:
@@ -416,11 +439,11 @@ class ERPNextFoundationStep(BaseSetupStep):
 					code="default_warehouse",
 					level=CHECK_FAIL,
 					message=(
-						f"Stock Settings.default_warehouse '{default_wh}' is invalid or disabled."
+						f"Configured default warehouse '{default_wh}' is invalid or disabled."
 						if default_wh
-						else "Stock Settings.default_warehouse is not configured."
+						else "No active non-group Warehouse is configured."
 					),
-					remediation="Set an active non-group Default Warehouse in Stock Settings.",
+					remediation="Create or enable an active non-group Warehouse for the Company.",
 				)
 			)
 
@@ -501,7 +524,7 @@ class ERPNextFoundationStep(BaseSetupStep):
 
 		# 9. Accounts Settings.add_taxes_from_taxes_and_charges_template
 		auto_tax = cint(
-			frappe.db.get_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template")
+			_safe_get_single_value("Accounts Settings", "add_taxes_from_taxes_and_charges_template")
 			or 0
 		)
 		checks.append(
@@ -622,7 +645,7 @@ class ERPNextFoundationStep(BaseSetupStep):
 		warnings: list[str] = []
 
 		company_name = (
-			frappe.db.get_single_value("Global Defaults", "default_company") or ctx.company or ""
+			_safe_get_single_value("Global Defaults", "default_company") or ctx.company or ""
 		).strip()
 
 		# 1. Optional Ontario 13% HST setup (strictly non-destructive)
@@ -710,35 +733,46 @@ class ERPNextFoundationStep(BaseSetupStep):
 				mop_doc.insert(ignore_permissions=True)
 				created.append(f"Mode of Payment: {mop_name}")
 
-		# 5. Optional default_warehouse (ONLY if currently blank)
+		# 5. Optional default_warehouse (ONLY if currently blank and Stock Settings has field)
 		req_wh = str(payload.get("default_warehouse") or "").strip()
 		if req_wh:
-			cur_wh = (frappe.db.get_single_value("Stock Settings", "default_warehouse") or "").strip()
-			if cur_wh:
-				unchanged.append(f"Stock Settings.default_warehouse={cur_wh}")
-			elif frappe.db.exists("Warehouse", {"name": req_wh, "is_group": 0, "disabled": 0}):
-				stock_settings = frappe.get_single("Stock Settings")
-				stock_settings.default_warehouse = req_wh
-				stock_settings.save(ignore_permissions=True)
-				updated.append(f"Stock Settings.default_warehouse={req_wh}")
-			else:
+			if not frappe.db.exists("Warehouse", {"name": req_wh, "is_group": 0, "disabled": 0}):
 				warnings.append(f"Warehouse '{req_wh}' does not exist or is disabled; skipped.")
+			elif frappe.db.exists("DocType", "Stock Settings") and frappe.get_meta("Stock Settings").has_field("default_warehouse"):
+				cur_wh = (_get_stock_settings_default_warehouse() or "").strip()
+				if cur_wh:
+					unchanged.append(f"Stock Settings.default_warehouse={cur_wh}")
+				else:
+					stock_settings = frappe.get_single("Stock Settings")
+					stock_settings.default_warehouse = req_wh
+					stock_settings.save(ignore_permissions=True)
+					updated.append(f"Stock Settings.default_warehouse={req_wh}")
+			elif company_name and frappe.db.has_column("Company", "default_warehouse"):
+				cur_wh = (frappe.db.get_value("Company", company_name, "default_warehouse") or "").strip()
+				if cur_wh:
+					unchanged.append(f"Company.default_warehouse={cur_wh}")
+				else:
+					frappe.db.set_value("Company", company_name, "default_warehouse", req_wh)
+					updated.append(f"Company.default_warehouse={req_wh}")
+			else:
+				unchanged.append(f"Warehouse: {req_wh}")
 
 		# 6. Optional selling_price_list (ONLY if currently blank)
 		req_pl = str(payload.get("selling_price_list") or "").strip()
 		if req_pl:
-			cur_pl = (
-				frappe.db.get_single_value("Selling Settings", "selling_price_list") or ""
-			).strip()
-			if cur_pl:
-				unchanged.append(f"Selling Settings.selling_price_list={cur_pl}")
-			elif frappe.db.exists("Price List", {"name": req_pl, "selling": 1, "enabled": 1}):
-				selling_settings = frappe.get_single("Selling Settings")
-				selling_settings.selling_price_list = req_pl
-				selling_settings.save(ignore_permissions=True)
-				updated.append(f"Selling Settings.selling_price_list={req_pl}")
-			else:
-				warnings.append(f"Selling Price List '{req_pl}' does not exist or is disabled; skipped.")
+			if frappe.db.exists("DocType", "Selling Settings") and frappe.get_meta("Selling Settings").has_field("selling_price_list"):
+				cur_pl = (
+					_safe_get_single_value("Selling Settings", "selling_price_list") or ""
+				).strip()
+				if cur_pl:
+					unchanged.append(f"Selling Settings.selling_price_list={cur_pl}")
+				elif frappe.db.exists("Price List", {"name": req_pl, "selling": 1, "enabled": 1}):
+					selling_settings = frappe.get_single("Selling Settings")
+					selling_settings.selling_price_list = req_pl
+					selling_settings.save(ignore_permissions=True)
+					updated.append(f"Selling Settings.selling_price_list={req_pl}")
+				else:
+					warnings.append(f"Selling Price List '{req_pl}' does not exist or is disabled; skipped.")
 
 		return StepApplyResult(
 			step_id=self.meta.id,
