@@ -381,6 +381,23 @@ def _deep_merge_payload(base: dict[str, Any], override: dict[str, Any]) -> dict[
 	return merged
 
 
+def _merge_preset_and_caller_payload(
+	preset_payload: dict[str, Any],
+	caller_payload: dict[str, Any],
+) -> dict[str, Any]:
+	"""Merge caller overrides onto a preset payload so caller keys always win (flat or under 'settings')."""
+	merged = _deep_merge_payload(preset_payload, caller_payload)
+	if isinstance(merged.get("settings"), dict):
+		for key, val in caller_payload.items():
+			if key not in ("settings", "secrets", "_secrets") and key in merged["settings"]:
+				merged["settings"][key] = copy.deepcopy(val)
+	if isinstance(caller_payload.get("settings"), dict):
+		for key in caller_payload["settings"]:
+			if key in merged and key not in caller_payload:
+				merged.pop(key, None)
+	return merged
+
+
 def _scrub_secret_literals(obj: Any, secret_values: list[str]) -> Any:
 	if not secret_values:
 		return obj
@@ -431,7 +448,10 @@ def apply_step(
 	if payload is not None:
 		if not isinstance(payload, dict):
 			frappe.throw(_("Step payload must be a JSON object."), frappe.ValidationError)
-		effective_payload = _deep_merge_payload(effective_payload, payload)
+		if preset:
+			effective_payload = _merge_preset_and_caller_payload(effective_payload, payload)
+		else:
+			effective_payload = _deep_merge_payload(effective_payload, payload)
 
 	secret_literals: list[str] = []
 	secret_keys: set[str] = set(get_ism_settings_password_fields())
@@ -473,11 +493,11 @@ def apply_step(
 
 	result_dict = apply_result.to_dict()
 	# Preserve explicit step handoff (e.g. one-time credentials for CLI --write-env)
-	# while scrubbing all diff arrays against any secret keys or secret literals.
-	raw_handoff = result_dict.pop("handoff", None)
+	# at top-level response["handoff"] ONLY; redact secrets inside result["handoff"]
+	# so one-time credentials never appear in plaintext twice in the HTTP response.
+	raw_handoff = copy.deepcopy(result_dict.get("handoff"))
 	scrubbed_result = redact_secret_values(result_dict, extra_secret_keys=secret_keys)
 	scrubbed_result = _scrub_secret_literals(scrubbed_result, secret_literals)
-	scrubbed_result["handoff"] = raw_handoff
 
 	inspection_dict = _scrub_secret_literals(
 		redact_secret_values(post_inspection.to_dict(), extra_secret_keys=secret_keys),
