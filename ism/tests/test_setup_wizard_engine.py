@@ -406,7 +406,7 @@ class TestSetupWizardEngine(ISMTestCase):
 			for blob in serialized_outputs:
 				self.assertNotIn(secret_val, blob)
 
-		# Verify is_set is True for the 4 configured secret fields in get_step_schema
+		# Verify is_set and is_secret remain intact booleans and secret_fields names are unredacted
 		fields_by_name = {
 			f["fieldname"]: f
 			for step_schema in schema_all["steps"]
@@ -414,8 +414,28 @@ class TestSetupWizardEngine(ISMTestCase):
 			if isinstance(f, dict) and f.get("fieldname")
 		}
 		for fieldname in secrets_map:
-			self.assertTrue(
+			self.assertIs(fields_by_name[fieldname]["is_secret"], True)
+			self.assertIs(
 				fields_by_name[fieldname]["is_set"],
+				True,
 				f"Expected is_set=True for secret field '{fieldname}'",
 			)
 			self.assertNotIn("value", fields_by_name[fieldname])
+		self.assertIs(fields_by_name["default_labor_rate"]["is_secret"], False)
+
+		sms_schema = next(s for s in schema_all["steps"] if s["step_id"] == "comms_telnyx_sms")
+		self.assertIn("telnyx_api_key", sms_schema["secret_fields"])
+		self.assertNotIn("[REDACTED]", sms_schema["secret_fields"])
+		self.assertIs(apply_res["inspection"]["counts"]["telnyx_api_key_set"], True)
+
+	def test_preset_with_flat_payload_override_on_settings_section_step(self):
+		"""Flat caller payload overrides win over preset['settings'] on SettingsSectionStep."""
+		res = setup_wizard_api.apply_step(
+			"shop_policy_pricing",
+			preset="ontario_ev_shop_policy",
+			payload={"default_labor_rate": 175.0},
+			dry_run=0,
+		)
+		self.assertEqual(res["step_id"], "shop_policy_pricing")
+		self.assertEqual(float(frappe.db.get_single_value("ISM Settings", "default_labor_rate")), 175.0)
+		self.assertEqual(str(frappe.db.get_single_value("ISM Settings", "operating_hours_start")), "8:00:00")
