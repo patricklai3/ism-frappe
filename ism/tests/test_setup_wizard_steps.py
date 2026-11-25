@@ -173,12 +173,18 @@ class TestSetupWizardSteps(ISMTestCase):
 		)
 		mgr_roles = set(frappe.get_roles(mgr_email))
 		self.assertIn(pre_existing_role, mgr_roles)
-		for expected_role in STAFF_ROLE_BUNDLES["service_advisor"]["roles"]:
+		for expected_role in STAFF_ROLE_BUNDLES["Service Advisor"]["roles"]:
 			if frappe.db.exists("Role", expected_role):
 				self.assertIn(expected_role, mgr_roles)
 
 		# Role profiles seeded
-		for rp_name in ("ISM Manager", "ISM Service Advisor", "ISM Floor Technician"):
+		for rp_name in (
+			"ISM Shop Manager",
+			"ISM Service Advisor",
+			"ISM Parts Specialist",
+			"ISM Floor Technician",
+			"ISM Agent Service Account",
+		):
 			self.assertTrue(frappe.db.exists("Role Profile", rp_name))
 
 		# Floor Technician strict isolation: rejects user with RO-create role unless strip_manager_roles=1
@@ -355,7 +361,9 @@ class TestSetupWizardSteps(ISMTestCase):
 
 		# 5. board_media_and_ai: PWA URLs present, Frappe Private File + Mock AI verify passes
 		board_schema = setup_wizard_api.get_step_schema("board_media_and_ai")["step"]
-		self.assertIn("shop_board_pwa", board_schema.get("desk_urls", {}))
+		self.assertIn("board", board_schema.get("desk_urls", {}))
+		self.assertIn("cockpit", board_schema.get("desk_urls", {}))
+		self.assertIn("tech", board_schema.get("desk_urls", {}))
 		setup_wizard_api.apply_step("board_media_and_ai", preset="local_and_mock_ai", dry_run=0)
 		board_verify = setup_wizard_api.verify_step("board_media_and_ai")
 		self.assertTrue(board_verify["passed"], f"board_media_and_ai verify failed: {board_verify}")
@@ -422,7 +430,8 @@ class TestSetupWizardSteps(ISMTestCase):
 		# Dry-run did not persist demo mode change
 		self.assertEqual(frappe.db.get_single_value("ISM Settings", "customer_journey_demo_mode"), 1)
 
-		# Live replay targeting Production strips demo mode; set to 0 explicitly first or verify stripped from replay
+		# Live replay targeting Production strips demo mode; reload before clearing
+		settings.reload()
 		settings.customer_journey_demo_mode = 0
 		settings.save(ignore_permissions=True)
 		live_replay = setup_wizard_api.apply_blueprint(

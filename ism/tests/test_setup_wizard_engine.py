@@ -318,15 +318,22 @@ class TestSetupWizardEngine(ISMTestCase):
 		self.assertTrue(skip_res["skipped"])
 		self.assertEqual(skip_res["reason"], "deferring SMS setup")
 
-		status = setup_wizard_api.get_setup_status(profile=PROFILE_PRODUCTION, include_checks=False)
-		by_id = {entry["id"]: entry for entry in status["steps"]}
-		self.assertEqual(by_id["comms_telnyx_sms"]["status"], STEP_STATUS_SKIPPED)
+		# Mock site_environment complete so Production dependency blocking does not mask 'skipped' status
+		site_step = wizard_runner.get_step("site_environment")
+		with patch.object(
+			site_step,
+			"inspect",
+			return_value=StepInspection(status=STEP_STATUS_COMPLETE, summary="mock prod ok"),
+		):
+			status = setup_wizard_api.get_setup_status(profile=PROFILE_PRODUCTION, include_checks=False)
+			by_id = {entry["id"]: entry for entry in status["steps"]}
+			self.assertEqual(by_id["comms_telnyx_sms"]["status"], STEP_STATUS_SKIPPED)
 
-		unskip_res = setup_wizard_api.skip_step("comms_telnyx_sms", unskip=1)
-		self.assertFalse(unskip_res["skipped"])
-		status_after = setup_wizard_api.get_setup_status(profile=PROFILE_PRODUCTION, include_checks=False)
-		by_id_after = {entry["id"]: entry for entry in status_after["steps"]}
-		self.assertNotEqual(by_id_after["comms_telnyx_sms"]["status"], STEP_STATUS_SKIPPED)
+			unskip_res = setup_wizard_api.skip_step("comms_telnyx_sms", unskip=1)
+			self.assertFalse(unskip_res["skipped"])
+			status_after = setup_wizard_api.get_setup_status(profile=PROFILE_PRODUCTION, include_checks=False)
+			by_id_after = {entry["id"]: entry for entry in status_after["steps"]}
+			self.assertNotEqual(by_id_after["comms_telnyx_sms"]["status"], STEP_STATUS_SKIPPED)
 
 	def test_strict_rbac_and_zero_secret_leakage(self):
 		"""Only Administrator, System Manager, and ISM Manager may call Setup Wizard APIs; zero secrets leak."""
