@@ -324,6 +324,9 @@ default_log_clearing_doctypes = {
 	"SMS Audit Log": 180,
 }
 
+# ISM Setup Wizard external step extensions (dotted paths to BaseSetupStep subclasses)
+ism_setup_wizard_steps = []
+
 # Translation
 # ------------
 # List of apps whose translatable strings should be excluded from this app's translations.
