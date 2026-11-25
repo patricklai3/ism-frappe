@@ -72,6 +72,7 @@ SECRET_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _SECRET_CONTAINER_KEYS = frozenset({"_secrets", "secrets"})
+_SAFE_METADATA_KEYS = frozenset({"is_secret", "secret_fields", "secret_keys", "secrets_keys"})
 
 
 class SecretLeakError(ValueError):
@@ -252,10 +253,21 @@ def is_secret_key(key: str, extra_secret_keys: Iterable[str] = ()) -> bool:
 	lowered = key.strip().lower()
 	if not lowered:
 		return False
+	if lowered in _SAFE_METADATA_KEYS:
+		return False
 	extra_set = {k.strip().lower() for k in extra_secret_keys if isinstance(k, str) and k.strip()}
 	if lowered in extra_set or lowered in _SECRET_CONTAINER_KEYS:
 		return True
+	if lowered.endswith("_set") or lowered.startswith(("has_", "is_")):
+		return False
 	return any(pattern.search(lowered) for pattern in SECRET_KEY_PATTERNS)
+
+
+def _redact_leaf_value(val: Any) -> Any:
+	"""Redact non-empty non-boolean secret values while preserving None, '', and booleans."""
+	if isinstance(val, bool) or val in (None, ""):
+		return val
+	return REDACTED_VALUE
 
 
 def redact_secret_values(obj: Any, extra_secret_keys: Iterable[str] = ()) -> Any:
@@ -267,26 +279,16 @@ def redact_secret_values(obj: Any, extra_secret_keys: Iterable[str] = ()) -> Any
 			key_str = str(key)
 			if key_str.strip().lower() in _SECRET_CONTAINER_KEYS:
 				if isinstance(val, dict):
-					redacted[key] = {
-						sk: (REDACTED_VALUE if sv not in (None, "") else sv)
-						for sk, sv in val.items()
-					}
-				elif val not in (None, ""):
-					redacted[key] = REDACTED_VALUE
+					redacted[key] = {sk: _redact_leaf_value(sv) for sk, sv in val.items()}
 				else:
-					redacted[key] = val
+					redacted[key] = _redact_leaf_value(val)
 			elif is_secret_key(key_str, extra_tuple):
 				if isinstance(val, dict):
-					redacted[key] = {
-						sk: (REDACTED_VALUE if sv not in (None, "") else sv)
-						for sk, sv in val.items()
-					}
+					redacted[key] = {sk: _redact_leaf_value(sv) for sk, sv in val.items()}
 				elif isinstance(val, list):
-					redacted[key] = [REDACTED_VALUE if item not in (None, "") else item for item in val]
-				elif val not in (None, ""):
-					redacted[key] = REDACTED_VALUE
+					redacted[key] = [_redact_leaf_value(item) for item in val]
 				else:
-					redacted[key] = val
+					redacted[key] = _redact_leaf_value(val)
 			else:
 				redacted[key] = redact_secret_values(val, extra_tuple)
 		return redacted
@@ -298,7 +300,7 @@ def redact_secret_values(obj: Any, extra_secret_keys: Iterable[str] = ()) -> Any
 
 
 def _is_non_empty_secret_value(value: Any) -> bool:
-	if value is None or value is False:
+	if value is None or isinstance(value, bool):
 		return False
 	if isinstance(value, str):
 		stripped = value.strip()

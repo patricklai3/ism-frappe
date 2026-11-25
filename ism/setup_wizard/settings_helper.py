@@ -305,11 +305,12 @@ class SettingsSectionStep(BaseSetupStep):
 		section_fields = self.get_section_fields()
 		field_map = {df["fieldname"]: df for df in section_fields}
 
-		raw_settings = (
-			payload.get("settings")
-			if isinstance(payload.get("settings"), dict)
-			else payload
-		) or {}
+		raw_settings: dict[str, Any] = {}
+		if isinstance(payload.get("settings"), dict):
+			raw_settings.update(payload["settings"])
+		for fn, raw_val in payload.items():
+			if fn not in ("settings", "secrets", "_secrets"):
+				raw_settings[fn] = raw_val
 		raw_secrets: dict[str, Any] = {}
 		if isinstance(payload.get("secrets"), dict):
 			raw_secrets.update(payload["secrets"])
